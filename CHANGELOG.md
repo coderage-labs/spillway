@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.2](https://github.com/coderage-labs/spillway/compare/v0.5.1...v0.5.2) (2026-08-22)
+
+
+### Fixes
+
+* keep the systemd unit called spillway.service ([05f5981](https://github.com/coderage-labs/spillway/commit/05f5981b76aa9e7bc549792e6bb2de7e965b3459))
+* three dashboard defects found by looking at it ([2b389f9](https://github.com/coderage-labs/spillway/commit/2b389f9df07016123f0ab2617de23e6ed89f414a))
+
+
+### Internal
+
+* exercise the service install for real, on each platform ([af04ed5](https://github.com/coderage-labs/spillway/commit/af04ed50cb94dd05370cde5a7649f1a0e86d2dbb))
+
 ## [0.5.1](https://github.com/coderage-labs/spillway/compare/v0.5.0...v0.5.1) (2026-08-22)
 
 
