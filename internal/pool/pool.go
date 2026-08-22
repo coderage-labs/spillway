@@ -196,6 +196,8 @@ type Pool struct {
 	mu       sync.Mutex
 	accounts []*Account
 	sticky   map[string]string // session key -> account name
+	// pinned overrides selection entirely while set (#11).
+	pinned string
 	// sessionProvider pins a session to the provider it started on. The
 	// client configured its capabilities from that first model, so switching
 	// families mid-session can change the context ceiling underneath it
@@ -332,6 +334,19 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 			}
 		}
 		return CanServe(a, body) == nil
+	}
+
+	// Before sticky: a pin is an instruction, and honouring the previous
+	// choice ahead of it would mean the switch appeared to do nothing until
+	// the session happened to rotate on its own.
+	if best := p.pinnedChoice(usable); best != nil {
+		best.addInFlight(1)
+		p.sticky[session] = best.Name
+		if p.sessionProvider == nil {
+			p.sessionProvider = map[string]string{}
+		}
+		p.sessionProvider[session] = ProviderOf(best.Type)
+		return best
 	}
 
 	if name, ok := p.sticky[session]; ok {

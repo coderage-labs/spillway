@@ -62,9 +62,17 @@ func dialAdmin() (*adminAPI, error) {
 
 // get decodes one admin endpoint into v.
 func (a *adminAPI) get(path string, v any) error {
-	req, err := http.NewRequest(http.MethodGet, a.base+path, nil)
+	return a.do(http.MethodGet, path, nil, v)
+}
+
+// do makes one authenticated call, decoding into v when v is non-nil.
+func (a *adminAPI) do(method, path string, body io.Reader, v any) error {
+	req, err := http.NewRequest(method, a.base+path, body)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if a.token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.token)
@@ -75,7 +83,17 @@ func (a *adminAPI) get(path string, v any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		// The body carries the reason — "would spend money", "changes
+		// provider" — and dropping it for a bare status code was the
+		// difference between an answer and a shrug.
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if t := strings.TrimSpace(string(msg)); t != "" {
+			return fmt.Errorf("%s (%d)", t, resp.StatusCode)
+		}
 		return fmt.Errorf("admin API %s: %d", path, resp.StatusCode)
+	}
+	if v == nil {
+		return nil
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(v)
 }

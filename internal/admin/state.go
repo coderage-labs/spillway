@@ -46,6 +46,11 @@ type stateJSON struct {
 	// because extra usage is available and permitted. They are not usable
 	// and not dry: they are the tier reached instead of holding.
 	Overage int `json:"overage"`
+	// Pinned names the account selection has been directed at, if any. In
+	// state rather than only in the pin endpoint's own response: a reader
+	// that does not know about the pin would otherwise report a pool
+	// "choosing" an account it was told to use (#11).
+	Pinned string `json:"pinned,omitempty"`
 	// Threshold is the used-fraction the selector rotates away at. Served so
 	// the dashboard draws its spill line where the pool actually spills,
 	// rather than at a constant that silently diverges once the setting is
@@ -60,6 +65,7 @@ type stateJSON struct {
 
 func (s *Server) state() stateJSON {
 	var st stateJSON
+	st.Pinned = s.pool.Pinned()
 	for _, a := range s.pool.Accounts() {
 		st.Total++
 		st.InFlight += a.InFlight()
