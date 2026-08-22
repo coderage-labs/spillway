@@ -285,6 +285,15 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 	}
 	rateTries := 0
 	for {
+		// Reset every iteration, before an account is even chosen: the only
+		// thing that should ever make modelServed disagree with modelAsked is
+		// THIS iteration's account actually getting a response back. Without
+		// this, a value set for an account that then rotated away (quota
+		// reject, failed recovery, dead connection) would leak into whatever
+		// this request ultimately logs as, if that next step never itself
+		// reaches an upstream response (pool exhaustion, cancellation, a
+		// buildRequest failure on the next account).
+		modelServed = modelAsked
 		if acct == nil {
 			acct = h.pool.SelectExcept(session, body, tried)
 			if acct == nil {
@@ -394,6 +403,15 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			return finish(name)
 		}
 
+		// A response came back from THIS account: whatever we do with it —
+		// stream it straight through or classify it into an error we hand
+		// back — it is what actually went upstream for this request, mapped
+		// model included. Set it here, once, common to every branch below
+		// (classifiable or not), rather than in each branch that eventually
+		// writes a response: a new early return added below inherits the
+		// correct value instead of needing to remember to set it.
+		modelServed = modelFor(acct)
+
 		h.pool.RecordQuota(acct, resp.Header, time.Now())
 		// The provider's own word, after the fact, that this response was
 		// billed. It outranks the prediction made at selection: the first
@@ -423,7 +441,15 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			// Terminal: stream through. Once the first byte is written no
 			// failover is possible (§6.1) — mid-stream aborts are the client's
 			// own retry behaviour.
-			modelServed = modelFor(acct)
+			//
+			// SetLastModel belongs only here, not wherever modelServed is set:
+			// this is the one branch where the account's response — success or
+			// an error status the provider doesn't classify — is what the
+			// client actually receives. Every classifiable-error branch below
+			// hands the client an upstream error instead and rotates or gives
+			// up; recording "last model served" there would let an account
+			// that just failed (or one we're about to rotate away from) claim
+			// credit for a response it didn't serve.
 			acct.SetLastModel(modelServed)
 			defer h.pool.Done(acct)
 			writeResponse(w, resp)
