@@ -22,14 +22,14 @@ import (
 	"strings"
 )
 
-const systemdUnitName = "spillway.service"
+func systemdUnitName() string { return serviceLabel + ".service" }
 
 func serviceUnitPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "systemd", "user", systemdUnitName), nil
+	return filepath.Join(dir, "systemd", "user", systemdUnitName()), nil
 }
 
 // serviceLogPaths is unused on Linux: a systemd service inherits journald, so
@@ -77,7 +77,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=` + bin + ` server
+ExecStart=` + bin + ` ` + strings.Join(serverArgs(""), " ") + `
 Restart=on-failure
 RestartSec=5
 
@@ -112,10 +112,10 @@ func serviceInstall() error {
 	}
 	// enable --now covers both cases: a fresh install starts it, and a
 	// reinstall over a running service restarts it onto the new binary.
-	if out, err := systemctl("enable", "--now", systemdUnitName); err != nil {
+	if out, err := systemctl("enable", "--now", systemdUnitName()); err != nil {
 		return fmt.Errorf("systemctl enable: %v: %s", err, out)
 	}
-	if out, err := systemctl("restart", systemdUnitName); err != nil {
+	if out, err := systemctl("restart", systemdUnitName()); err != nil {
 		return fmt.Errorf("systemctl restart: %v: %s", err, out)
 	}
 	fmt.Printf("service installed: %s\n", unit)
@@ -151,7 +151,7 @@ func serviceUninstall() error {
 	if err != nil {
 		return err
 	}
-	if out, err := systemctl("disable", "--now", systemdUnitName); err != nil {
+	if out, err := systemctl("disable", "--now", systemdUnitName()); err != nil {
 		// Not fatal: the unit may already be gone, and the file still needs
 		// removing either way.
 		fmt.Fprintf(os.Stderr, "spillway: systemctl disable: %v: %s\n", err, out)
@@ -179,10 +179,10 @@ func serviceStatus() error {
 		return nil
 	}
 	fmt.Printf("service installed (%s)\n", unit)
-	active, _ := systemctl("is-active", systemdUnitName)
-	enabled, _ := systemctl("is-enabled", systemdUnitName)
+	active, _ := systemctl("is-active", systemdUnitName())
+	enabled, _ := systemctl("is-enabled", systemdUnitName())
 	fmt.Printf("state: %s  at login: %s", active, enabled)
-	if pid, err := systemctl("show", systemdUnitName, "--property=MainPID", "--value"); err == nil &&
+	if pid, err := systemctl("show", systemdUnitName(), "--property=MainPID", "--value"); err == nil &&
 		pid != "" && pid != "0" {
 		fmt.Printf("  pid: %s", pid)
 	}

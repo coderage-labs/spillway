@@ -26,7 +26,14 @@ func serviceLogPaths() (out, errPath string, err error) {
 		return "", "", herr
 	}
 	dir := filepath.Join(home, "Library", "Logs")
-	return filepath.Join(dir, "spillway.log"), filepath.Join(dir, "spillway.err.log"), nil
+	// Named after the service, not the product: the integration tests
+	// install under a label of their own, and without this their daemon
+	// writes into the log of the one actually running on the machine.
+	base := "spillway"
+	if serviceLabel != "dev.coderage.spillway" {
+		base = serviceLabel
+	}
+	return filepath.Join(dir, base+".log"), filepath.Join(dir, base+".err.log"), nil
 }
 
 // plistXML renders the launchd agent. KeepAlive restarts the daemon if it
@@ -36,6 +43,11 @@ func plistXML(binPath, outLog, errLog string) string {
 		r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 		return r.Replace(s)
 	}
+	// launchd redirects the streams itself, so the daemon needs no log flag.
+	var progArgs string
+	for _, a := range serverArgs("") {
+		progArgs += "\n    <string>" + esc(a) + "</string>"
+	}
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -43,8 +55,7 @@ func plistXML(binPath, outLog, errLog string) string {
   <key>Label</key><string>` + serviceLabel + `</string>
   <key>ProgramArguments</key>
   <array>
-    <string>` + esc(binPath) + `</string>
-    <string>server</string>
+    <string>` + esc(binPath) + `</string>` + progArgs + `
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

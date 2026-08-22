@@ -10,9 +10,16 @@ package main
 // the user's keychain (Keychain Services, Credential Manager, Secret
 // Service), so a daemon running as root or SYSTEM could not read them.
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
-const serviceLabel = "dev.coderage.spillway"
+// serviceLabel names the launchd agent, the systemd unit and the Scheduled
+// Task. A variable rather than a constant so the integration tests can
+// register under a name of their own: they install and uninstall a real
+// service, and running them must not touch the one on the machine.
+var serviceLabel = "dev.coderage.spillway"
 
 func runService(args []string) error {
 	action := "status"
@@ -29,4 +36,21 @@ func runService(args []string) error {
 	default:
 		return fmt.Errorf("unknown service action %q (install|uninstall|status)", action)
 	}
+}
+
+// serverArgs is what the scheduler should run the daemon with.
+//
+// --config is passed only when this process has a non-default one: pinning it
+// unconditionally would mean a service that ignores a config the user moves
+// later, and omitting it always means a service that ignores the config it
+// was installed with.
+func serverArgs(logPath string) []string {
+	args := []string{"server"}
+	if logPath != "" {
+		args = append(args, "--log-file", logPath)
+	}
+	if cfg := os.Getenv("SPILLWAY_CONFIG"); cfg != "" {
+		args = append(args, "--config", cfg)
+	}
+	return args
 }

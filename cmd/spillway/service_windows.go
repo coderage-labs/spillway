@@ -28,7 +28,11 @@ func serviceLogPaths() (out string, err error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "spillway", "spillway.log"), nil
+	name := "spillway"
+	if serviceLabel != "dev.coderage.spillway" {
+		name = serviceLabel
+	}
+	return filepath.Join(base, "spillway", name+".log"), nil
 }
 
 // A variable so the install sequence can be tested without a real Task
@@ -85,11 +89,11 @@ func serviceInstall() error {
 	// Ignoring the error is correct: it fails when nothing is running and
 	// when nothing is registered, which are the ordinary cases on a first
 	// install.
-	_, _ = schtasks("/End", "/TN", taskName)
+	_, _ = schtasks("/End", "/TN", taskName())
 	waitUntilTaskStopped()
 
 	// /F replaces an existing registration rather than failing.
-	if out, err := schtasks("/Create", "/TN", taskName, "/XML", f.Name(), "/F"); err != nil {
+	if out, err := schtasks("/Create", "/TN", taskName(), "/XML", f.Name(), "/F"); err != nil {
 		return fmt.Errorf("schtasks /Create: %v: %s", err, out)
 	}
 	// A logon trigger will not fire until the next logon, and nobody expects
@@ -97,7 +101,7 @@ func serviceInstall() error {
 	if err := runUntilItStays(); err != nil {
 		fmt.Fprintf(os.Stderr, "spillway: task registered but did not start: %v\n", err)
 	}
-	fmt.Printf("service installed: Task Scheduler task %s\n", taskName)
+	fmt.Printf("service installed: Task Scheduler task %s\n", taskName())
 	fmt.Printf("logs: %s\n", logPath)
 	return nil
 }
@@ -105,8 +109,8 @@ func serviceInstall() error {
 func serviceUninstall() error {
 	// Stop it before deregistering, or the process outlives the task that
 	// owns it and nothing is left to stop it by.
-	_, _ = schtasks("/End", "/TN", taskName)
-	if out, err := schtasks("/Delete", "/TN", taskName, "/F"); err != nil {
+	_, _ = schtasks("/End", "/TN", taskName())
+	if out, err := schtasks("/Delete", "/TN", taskName(), "/F"); err != nil {
 		if strings.Contains(out, "cannot find") || strings.Contains(out, "does not exist") {
 			fmt.Println("service NOT installed")
 			return nil
@@ -118,7 +122,7 @@ func serviceUninstall() error {
 }
 
 func serviceStatus() error {
-	out, err := schtasks("/Query", "/TN", taskName, "/FO", "LIST")
+	out, err := schtasks("/Query", "/TN", taskName(), "/FO", "LIST")
 	if err != nil {
 		fmt.Println("service NOT installed")
 		return nil
@@ -130,7 +134,7 @@ func serviceStatus() error {
 		}
 	}
 	logPath, _ := serviceLogPaths()
-	fmt.Printf("service installed (%s)\nstate: %s\nlogs: %s\n", taskName, status, logPath)
+	fmt.Printf("service installed (%s)\nstate: %s\nlogs: %s\n", taskName(), status, logPath)
 	return nil
 }
 
@@ -150,13 +154,13 @@ func serviceStatus() error {
 func runUntilItStays() error {
 	var last string
 	for attempt := 0; attempt < 8; attempt++ {
-		if out, err := schtasks("/Run", "/TN", taskName); err != nil {
+		if out, err := schtasks("/Run", "/TN", taskName()); err != nil {
 			last = fmt.Sprintf("%v: %s", err, out)
 			time.Sleep(time.Second)
 			continue
 		}
 		time.Sleep(1500 * time.Millisecond)
-		out, err := schtasks("/Query", "/TN", taskName, "/FO", "LIST")
+		out, err := schtasks("/Query", "/TN", taskName(), "/FO", "LIST")
 		if err == nil && strings.Contains(out, "Running") {
 			return nil
 		}
@@ -177,7 +181,7 @@ func runUntilItStays() error {
 // on a Windows runner at over ninety seconds before the probe gave up.
 func waitUntilTaskStopped() {
 	for attempt := 0; attempt < 40; attempt++ {
-		out, err := schtasks("/Query", "/TN", taskName, "/FO", "LIST")
+		out, err := schtasks("/Query", "/TN", taskName(), "/FO", "LIST")
 		if err != nil {
 			return // not registered; nothing to wait for
 		}

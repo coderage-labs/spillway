@@ -14,9 +14,9 @@ import (
 	"unicode/utf16"
 )
 
-// taskName is what appears in Task Scheduler. Backslash-prefixed so it lands
+// taskName() is what appears in Task Scheduler. Backslash-prefixed so it lands
 // in the root folder rather than under \Microsoft\Windows\.
-const taskName = `\` + serviceLabel
+func taskName() string { return `\` + serviceLabel }
 
 // taskXML renders the Scheduled Task definition.
 //
@@ -103,7 +103,11 @@ func taskXML(binPath, logPath string) (string, error) {
 	// The daemon writes its own log via --log-file, so no shell is needed
 	// for that either.
 	doc.Actions.Exec.Command = binPath
-	doc.Actions.Exec.Arguments = "server --log-file " + quoteArg(logPath)
+	var quoted []string
+	for _, a := range serverArgs(logPath) {
+		quoted = append(quoted, quoteArg(a))
+	}
+	doc.Actions.Exec.Arguments = strings.Join(quoted, " ")
 
 	body, err := xml.MarshalIndent(doc, "", "  ")
 	if err != nil {

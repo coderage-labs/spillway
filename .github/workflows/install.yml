@@ -1,0 +1,79 @@
+name: Install path
+
+# The service install, exercised for real on each platform.
+#
+# Every bug this path has had was invisible to a unit test — task XML no test
+# parsed, a shell wrapper that made stopping the task and stopping the daemon
+# different events, a replacement that could not bind the port its predecessor
+# still held — and several were in code that had been "fixed" the same day.
+# This installs the service, watches a daemon serve, replaces it, and takes it
+# away, on the platform's own scheduler.
+#
+# Not on every push: it is slow and it only concerns one part of the tree. It
+# does run on tags, so a broken install cannot be released again.
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - cmd/spillway/service*.go
+      - cmd/spillway/taskdef*.go
+      - cmd/spillway/statusline.go
+      - cmd/spillway/main.go
+      - .github/workflows/install.yml
+    tags: ["v*"]
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      # A user unit needs a user manager, and a runner has no login session.
+      # Lingering starts one without a logon, which is also what a real user
+      # wants for a daemon.
+      - name: Start a systemd user session
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          for i in $(seq 1 20); do
+            systemctl --user is-active "user@$(id -u).service" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          systemctl --user --version | head -1
+          loginctl show-user "$USER" --property=Linger
+
+      - name: Install path
+        env:
+          SPILLWAY_INTEGRATION: "1"
+        run: go test -tags integration -run TestServiceLifecycle -count=1 -v -timeout 5m ./cmd/spillway/
+
+      # Whatever happened, do not leave a service on the runner. Harmless on
+      # an ephemeral machine, but a leftover would mask the next failure.
+      - name: Clean up
+        if: always()
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            macOS)   launchctl bootout "gui/$(id -u)/dev.coderage.spillway-itest" 2>/dev/null || true
+                     rm -f "$HOME/Library/LaunchAgents/dev.coderage.spillway-itest.plist" ;;
+            Linux)   systemctl --user disable --now dev.coderage.spillway-itest.service 2>/dev/null || true
+                     rm -f "$HOME/.config/systemd/user/dev.coderage.spillway-itest.service" ;;
+            Windows) schtasks /End /TN "\\dev.coderage.spillway-itest" 2>/dev/null || true
+                     schtasks /Delete /TN "\\dev.coderage.spillway-itest" /F 2>/dev/null || true ;;
+          esac
+          echo "cleaned"

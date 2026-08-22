@@ -428,7 +428,11 @@ func shortModel(m string) string {
 // selfPath is the absolute path to this binary. The status line runs with a
 // minimal environment, so a bare command name is unreliable — GOPATH/bin is
 // frequently absent from that PATH, and the failure is silent (an empty line).
-func selfPath() (string, error) {
+// A variable so the service integration tests can point it at a real
+// spillway binary: under `go test` os.Args[0] is the test binary, and
+// installing a service that runs it would register the test suite as a
+// daemon.
+var selfPath = func() (string, error) {
 	// Deliberately does NOT resolve symlinks.
 	//
 	// It used to. A package manager installs a stable symlink into a bin

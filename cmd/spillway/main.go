@@ -109,6 +109,16 @@ func usage() {
 }
 
 func runServer(args []string) error {
+	// --config before anything reads it. The service definitions pass this
+	// when they were installed against a non-default config: without it a
+	// `SPILLWAY_CONFIG=/x spillway service install` produced a service that
+	// silently ignored /x, because the scheduler starts the daemon and does
+	// not carry the operator's environment into it.
+	if path := flagValue(args, "--config"); path != "" {
+		if err := os.Setenv("SPILLWAY_CONFIG", path); err != nil {
+			return err
+		}
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err

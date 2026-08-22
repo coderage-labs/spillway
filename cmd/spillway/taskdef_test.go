@@ -125,11 +125,11 @@ func TestLogPathIsOneArgument(t *testing.T) {
 
 // The task must land in the root folder, not under \Microsoft\Windows\.
 func TestTaskNameIsRooted(t *testing.T) {
-	if !strings.HasPrefix(taskName, `\`) {
-		t.Errorf("taskName = %q, want a leading backslash", taskName)
+	if !strings.HasPrefix(taskName(), `\`) {
+		t.Errorf("taskName() = %q, want a leading backslash", taskName())
 	}
-	if !strings.Contains(taskName, serviceLabel) {
-		t.Errorf("taskName = %q, want it to carry the service label", taskName)
+	if !strings.Contains(taskName(), serviceLabel) {
+		t.Errorf("taskName() = %q, want it to carry the service label", taskName())
 	}
 }
 
