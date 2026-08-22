@@ -10,8 +10,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -23,10 +26,16 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "spillway: bad CONNECT target", http.StatusBadRequest)
 		return
 	}
+	// Log what is intercepted and what is tunnelled. Without this a MITM
+	// problem presents as "some requests are missing" with nothing to say
+	// which host, which mode, or whether the client ever got that far —
+	// which is exactly how a Remote Control failure looked.
 	if h.ca != nil && h.allowedHosts[host] {
+		h.logger.Debug("connect", "host", host, "mode", "mitm")
 		h.terminateConnect(w, r, host)
 		return
 	}
+	h.logger.Debug("connect", "host", host, "mode", "tunnel")
 	h.tunnelConnect(w, r, host, port)
 }
 
@@ -62,14 +71,62 @@ func (h *Handler) terminateConnect(w http.ResponseWriter, r *http.Request, host 
 		return
 	}
 
+	// ALPN has to be negotiated tolerantly, not imposed.
+	//
+	// With a fixed NextProtos, Go answers a client whose ALPN list does not
+	// overlap ours with `no_application_protocol` (alert 120) and kills the
+	// connection — the client sees a reset during the handshake, before it
+	// has sent a byte of HTTP. Node's h2 server, which other proxies of this
+	// shape are built on, instead selects nothing and carries on as HTTP/1.1.
+	//
+	// That difference broke Remote Control: its realtime channel is a
+	// WebSocket, and a WebSocket client that offers an ALPN we do not list
+	// never completes the handshake, so the receive channel silently never
+	// exists while every ordinary request keeps working.
+	ours := []string{"h2", "http/1.1"}
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{*leaf},
-		NextProtos:   []string{"h2", "http/1.1"},
+		NextProtos:   ours,
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			if len(hello.SupportedProtos) == 0 {
+				return nil, nil // no ALPN offered; nothing to negotiate
+			}
+			for _, want := range hello.SupportedProtos {
+				for _, have := range ours {
+					if want == have {
+						return nil, nil // normal path
+					}
+				}
+			}
+			// No overlap: mirror what the client asked for rather than
+			// selecting nothing. Remote Control's WebSocket offers the
+			// non-standard protocol "websocket" and expects to see it
+			// selected; answering with no ALPN at all makes it hang up just
+			// as surely as alert 120 did. Mirroring is safe because nothing
+			// downstream branches on the name — Go's HTTP server treats any
+			// negotiated protocol that is not "h2" as HTTP/1.1, which is
+			// exactly what a WebSocket handshake needs.
+			h.logger.Debug("alpn: mirroring the client's protocol",
+				"host", host, "client_offered", hello.SupportedProtos)
+			cfg := &tls.Config{
+				Certificates: []tls.Certificate{*leaf},
+				NextProtos:   []string{hello.SupportedProtos[0]},
+			}
+			return cfg, nil
+		},
 	}
 	tlsConn := tls.Server(conn, tlsCfg)
 
 	go func() {
 		srv := &http.Server{Handler: h}
+		// Route the server's own errors through slog, tagged with the host.
+		// TLS handshake failures otherwise reach the default logger as a bare
+		// "TLS handshake error from 127.0.0.1:PORT" — no host, no SNI, and no
+		// way to tell which upstream the client gave up on.
+		srv.ErrorLog = log.New(&slogWriter{
+			log:  h.logger,
+			host: host,
+		}, "", 0)
 		_ = http2.ConfigureServer(srv, &http2.Server{})
 		// One shot: Accept yields the tunnel conn once, then EOF, and Serve
 		// returns immediately — but the server's conn handler keeps serving
@@ -147,3 +204,19 @@ func (l *oneConnListener) Accept() (net.Conn, error) {
 
 func (l *oneConnListener) Close() error   { return nil }
 func (l *oneConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
+
+// slogWriter adapts http.Server's ErrorLog to slog, keeping the CONNECT host
+// alongside the message.
+type slogWriter struct {
+	log  *slog.Logger
+	host string
+}
+
+func (w *slogWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimSpace(string(p))
+	// A client that walks away mid-handshake is ordinary — a cancelled
+	// request, a closed tab — so this is a warning about the host, not an
+	// error about the proxy.
+	w.log.Warn("mitm connection failed", "host", w.host, "detail", msg)
+	return len(p), nil
+}

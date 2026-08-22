@@ -350,3 +350,85 @@ func TestUpgradeRelay(t *testing.T) {
 		t.Errorf("echo = %q", pong)
 	}
 }
+
+// A client whose ALPN list does not overlap ours must still connect.
+//
+// Go answers a non-overlapping ALPN with `no_application_protocol` (alert
+// 120) and drops the connection, which the client sees as a reset during the
+// handshake — before it has sent any HTTP. That is what broke Remote
+// Control: its realtime channel is a WebSocket, and the WebSocket never
+// completed a handshake, so the receive channel silently never existed while
+// every ordinary request kept working.
+func TestMITMAcceptsUnknownALPN(t *testing.T) {
+	rig := newMITMRig(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+
+	for _, tc := range []struct {
+		name  string
+		alpn  []string
+		wantP string
+	}{
+		{"ours: h2", []string{"h2"}, "h2"},
+		{"ours: http/1.1", []string{"http/1.1"}, "http/1.1"},
+		{"none offered", nil, ""},
+		// The case that failed. Remote Control's WebSocket offers exactly
+		// this, and expects it echoed back — selecting nothing makes it hang
+		// up just as alert 120 did.
+		{"unknown only", []string{"websocket"}, "websocket"},
+		// A client offering both takes the one we know.
+		{"unknown plus known", []string{"websocket", "http/1.1"}, "http/1.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := rig.dialThroughProxy(t, tc.alpn)
+			if err != nil {
+				t.Fatalf("handshake failed for ALPN %v: %v — a client we do not "+
+					"share a protocol with must still connect, not be refused", tc.alpn, err)
+			}
+			defer conn.Close()
+			if got := conn.ConnectionState().NegotiatedProtocol; got != tc.wantP {
+				t.Errorf("negotiated %q, want %q", got, tc.wantP)
+			}
+		})
+	}
+}
+
+// dialThroughProxy CONNECTs to the rig's upstream host and completes the TLS
+// handshake with the MITM leaf, offering exactly the given ALPN list.
+func (rig *mitmRig) dialThroughProxy(t *testing.T, alpn []string) (*tls.Conn, error) {
+	t.Helper()
+	front := strings.TrimPrefix(rig.front.URL, "http://")
+	target := strings.TrimPrefix(rig.upstream.URL, "https://")
+
+	raw, err := net.DialTimeout("tcp", front, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fmt.Fprintf(raw, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	br := bufio.NewReader(raw)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		raw.Close()
+		return nil, err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw.Close()
+		return nil, fmt.Errorf("CONNECT: %s", resp.Status)
+	}
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(rig.ca.CertPEM())
+	host, _, _ := net.SplitHostPort(target)
+	tc := tls.Client(raw, &tls.Config{
+		RootCAs:    caPool,
+		ServerName: host,
+		NextProtos: alpn,
+	})
+	if err := tc.Handshake(); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	return tc, nil
+}
