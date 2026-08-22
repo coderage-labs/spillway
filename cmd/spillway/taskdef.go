@@ -71,7 +71,7 @@ func taskXML(binPath, logPath string) (string, error) {
 			Exec    exec   `xml:"Exec"`
 		} `xml:"Actions"`
 	}{
-		Version: "9.9",
+		Version: "1.2",
 		NS:      "http://schemas.microsoft.com/windows/2004/02/mit/task",
 	}
 	doc.RegistrationInfo.Description = "spillway — pooled LLM proxy"
