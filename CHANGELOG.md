@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.8.0](https://github.com/coderage-labs/spillway/compare/v0.7.1...v0.8.0) (2026-08-22)
+
+
+### Features
+
+* resolve account names in the CLI, and let bare `switch` report ([#40](https://github.com/coderage-labs/spillway/issues/40)) ([4990090](https://github.com/coderage-labs/spillway/commit/4990090429b8b0e895dff95d7dcda827eafdd97d))
+
+
+### Fixes
+
+* **proxy:** make upstream HTTP/1.1 deliberate, not incidental ([#27](https://github.com/coderage-labs/spillway/issues/27)) ([#36](https://github.com/coderage-labs/spillway/issues/36)) ([3e26662](https://github.com/coderage-labs/spillway/commit/3e2666231590112c0944ebbe709fc3d9bd323dbb))
+* **proxy:** rotate off upstream 5xx instead of streaming it to the client ([#26](https://github.com/coderage-labs/spillway/issues/26)) ([#37](https://github.com/coderage-labs/spillway/issues/37)) ([8b861ff](https://github.com/coderage-labs/spillway/commit/8b861ff08fd189fa00d6cfa3b1a74733d5b9e379))
+* seed quota windows from quota_samples at startup ([#34](https://github.com/coderage-labs/spillway/issues/34)) ([#38](https://github.com/coderage-labs/spillway/issues/38)) ([b756cff](https://github.com/coderage-labs/spillway/commit/b756cff409c282514abe722f1249aa5c9d1de423))
+
+
+### Internal
+
+* stop TestEventsSSE racing the subscription ([#32](https://github.com/coderage-labs/spillway/issues/32)) ([bb3099c](https://github.com/coderage-labs/spillway/commit/bb3099c80c751ee504f48a0b1d83866fe0ef5f8f))
+
+
+### Documentation
+
+* fix four design-doc citations that point nowhere ([#39](https://github.com/coderage-labs/spillway/issues/39)) ([3743fa6](https://github.com/coderage-labs/spillway/commit/3743fa65540446e777648135eeba13afc6a04a86))
+* **probe:** correct the design-doc citation and the probing schedule ([#30](https://github.com/coderage-labs/spillway/issues/30)) ([#33](https://github.com/coderage-labs/spillway/issues/33)) ([0b253c9](https://github.com/coderage-labs/spillway/commit/0b253c9250d029b20884c651692a30cc32ad7625))
+
 ## [0.7.1](https://github.com/coderage-labs/spillway/compare/v0.7.0...v0.7.1) (2026-08-22)
 
 
