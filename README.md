@@ -206,7 +206,7 @@ that works over SSH.
 | `spillway accounts [remove <name>]` | List or remove accounts |
 | `spillway accounts overage <name> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — see [Extra usage](#extra-usage) |
 | `spillway accounts priority <name> <n>` | Order selection; lower is preferred |
-| `spillway switch <account>\|--auto [--force]` | Point the pool at one account until told otherwise |
+| `spillway switch [<account>\|--auto] [--force]` | Point the pool at one account — resolved by name, label or a unique prefix/substring — until told otherwise; with no argument, reports what's pinned and what you could switch to |
 | `spillway login claude <name>` | Add a Claude account (OAuth PKCE) |
 | `spillway login kimi <name>` | Add a Kimi account (OAuth device flow) |
 | `spillway statusline` | Print the Claude Code status line |
@@ -265,9 +265,11 @@ Adds `/spillway:status`, which reports the pool from inside a session: headroom,
 what is serving, whether anything is parked waiting for a reset, and whether
 any request is being billed.
 
-`/spillway:switch <account>` pins the pool from the same place — it resolves a
-label or a unique prefix to the account name, and reports what would happen
-rather than forcing past a refusal that costs money.
+`/spillway:switch <account>` pins the pool from the same place — the CLI
+itself resolves a label or a unique prefix to the account name, and reports
+what would happen rather than forcing past a refusal that costs money.
+`/spillway:switch` with no argument reports what is pinned, or that
+selection is automatic, and what you could switch to instead.
 
 Both exist for Remote Control. The status line and the desktop notification
 live on the machine, so a session driven from a phone has no way to see or
@@ -442,6 +444,14 @@ it is a live instruction, not a setting, which is the difference between it and
 `priority`. Useful for keeping a piece of work on one subscription, steering off
 an account you are about to need elsewhere, or watching rotation without having
 to spend a quota to see it.
+
+`<account>` need not be the exact name: it matches, in order, an exact name,
+an exact label, then a unique case-insensitive prefix or substring of either.
+Ambiguous input lists the candidates and pins nothing — it never guesses.
+`spillway switch` with no argument does not pin anything either; it reports
+what is currently pinned (or that selection is automatic) and which accounts
+you could switch to, marking any that would serve from paid extra usage or
+that are parked, disabled or already spent.
 
 A pin survives the rotate-away threshold — naming an account is a statement
 that you want it — but not exhaustion: holding every request while healthy
