@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 )
@@ -12,6 +13,14 @@ import (
 // Two processes, the real scenario: `spillway login` writing a token while
 // the daemon holds the same file. An in-process mutex does nothing here.
 func TestCrossProcessWritersKeepEveryKey(t *testing.T) {
+	// Windows has no advisory lock here, on purpose: chooseStore never
+	// selects the file store there, because the Credential Manager always
+	// exists and arbitrates concurrent writers itself. Asserting a guarantee
+	// the platform is not given — and does not need — only produces a red
+	// build. The in-process test above still runs everywhere.
+	if runtime.GOOS == "windows" {
+		t.Skip("the file store is never chosen on windows; lockFile is a documented no-op there")
+	}
 	if os.Getenv("SECRETS_CHILD_PATH") != "" {
 		f := NewFileStore(os.Getenv("SECRETS_CHILD_PATH"))
 		n, _ := strconv.Atoi(os.Getenv("SECRETS_CHILD_N"))
