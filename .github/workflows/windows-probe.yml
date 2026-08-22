@@ -106,8 +106,13 @@ jobs:
           Tree "before /End"
           schtasks /End /TN "\dev.coderage.spillway"
           Write-Host "schtasks /End exit=$LASTEXITCODE"
+          $global:LASTEXITCODE = 0
           Start-Sleep -Seconds 3
           Tree "after /End"
+          # Put it back: the next step reinstalls over a *running* daemon, and
+          # without this it reinstalls over nothing and proves nothing.
+          & "$env:RUNNER_TEMP\spillway.exe" service install
+          Start-Sleep -Seconds 5
 
       # The upgrade case: reinstall over a running daemon and prove the
       # process was actually replaced rather than left alone.
@@ -122,6 +127,7 @@ jobs:
           Get-CimInstance Win32_Process -Filter "Name='spillway.exe'" |
             Select-Object ProcessId, ParentProcessId, CreationDate |
             Format-Table -AutoSize | Out-String | Write-Host
+          if (-not $before) { throw "nothing was running, so this did not test the upgrade case" }
           if (-not $after) { throw "no daemon running after reinstall" }
           if ($before -eq $after) {
             throw "reinstall left the original process alive - an upgrade would keep serving the old binary"
@@ -163,3 +169,32 @@ jobs:
           Write-Host "--- shim resolves to ---"
           (Get-Command spillway.exe).Source
           spillway version
+
+          # The question the shim raises: `service install` records the path
+          # it is invoked by, so the task would run the shim. If the shim is a
+          # wrapper process that spawns the real exe, ending the task kills
+          # the wrapper and orphans the daemon — the powershell bug again,
+          # wearing a different hat.
+          Write-Host "--- registering the service through the shim ---"
+          spillway service install
+          Start-Sleep -Seconds 6
+          schtasks /Query /TN "\dev.coderage.spillway" /XML 2>$null |
+            Select-String -Pattern "<Command>|<Arguments>" | Write-Host
+          $global:LASTEXITCODE = 0
+          Get-CimInstance Win32_Process -Filter "Name='spillway.exe'" |
+            Select-Object ProcessId, ParentProcessId,
+              @{n='Path';e={$_.ExecutablePath}} |
+            Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+
+          schtasks /End /TN "\dev.coderage.spillway"
+          $global:LASTEXITCODE = 0
+          Start-Sleep -Seconds 4
+          $orphan = Get-Process spillway -ErrorAction SilentlyContinue
+          if ($orphan) {
+            $orphan | Select-Object Id, Path | Format-Table -AutoSize | Out-String | Write-Host
+            $orphan | Stop-Process -Force
+            spillway service uninstall
+            throw "the shim leaves an orphan: ending the task did not stop the daemon"
+          }
+          Write-Host "shim-registered task stops cleanly"
+          spillway service uninstall
