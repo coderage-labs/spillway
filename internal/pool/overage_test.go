@@ -34,10 +34,10 @@ func overageRig(t *testing.T) (p *Pool, billable, healthy *Account) {
 // The default. Nothing opted in, so the tier does not exist.
 func TestOverageIsOffByDefault(t *testing.T) {
 	p, billable, _ := overageRig(t)
-	if p.AllowOverage {
+	if p.allowOverage {
 		t.Fatal("overage defaulted to on — it must never spend without being asked")
 	}
-	if billable.CanOverage(p.AllowOverage) {
+	if billable.CanOverage(p.allowOverage) {
 		t.Error("an account reports itself billable while the pool forbids it")
 	}
 	// Exhaust the healthy one too: with overage off, this must go dry rather
@@ -51,7 +51,7 @@ func TestOverageIsOffByDefault(t *testing.T) {
 // Enabled, but never while anything free can serve.
 func TestOverageIsNeverReachedWhileAFreeAccountWorks(t *testing.T) {
 	p, _, healthy := overageRig(t)
-	p.AllowOverage = true
+	p.allowOverage = true
 	for i := 0; i < 5; i++ {
 		got := p.SelectFor("s", nil)
 		if got != healthy {
@@ -64,7 +64,7 @@ func TestOverageIsNeverReachedWhileAFreeAccountWorks(t *testing.T) {
 // Enabled, and everything free is gone: serving beats holding for hours.
 func TestOverageServesWhenEverythingFreeIsSpent(t *testing.T) {
 	p, billable, healthy := overageRig(t)
-	p.AllowOverage = true
+	p.allowOverage = true
 	p.MarkExhausted(healthy, time.Now().Add(4*time.Hour))
 
 	got := p.SelectFor("s", nil)
@@ -78,8 +78,8 @@ func TestOverageServesWhenEverythingFreeIsSpent(t *testing.T) {
 // someone else entirely.
 func TestPerAccountOptOutBeatsThePoolDefault(t *testing.T) {
 	p, billable, healthy := overageRig(t)
-	p.AllowOverage = true
-	billable.AllowOverage = boolp(false)
+	p.allowOverage = true
+	billable.allowOverage = boolp(false)
 	p.MarkExhausted(healthy, time.Now().Add(4*time.Hour))
 
 	if got := p.SelectFor("s", nil); got != nil {
@@ -91,7 +91,7 @@ func TestPerAccountOptOutBeatsThePoolDefault(t *testing.T) {
 // where exactly one account is yours to spend on.
 func TestPerAccountOptInWorksWithThePoolOff(t *testing.T) {
 	p, billable, healthy := overageRig(t)
-	billable.AllowOverage = boolp(true)
+	billable.allowOverage = boolp(true)
 	p.MarkExhausted(healthy, time.Now().Add(4*time.Hour))
 
 	got := p.SelectFor("s", nil)
@@ -105,7 +105,7 @@ func TestPerAccountOptInWorksWithThePoolOff(t *testing.T) {
 // whose provider said something we do not recognise, is not spent on.
 func TestUnknownOverageStateIsNeverBilled(t *testing.T) {
 	p, _, healthy := overageRig(t)
-	p.AllowOverage = true
+	p.allowOverage = true
 	silent := NewAccount("never-used", SourceYAML, "tok", "", 0, "")
 	silent.Type = "claude-oauth"
 	if silent.CanOverage(true) {
@@ -130,7 +130,7 @@ func TestUnknownOverageStateIsNeverBilled(t *testing.T) {
 // the tier admits exhausted accounts, not broken ones.
 func TestOverageDoesNotReviveParkedOrDisabledAccounts(t *testing.T) {
 	p, billable, healthy := overageRig(t)
-	p.AllowOverage = true
+	p.allowOverage = true
 	p.MarkExhausted(healthy, time.Now().Add(4*time.Hour))
 
 	billable.Park()
@@ -203,7 +203,7 @@ func TestExplicitOptInWorksWithoutAConfirmingHeader(t *testing.T) {
 	now := time.Now()
 	unseen := NewAccount("never-heard-from", SourceYAML, "tok", "", 0, "")
 	unseen.Type = "claude-oauth"
-	unseen.AllowOverage = boolp(true)
+	unseen.allowOverage = boolp(true)
 	healthy := NewAccount("healthy", SourceYAML, "tok", "", 0, "")
 	healthy.Type = "claude-oauth"
 	p := New([]*Account{unseen, healthy}, now)
@@ -227,7 +227,7 @@ func TestProviderRefusalBeatsAnOptIn(t *testing.T) {
 	now := time.Now()
 	a := NewAccount("refused", SourceYAML, "tok", "", 0, "")
 	a.Type = "claude-oauth"
-	a.AllowOverage = boolp(true)
+	a.allowOverage = boolp(true)
 	a.setOverage(provider.Overage{Known: true, Available: false, Reason: "member_zero_credit_limit"})
 	p := New([]*Account{a}, now)
 	p.MarkExhausted(a, now.Add(4*time.Hour))
@@ -244,7 +244,7 @@ func TestPoolWideYesStillNeedsConfirmation(t *testing.T) {
 	a := NewAccount("unconfirmed", SourceYAML, "tok", "", 0, "")
 	a.Type = "claude-oauth"
 	p := New([]*Account{a}, now)
-	p.AllowOverage = true
+	p.allowOverage = true
 	p.MarkExhausted(a, now.Add(4*time.Hour))
 
 	if got := p.SelectFor("s", nil); got != nil {
@@ -265,7 +265,7 @@ func TestFreeQuotaIsFullyDrainedBeforeAnythingIsBilled(t *testing.T) {
 	// it. Both accounts are over threshold; neither has been rejected yet.
 	paid := NewAccount("paid", SourceYAML, "tok", "", 0, "")
 	paid.Type = "claude-oauth"
-	paid.AllowOverage = boolp(true)
+	paid.allowOverage = boolp(true)
 	paid.SetQuotaWindows([]QuotaWindow{
 		{Name: "7d", Limit: 1, Used: 1, ResetAt: now.Add(9 * time.Hour), FetchedAt: now},
 	})
@@ -275,7 +275,7 @@ func TestFreeQuotaIsFullyDrainedBeforeAnythingIsBilled(t *testing.T) {
 		{Name: "7d", Limit: 1, Used: 0.995, ResetAt: now.Add(9 * time.Hour), FetchedAt: now},
 	})
 	p := New([]*Account{paid, free}, now)
-	p.AllowOverage = true
+	p.allowOverage = true
 
 	got := p.SelectFor("s", nil)
 	if got != free {
@@ -298,7 +298,7 @@ func TestFreeQuotaIsFullyDrainedBeforeAnythingIsBilled(t *testing.T) {
 // account being handed straight back. Without the skip set the caller spins.
 func TestARefusedOverageAccountIsNotHandedBackImmediately(t *testing.T) {
 	p, billable, healthy := overageRig(t)
-	p.AllowOverage = true
+	p.allowOverage = true
 	p.MarkExhausted(healthy, time.Now().Add(4*time.Hour))
 
 	got := p.SelectFor("s", nil)
