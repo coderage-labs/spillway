@@ -125,6 +125,15 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, p *pool.Pool) (*Handler
 			// thinking-heavy LLM request; no timeout on the body after that.
 			ResponseHeaderTimeout: 5 * time.Minute,
 			IdleConnTimeout:       90 * time.Second,
+			// Explicitly false (also the zero value, but spelled out
+			// because it matters): upstream traffic is long-lived SSE
+			// completions, many at once when subagents fan out. Multiplexed
+			// onto one h2 connection, a handful of live streams can exhaust
+			// the stream budget and a trivial request waits behind them —
+			// a stall that looks like the proxy hanging. One TCP connection
+			// per concurrent request is deliberate; see issue #27 and
+			// TestUpstreamSpeaksHTTP1.
+			ForceAttemptHTTP2: false,
 		},
 		allowedHosts:  map[string]bool{},
 		exhaustedMode: cfg.Pool.ExhaustedMode,

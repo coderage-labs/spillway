@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
@@ -229,5 +231,79 @@ func TestAuthInjection(t *testing.T) {
 	}
 	if ua := hdr.Get("User-Agent"); ua != "claude-cli/2.1.44" {
 		t.Errorf("user-agent mutated: %q", ua)
+	}
+}
+
+// TestUpstreamSpeaksHTTP1 asserts the pool transport talks HTTP/1.1 to
+// upstream even when the upstream is willing to negotiate HTTP/2 (issue
+// #27). Multiplexing many long-lived SSE completions onto one h2 connection
+// can starve a trivial request behind them; one connection per request is
+// deliberate, not incidental, and this must fail loudly if a later change
+// drops that guarantee.
+//
+// Two independent checks, because they guard two different mutations and
+// neither alone catches both:
+//
+//   - The live round trip (upstream reports the protocol IT observed via a
+//     response header, since the response Proto the test client sees is a
+//     separate plaintext HTTP/1.1 connection to the front-facing httptest
+//     server and says nothing about the proxy->upstream leg under test)
+//     reliably catches ForceAttemptHTTP2: true — that field wins over every
+//     other check net/http's Transport makes, including the RootCAs pin
+//     below.
+//   - It can NOT reliably catch a nil'd-out DialContext: pinning RootCAs
+//     below (needed to trust the self-signed upstream cert at all) sets
+//     Transport.TLSClientConfig, and net/http conservatively disables
+//     auto-HTTP/2 whenever TLSClientConfig, Dial, or DialContext is
+//     non-nil — so with RootCAs pinned, HTTP/2 already stays off
+//     regardless of DialContext, masking that specific regression. The
+//     direct field assertion below closes that gap.
+func TestUpstreamSpeaksHTTP1(t *testing.T) {
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Upstream-Proto", r.Proto)
+		w.WriteHeader(http.StatusOK)
+	}))
+	upstream.EnableHTTP2 = true
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	cfg := config.Defaults()
+	cfg.Upstream = upstream.URL
+	cfg.Pool.ExhaustedMode = "fail"
+	p := pool.New([]*pool.Account{pool.NewAccount("test", pool.SourceYAML, "tok", "", 0, "")}, time.Now())
+	h, err := NewHandler(&cfg, testLogger(), p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	if h.Transport.ForceAttemptHTTP2 {
+		t.Error("Transport.ForceAttemptHTTP2 = true, want false (see issue #27)")
+	}
+	if h.Transport.DialContext == nil {
+		t.Error("Transport.DialContext is nil, want egress.DialContext (see issue #27)")
+	}
+
+	// Pin RootCAs to the upstream's self-signed leaf so the handshake
+	// succeeds. Note this itself independently disables net/http's
+	// auto-HTTP/2 (see comment above) — it is not what this test relies
+	// on to prove h1, that's ForceAttemptHTTP2 staying false.
+	caPool := x509.NewCertPool()
+	caPool.AddCert(upstream.Certificate())
+	h.Transport.TLSClientConfig = &tls.Config{RootCAs: caPool}
+
+	front := httptest.NewServer(h)
+	defer front.Close()
+
+	// /v1/oauth/token is an identity-bound passthrough path: it hits
+	// h.Transport.RoundTrip directly with no pool/failover machinery in
+	// between, which keeps this test tight to the transport construction.
+	resp, err := http.Get(front.URL + "/v1/oauth/token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("X-Upstream-Proto"); got != "HTTP/1.1" {
+		t.Fatalf("upstream saw protocol %q, want HTTP/1.1", got)
 	}
 }
