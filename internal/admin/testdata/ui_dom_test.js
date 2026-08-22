@@ -50,15 +50,46 @@ const SETTINGS = {
   probeOnStart: true, probeInterval: '30m', crossProvider: false,
   accounts: { 'you@example-one.com': { label: 'work', disabled: false } },
 };
-const fetchCount = { accounts: 0, requests: 0, history: 0, activity: 0, settings: 0 };
-global.fetch = async (u) => {
+const fetchCount = { accounts: 0, requests: 0, history: 0, activity: 0, settings: 0, state: 0 };
+// pinState is /api/state's view of the pin (#11) -- the ONLY thing the pin
+// tests below mutate directly to simulate another client (the CLI
+// `spillway switch`) changing it out from under the dashboard. pinCalls
+// records what the dashboard itself sent to POST/DELETE /api/pin.
+let pinState = { pinned: "" };
+const pinCalls = [];
+global.fetch = async (u, opts) => {
   const url = String(u);
-  const ok = (body) => ({ ok: true, status: 200, json: async () => body });
+  const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
   if (url.includes('/api/accounts'))       { fetchCount.accounts++; return ok(ACCOUNTS); }
   if (url.includes('/api/quota-history'))  { fetchCount.history++;  return ok(HISTORY); }
   if (url.includes('/api/activity'))       { fetchCount.activity++; return ok(ACTIVITY); }
   if (url.includes('/api/requests'))       { fetchCount.requests++; return ok(REQUESTS); }
   if (url.includes('/api/settings'))       { fetchCount.settings++; return ok(SETTINGS); }
+  if (url.includes('/api/state'))          { fetchCount.state++;    return ok(pinState); }
+  if (url.includes('/api/pin')) {
+    const method = (opts && opts.method) || 'POST';
+    if (method === 'DELETE') {
+      pinCalls.push({ method });
+      pinState = { pinned: "" };
+      return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+    }
+    const req = JSON.parse(opts.body);
+    pinCalls.push({ method, account: req.account, force: req.force });
+    // Fixed fixture behaviour, keyed by account, so the test can exercise
+    // every documented outcome without a real backend:
+    //   example-one -> always 400 (malformed/unknown account: no retry)
+    //   example-two -> 409 unless forced (would bill: retry offered)
+    if (req.account === 'you@example-one.com') {
+      return { ok: false, status: 400, text: async () => 'spillway: malformed body' };
+    }
+    if (req.account === 'you@example-two.com' && !req.force) {
+      return { ok: false, status: 409, text: async () =>
+        'spillway: pinning there would spend money: "you@example-two.com" is out of quota and would serve from paid extra usage' };
+    }
+    pinState = { pinned: req.account };
+    const body = { pinned: req.account, warning: 'prompt cache is per account, so the next request will miss it' };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+  }
   return { ok: false, status: 404, json: async () => ({}) };
 };
 global.EventSource = class { constructor() { this.onmessage = this.onopen = this.onerror = null; } };
@@ -93,6 +124,18 @@ function findAllIn(root, sel, out = []) {
   return out;
 }
 function findIn(root, sel) { return findAllIn(root, sel)[0] || null; }
+// This fake DOM keeps no parent pointers, so the only way to get from a
+// tank's pin button to that SAME tank's message box is to search card by
+// card rather than the button up. Matched by title text rather than
+// position -- there is no layout engine here, so "second card" is not a
+// safe way to mean "the account.com one".
+function findCardByBtnTitle(accounts, re) {
+  for (const card of accounts.children) {
+    const btn = findIn(card, '.pin-btn');
+    if (btn && re.test(btn.title)) return { card, btn, msg: findIn(card, '.pin-msg') };
+  }
+  return null;
+}
 function mkEl(tag) {
   const el = {
     tagName: String(tag || 'div').toUpperCase(),
@@ -101,6 +144,11 @@ function mkEl(tag) {
     style: { _p: {}, setProperty(k, v) { this._p[k] = v; }, getPropertyValue(k) { return this._p[k]; } },
     setAttribute(k, v) { this.attrs[k] = String(v); },
     getAttribute(k) { return this.attrs[k]; },
+    // Recorded, not fired: this fake DOM has no event loop of its own, so a
+    // click is simulated by the test calling el._on.click() directly. Only
+    // the last listener per type is kept -- every element in this page
+    // registers at most one.
+    addEventListener(ev, fn) { this._on = this._on || {}; this._on[ev] = fn; },
     appendChild(c) {
       this.children.push(c);
       if (String(c.className).startsWith('wave ')) waves.push(c);
@@ -111,7 +159,7 @@ function mkEl(tag) {
     setAttribute2() {},
     querySelectorAll(sel) { return findAllIn(this, sel); },
     get _isWave() { return String(this.className).startsWith('wave'); },
-    focus() {}, addEventListener() {}, remove() {},
+    focus() {}, remove() {},
   };
   // classList, backed by className so assertions can read either. The dry-tank
   // countdown toggles a class rather than rebuilding, which is the pattern the
@@ -274,6 +322,77 @@ eval(js);
   ok['poll tick refetches accounts'] = fetchCount.accounts > before.accounts;
   ok['poll tick refetches requests'] = fetchCount.requests > before.requests;
   ok['poll tick refetches history'] = fetchCount.history > before.history;
+  ok['poll tick refetches pin state'] = fetchCount.state > before.state;
+
+  // ── pin control (#11) ────────────────────────────────────────────────
+  const oneBtn = findCardByBtnTitle(els.accounts, /work/);   // labelled account
+  const twoBtn = findCardByBtnTitle(els.accounts, /example-two/);
+  ok['pin control rendered per account'] = !!oneBtn && !!twoBtn;
+  ok['nothing pinned initially'] =
+    !!oneBtn && !!twoBtn &&
+    !String(oneBtn.btn.className).includes('active') &&
+    !String(twoBtn.btn.className).includes('active');
+  ok['pin message box starts hidden'] =
+    !!oneBtn && !!twoBtn &&
+    !String(oneBtn.msg.className).includes('show') &&
+    !String(twoBtn.msg.className).includes('show');
+
+  // 400 (fixture: example-one always refuses): show why, offer no retry.
+  oneBtn.btn._on.click();
+  await new Promise(r => setTimeout(r, 150));
+  ok['400 shows the server message'] =
+    String(oneBtn.msg.className).includes('show') &&
+    String(oneBtn.msg.className).includes('bad') &&
+    oneBtn.msg.innerHTML.includes('malformed body');
+  ok['400 offers no retry'] = findAllIn(oneBtn.msg, 'button').length === 0;
+  ok['400 does not pin the account'] = !String(oneBtn.btn.className).includes('active');
+
+  // 409 (fixture: example-two refuses unless forced): surface the reason,
+  // offer a forced retry, do NOT force silently and do NOT give up silently.
+  twoBtn.btn._on.click();
+  await new Promise(r => setTimeout(r, 150));
+  ok['409 surfaces the refusal reason'] =
+    String(twoBtn.msg.className).includes('conflict') &&
+    twoBtn.msg.innerHTML.includes('spend money') &&
+    !twoBtn.msg.innerHTML.includes('spillway:');
+  ok['409 offers a retry, not a silent force'] = findAllIn(twoBtn.msg, 'button').length === 2;
+  ok['409 does not pin without confirmation'] = !String(twoBtn.btn.className).includes('active');
+
+  // Confirm the forced retry: the fixture now accepts it (200), and the
+  // response's warning field must say the pin costs the prompt cache.
+  const forceBtn = findAllIn(twoBtn.msg, 'button').find(b => !String(b.className).includes('ghost'));
+  // Guarded rather than assumed present: a defect that skips the conflict
+  // panel (silently forcing, or silently giving up) must show up as the
+  // assertions above going red, not as this crashing before they print.
+  if (forceBtn) forceBtn._on.click();
+  await new Promise(r => setTimeout(r, 150));
+  ok['forced pin succeeds'] = String(twoBtn.btn.className).includes('active');
+  ok['success states the prompt-cache cost'] = twoBtn.msg.innerHTML.toLowerCase().includes('prompt cache');
+  ok['pinned tank is visibly marked'] = String(twoBtn.card.className).includes('pinned');
+  ok['only the pinned account is marked'] =
+    !String(oneBtn.card.className).includes('pinned') &&
+    !String(oneBtn.btn.className).includes('active');
+
+  // Clicking the now-active control returns to automatic (DELETE /api/pin).
+  twoBtn.btn._on.click();
+  await new Promise(r => setTimeout(r, 150));
+  ok['clicking the pinned control returns to automatic'] =
+    !String(twoBtn.btn.className).includes('active') &&
+    !String(twoBtn.card.className).includes('pinned');
+
+  // The critical property (#11): the pinned indicator must be driven by
+  // state.pinned from the poll, not by anything a click set locally. Change
+  // it the way another client would (`spillway switch` from the CLI) --
+  // directly in the fixture the dashboard never touches -- with NO click
+  // anywhere in this dashboard, and confirm the NEXT poll alone updates it.
+  pinState = { pinned: 'you@example-one.com' };
+  if (pollFn) { await pollFn(); await new Promise(r => setTimeout(r, 150)); }
+  ok['a pin set by another client appears after the next poll'] =
+    String(oneBtn.btn.className).includes('active') &&
+    String(oneBtn.card.className).includes('pinned');
+  ok['the account that lost the pin updates too'] =
+    !String(twoBtn.btn.className).includes('active') &&
+    !String(twoBtn.card.className).includes('pinned');
 
   let fail = 0;
   for (const [k, v] of Object.entries(ok)) { console.log((v ? 'PASS' : 'FAIL') + ': ' + k); if (!v) fail++; }
