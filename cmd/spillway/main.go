@@ -58,8 +58,6 @@ func main() {
 		err = runAccounts(os.Args[2:])
 	case "statusline":
 		err = runStatusline(os.Args[2:])
-	case "hook":
-		err = runHook(os.Args[2:])
 	case "service":
 		err = runService(os.Args[2:])
 	case "version", "--version", "-v":
@@ -87,9 +85,8 @@ func usage() {
 		"       spillway login kimi <name>",
 		"       spillway accounts [remove <name>]",
 		"       spillway accounts overage <name> on|off|default   allow pay-as-you-go past quota",
-		"       spillway statusline                          print the status line (used by the hook)",
+		"       spillway statusline                          print the status line (for Claude Code)",
 		"       spillway statusline [install|uninstall|status]",
-		"       spillway hook [install|uninstall|status]     wire into ~/.claude/settings.json",
 		"       spillway service [install|uninstall|status]  run the daemon under launchd",
 		"       spillway version",
 	}, "\n"))

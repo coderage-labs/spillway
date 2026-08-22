@@ -5,47 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/coderage-labs/spillway/internal/config"
 )
-
-func TestMergeHookPreservesUnrelatedSettings(t *testing.T) {
-	settings := map[string]any{
-		"model":       "opus",
-		"env":         map[string]any{"MY_VAR": "keep-me", "HTTPS_PROXY": "http://stale:1"},
-		"permissions": map[string]any{"allow": []any{"Bash"}},
-	}
-	got := mergeHook(settings, map[string]string{"HTTPS_PROXY": "http://127.0.0.1:7654"})
-
-	env := got["env"].(map[string]any)
-	if env["MY_VAR"] != "keep-me" {
-		t.Errorf("unmanaged env var dropped: %v", env)
-	}
-	if env["HTTPS_PROXY"] != "http://127.0.0.1:7654" {
-		t.Errorf("managed var not updated: %v", env["HTTPS_PROXY"])
-	}
-	if got["model"] != "opus" || got["permissions"] == nil {
-		t.Errorf("unrelated top-level settings lost: %v", got)
-	}
-}
-
-func TestRemoveHookLeavesUserVars(t *testing.T) {
-	settings := map[string]any{"env": map[string]any{
-		"MY_VAR": "keep-me", "HTTPS_PROXY": "x", "NODE_EXTRA_CA_CERTS": "y", "API_TIMEOUT_MS": "1",
-	}}
-	got := removeHook(settings)
-	env := got["env"].(map[string]any)
-	if len(env) != 1 || env["MY_VAR"] != "keep-me" {
-		t.Fatalf("expected only MY_VAR to survive, got %v", env)
-	}
-}
-
-func TestRemoveHookDropsEmptyEnv(t *testing.T) {
-	got := removeHook(map[string]any{"env": map[string]any{"HTTPS_PROXY": "x"}})
-	if _, ok := got["env"]; ok {
-		t.Fatalf("empty env block should be removed, got %v", got)
-	}
-}
 
 func TestReadSettingsRefusesUnparseableFile(t *testing.T) {
 	dir := t.TempDir()
@@ -87,21 +47,6 @@ func TestWriteSettingsBacksUpAndRoundTrips(t *testing.T) {
 	}
 }
 
-func TestHookEnvUsesMITMNotBaseURL(t *testing.T) {
-	// Remote Control refuses to start when ANTHROPIC_BASE_URL is not
-	// api.anthropic.com (§6.15), so the hook must never set it.
-	cfg := config.Defaults()
-	env := hookEnv(&cfg, "/tmp/ca.pem")
-	if _, bad := env["ANTHROPIC_BASE_URL"]; bad {
-		t.Fatal("hook must not set ANTHROPIC_BASE_URL — it breaks Remote Control")
-	}
-	if env["HTTPS_PROXY"] == "" || env["NODE_EXTRA_CA_CERTS"] != "/tmp/ca.pem" {
-		t.Fatalf("MITM env incomplete: %v", env)
-	}
-}
-
-// Installing must never silently replace a status line another tool owns —
-// that line may be doing far more than ours.
 func TestStatuslineInstallGuardsForeignEntry(t *testing.T) {
 	settings := map[string]any{
 		"statusLine": map[string]any{"type": "command", "command": "~/.claude/other.sh"},

@@ -185,30 +185,39 @@ that works over SSH.
 | `spillway accounts overage <name> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — see [Extra usage](#extra-usage) |
 | `spillway login claude <name>` | Add a Claude account (OAuth PKCE) |
 | `spillway login kimi <name>` | Add a Kimi account (OAuth device flow) |
-| `spillway statusline` | Print the Claude Code status line (used by the hook) |
+| `spillway statusline` | Print the Claude Code status line |
 | `spillway statusline install\|uninstall\|status` | Wire it into `~/.claude/settings.json` |
-| `spillway hook install\|uninstall\|status` | Route **every** `claude` launch through the pool |
 | `spillway service install\|uninstall\|status` | Run the daemon in the background — launchd on macOS, a Scheduled Task on Windows |
 | `spillway version` | Build identity: tag, commit, date, Go version |
 
 ### Attaching clients
 
-Three ways, in increasing order of coverage:
+Two ways:
 
 ```sh
-ANTHROPIC_BASE_URL=http://127.0.0.1:7654 claude   # this invocation only
-spillway run                                       # this invocation, MITM mode
-spillway hook install                              # every launch, any launcher
+spillway run                                       # MITM mode — the supported path
+ANTHROPIC_BASE_URL=http://127.0.0.1:7654 claude    # base URL only, this invocation
 ```
 
-`hook install` writes spillway's MITM env into the `env` block of
-`~/.claude/settings.json`. That is deliberately not a shell alias: an alias is
-only seen by interactive shells, so IDE extensions, scripts and tmux-spawned
-sessions would silently bypass the pool.
+`run` sets the proxy environment and then execs `claude`, which is the part
+that matters: `NODE_EXTRA_CA_CERTS` is read by Node **once, at startup**, when
+it builds its root store. Anything that supplies the CA after the process has
+booted is too late, and TLS never trusts spillway's certificate.
 
-**Remote Control requires MITM mode.** `claude --remote-control` refuses to
-start when `ANTHROPIC_BASE_URL` points anywhere but `api.anthropic.com`, so the
-base-URL route breaks it while `run` and `hook install` do not.
+That is why there is no "route every launch" option. An earlier `hook install`
+wrote the same variables into the `env` block of `~/.claude/settings.json`,
+which Claude Code applies to itself after boot. Ordinary API traffic still
+worked, because Claude Code passes the CA to its own HTTP client explicitly —
+but anything opening its own TLS connection, Remote Control's WebSocket
+included, rejected the certificate and reconnected forever. It looked like the
+pool working perfectly and Remote Control being broken. The command has been
+removed rather than fixed: a shell alias has the same startup-timing
+requirement and only covers interactive shells, and there is no mechanism that
+sets a process's environment before it starts except starting it yourself.
+
+**Remote Control needs MITM mode.** `claude --remote-control` refuses to start
+when `ANTHROPIC_BASE_URL` points anywhere but `api.anthropic.com`, so the
+base-URL route cannot carry it. Use `run`.
 
 ### Status line
 
