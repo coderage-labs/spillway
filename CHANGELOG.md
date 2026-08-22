@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/coderage-labs/spillway/compare/v0.1.0...v0.1.1) (2026-08-22)
+
+
+### Internal
+
+* build releases with goreleaser and publish a Homebrew cask ([e973fbc](https://github.com/coderage-labs/spillway/commit/e973fbcb22b7cb9f6f802c3d8f6cd412290b2596))
+
 ## 0.1.0 (2026-08-22)
 
 
