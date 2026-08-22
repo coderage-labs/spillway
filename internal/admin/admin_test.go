@@ -198,6 +198,17 @@ func TestEventsSSE(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
 		t.Fatalf("content-type = %q", ct)
 	}
+	// Wait for the handler to subscribe before publishing. Headers arrive
+	// before the handler reaches Subscribe, so publishing straight after Get
+	// raced it: the event went to an empty broker and the read below then sat
+	// until the client timeout. Intermittent, and it failed CI on ubuntu.
+	deadline := time.Now().Add(2 * time.Second)
+	for s.broker.Subscribers() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if s.broker.Subscribers() == 0 {
+		t.Fatal("SSE handler never subscribed")
+	}
 	s.broker.Publish(events.Event{Type: "rotated-quota", Account: "work", Detail: "test"})
 	buf := make([]byte, 512)
 	n, err := resp.Body.Read(buf)

@@ -49,6 +49,19 @@ func (b *Broker) Subscribe() chan Event {
 	return ch
 }
 
+// Subscribers is how many channels are attached.
+//
+// For tests: a subscriber registers when the SSE handler runs, which is some
+// time after the HTTP response headers arrive, so a test that publishes as
+// soon as Get returns can publish into an empty broker and then wait for an
+// event that was never sent to anyone. Exported rather than test-only because
+// internal/admin's tests are in a different package.
+func (b *Broker) Subscribers() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs)
+}
+
 // Unsubscribe removes and closes a subscription channel.
 func (b *Broker) Unsubscribe(ch chan Event) {
 	b.mu.Lock()
