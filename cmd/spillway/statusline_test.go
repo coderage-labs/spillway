@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -356,14 +357,17 @@ func TestRenderReserveOnlyPoolIsNotDry(t *testing.T) {
 // and much later than the change that caused it.
 func TestSelfPathKeepsTheSymlinkItWasInvokedAs(t *testing.T) {
 	dir := t.TempDir()
-	real := filepath.Join(dir, "versioned", "spillway")
+	// Windows LookPath honours PATHEXT, so a file with no extension is not
+	// executable there and the lookup falls through to os.Executable — which
+	// made this fail on the runner while the behaviour it tests was correct.
+	real := filepath.Join(dir, "versioned", exeName("spillway"))
 	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(dir, "bin", "spillway")
+	link := filepath.Join(dir, "bin", exeName("spillway"))
 	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -390,14 +394,14 @@ func TestSelfPathKeepsTheSymlinkItWasInvokedAs(t *testing.T) {
 // environment where a relative command is not findable later.
 func TestSelfPathResolvesABareNameOnPath(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "spillway-test-bin")
+	bin := filepath.Join(dir, exeName("spillway-test-bin"))
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
 	old := os.Args
 	t.Cleanup(func() { os.Args = old })
-	os.Args = []string{"spillway-test-bin"}
+	os.Args = []string{exeName("spillway-test-bin")}
 
 	got, err := selfPath()
 	if err != nil {
@@ -406,4 +410,12 @@ func TestSelfPathResolvesABareNameOnPath(t *testing.T) {
 	if got != bin {
 		t.Errorf("selfPath() = %q, want the absolute %q", got, bin)
 	}
+}
+
+// exeName gives a fixture the extension its platform needs to be executable.
+func exeName(n string) string {
+	if runtime.GOOS == "windows" {
+		return n + ".exe"
+	}
+	return n
 }
