@@ -22,7 +22,21 @@ import (
 	"strings"
 )
 
-func systemdUnitName() string { return serviceLabel + ".service" }
+// systemdUnitName is the short form of the label: "dev.coderage.spillway"
+// becomes "spillway.service".
+//
+// Reverse-DNS is the convention launchd and Task Scheduler use and is not
+// systemd's — `systemctl --user status spillway` is what a person expects to
+// type. Derived from the label rather than hard-coded so the integration
+// tests still get a unit of their own, and unchanged from what v0.5.0 shipped
+// so nobody is left with an orphaned unit under the old name.
+func systemdUnitName() string {
+	short := serviceLabel
+	if i := strings.LastIndex(short, "."); i >= 0 {
+		short = short[i+1:]
+	}
+	return short + ".service"
+}
 
 func serviceUnitPath() (string, error) {
 	dir, err := os.UserConfigDir()
