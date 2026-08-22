@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/coderage-labs/spillway/compare/v0.3.0...v0.4.0) (2026-08-22)
+
+
+### Features
+
+* `spillway accounts priority`, and show priority in the listing ([9593693](https://github.com/coderage-labs/spillway/commit/9593693fc706ad26e4cb6729ac6b6b5657b83c7b))
+
+
+### Fixes
+
+* Kimi's concurrency cap is not a quota window ([31dc8e2](https://github.com/coderage-labs/spillway/commit/31dc8e28032e1d6182f2c133f0a90784fabf871e))
+* one vocabulary for quota window names across providers ([cfd8e01](https://github.com/coderage-labs/spillway/commit/cfd8e01e4ba0126c468977ce7b5d7a5ee42a6a54))
+* retry launchd bootstrap whatever the reason it failed ([46177d6](https://github.com/coderage-labs/spillway/commit/46177d66eb1bbb258182421267e547ea039f9e8d))
+* the plugin called an account billed when it was not ([ce174b3](https://github.com/coderage-labs/spillway/commit/ce174b3e2219719f61ed11fe0b5cfe625900f618))
+
 ## [0.3.0](https://github.com/coderage-labs/spillway/compare/v0.2.0...v0.3.0) (2026-08-22)
 
 
