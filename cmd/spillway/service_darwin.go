@@ -56,10 +56,16 @@ func plistXML(binPath, outLog, errLog string) string {
 `
 }
 
-func launchctl(args ...string) (string, error) {
+// A variable so the retry logic above it can be tested without a real
+// launchd, which no CI runner and no test has.
+var launchctl = func(args ...string) (string, error) {
 	out, err := exec.Command("launchctl", args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
+
+// bootstrapRetryDelay is short enough to be invisible when the first attempt
+// works and long enough to outlast launchd settling; tests set it to zero.
+var bootstrapRetryDelay = 200 * time.Millisecond
 
 // launchdTarget is the service's launchd address for this user's GUI session.
 func launchdTarget() string {
@@ -103,26 +109,27 @@ func serviceInstall() error {
 	return nil
 }
 
-// bootstrapService loads the plist, waiting out a bootout that has not
-// finished. bootout returns before launchd has actually torn the job down, so
-// bootstrapping straight after one — which is what reinstalling over a running
-// service does — intermittently hits "service already loaded" and reports it
-// as the unhelpful "try re-running as root". Reinstall is the common case now
-// that `spillway install` exists, so it has to be reliable rather than
-// usually-fine.
+// bootstrapService loads the plist, retrying briefly. launchd needs a moment
+// after the previous job goes away, and bootstrapping inside that window
+// fails with EIO — surfaced as the unhelpful "try re-running as root".
+//
+// The first attempt at this checked whether the old job was still registered
+// and gave up when it was not, on the theory that a leftover job was the only
+// thing a retry could fix. That is exactly backwards: a `brew upgrade` had
+// already killed the daemon by deleting the binary out from under it, so the
+// job was long gone, `launchctl print` said so, and the guard turned a
+// transient EIO into a hard failure that left the machine with no daemon.
+// Retry whatever the reason; a bounded wait costs nothing when it works
+// first time, which is the usual case.
 func bootstrapService(plist string) (string, error) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	var out string
 	var err error
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := 0; attempt < 15; attempt++ {
 		if out, err = launchctl("bootstrap", domain, plist); err == nil {
 			return out, nil
 		}
-		if _, perr := launchctl("print", launchdTarget()); perr != nil {
-			// Gone, so the failure is not the old job still being there.
-			return out, err
-		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(bootstrapRetryDelay)
 	}
 	return out, err
 }
