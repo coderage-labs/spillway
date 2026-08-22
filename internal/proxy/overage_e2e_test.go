@@ -37,7 +37,7 @@ func overageProxyRig(t *testing.T, allow bool) (*httptest.Server, *pool.Pool, *r
 	billable.Type = "claude-oauth"
 	billable.SetOverageForTest(provider.Overage{Known: true, Available: true})
 	p := pool.New([]*pool.Account{billable}, now)
-	p.AllowOverage = allow
+	p.Apply(pool.Settings{AllowOverage: allow})
 	p.MarkExhausted(billable, now.Add(4*time.Hour))
 
 	cfg := config.Defaults()
@@ -134,13 +134,12 @@ func TestOverThresholdAccountIsRecordedAsBilledWithoutA429(t *testing.T) {
 	// Quota gone by the headers, but nothing has rejected it.
 	billable := pool.NewAccount("spent-not-rejected", pool.SourceYAML, "tok", "", 0, "")
 	billable.Type = "claude-oauth"
-	billable.AllowOverage = func(b bool) *bool { return &b }(true)
+	billable.SetAllowOverage(func(b bool) *bool { return &b }(true))
 	billable.SetQuotaWindows([]pool.QuotaWindow{
 		{Name: "7d", Limit: 1, Used: 1, ResetAt: now.Add(9 * time.Hour), FetchedAt: now},
 	})
 	p := pool.New([]*pool.Account{billable}, now)
-	p.SwitchThreshold = 0.98
-	p.AllowOverage = true
+	p.Apply(pool.Settings{SwitchThreshold: 0.98, AllowOverage: true})
 
 	if billable.State() != pool.StateOK {
 		t.Fatalf("precondition: state is %v, want StateOK — the point is that "+

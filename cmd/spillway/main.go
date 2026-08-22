@@ -21,6 +21,7 @@ import (
 	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/events"
 	"github.com/coderage-labs/spillway/internal/mitm"
+	"github.com/coderage-labs/spillway/internal/netaddr"
 	"github.com/coderage-labs/spillway/internal/pool"
 	"github.com/coderage-labs/spillway/internal/proxy"
 	"github.com/coderage-labs/spillway/internal/reqlog"
@@ -308,29 +309,7 @@ func runServer(args []string) error {
 	// Live-apply the settings a dashboard write changes, so an edit does not
 	// need a restart (which would drop the SSE stream and re-probe).
 	adminHandler.EnableSettings(cfgPath, func(nc *config.Config) {
-		p.SwitchThreshold = nc.Pool.SwitchThreshold
-		p.CrossProvider = nc.Pool.CrossProvider
-		p.AllowOverage = nc.Pool.AllowOverage
-		disabled := map[string]bool{}
-		for _, a := range nc.Accounts {
-			disabled[a.Name] = a.Disabled
-		}
-		for _, a := range p.Accounts() {
-			// Park/Unpark, not Disable/Enable: un-parking must never revive
-			// an account whose credential died.
-			if disabled[a.Name] {
-				a.Park()
-			} else {
-				a.Unpark()
-			}
-			for _, ca := range nc.Accounts {
-				if ca.Name == a.Name {
-					a.Label = ca.Label
-					a.Priority = ca.Priority
-					a.AllowOverage = ca.AllowOverage
-				}
-			}
-		}
+		p.Apply(poolSettings(nc))
 		logger.Info("settings updated from dashboard",
 			"switchThreshold", nc.Pool.SwitchThreshold, "crossProvider", nc.Pool.CrossProvider)
 	})
@@ -371,6 +350,16 @@ func runServer(args []string) error {
 
 	addr := net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))
 	srv := &http.Server{Addr: addr, Handler: handler}
+
+	// Validate has already refused a non-loopback bind without the opt-in, so
+	// reaching here off loopback means the operator asked for it. Say plainly
+	// what they have exposed: unlike the admin port there is no token to fall
+	// back on, and the credential goes out with every forwarded request.
+	if !netaddr.IsLoopback(cfg.Proxy.Host) {
+		logger.Warn("proxy listener is NOT loopback and has NO authentication — "+
+			"anyone who can reach it spends this pool's quota and sees every prompt "+
+			"(proxy.allowRemote is set)", "addr", addr)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -418,9 +407,9 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 			acct = pool.NewAccount(a.Name, pool.SourceKeychain,
 				oauth.AccessToken, oauth.RefreshToken, oauth.ExpiresAt, a.Upstream)
 			acct.Type = "claude-oauth"
-			acct.Label = a.Label
-			acct.Priority = a.Priority
-			acct.AllowOverage = a.AllowOverage
+			acct.SetLabel(a.Label)
+			acct.SetPriority(a.Priority)
+			acct.SetAllowOverage(a.AllowOverage)
 			// Never log token material — subscription and scopes only.
 			logger.Info("claude account loaded",
 				"name", a.Name,
@@ -470,10 +459,15 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 	}
 
 	p := pool.New(accts, now)
-	p.SwitchThreshold = cfg.Pool.SwitchThreshold
-	p.AllowOverage = cfg.Pool.AllowOverage
+	// Pool-wide settings only: per-account label/priority/overage and park
+	// state are already applied above, at construction, before this pool is
+	// reachable from any other goroutine.
+	p.Apply(pool.Settings{
+		SwitchThreshold: cfg.Pool.SwitchThreshold,
+		CrossProvider:   cfg.Pool.CrossProvider,
+		AllowOverage:    cfg.Pool.AllowOverage,
+	})
 	p.SetTokenManager(mgr)
-	p.CrossProvider = cfg.Pool.CrossProvider
 	usable := 0
 	for _, a := range accts {
 		if a.State() != pool.StateDisabled {
@@ -486,6 +480,29 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 		return nil, errors.New("no usable accounts: every token is expired and unrecoverable — run `spillway login claude <name>`")
 	}
 	return p, nil
+}
+
+// poolSettings maps the dashboard-editable subset of a loaded config to
+// pool.Settings, so the settings handler never touches Pool/Account fields
+// directly (issue #13) — it hands the pool a plain DTO and pool.Apply does
+// the locking.
+func poolSettings(nc *config.Config) pool.Settings {
+	accts := make([]pool.AccountSettings, len(nc.Accounts))
+	for i, a := range nc.Accounts {
+		accts[i] = pool.AccountSettings{
+			Name:         a.Name,
+			Disabled:     a.Disabled,
+			Label:        a.Label,
+			Priority:     a.Priority,
+			AllowOverage: a.AllowOverage,
+		}
+	}
+	return pool.Settings{
+		SwitchThreshold: nc.Pool.SwitchThreshold,
+		CrossProvider:   nc.Pool.CrossProvider,
+		AllowOverage:    nc.Pool.AllowOverage,
+		Accounts:        accts,
+	}
 }
 
 func parseLevel(s string) slog.Level {

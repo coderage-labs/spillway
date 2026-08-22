@@ -94,7 +94,7 @@ func TestSelectPinsSessionToItsProvider(t *testing.T) {
 func TestCrossProviderAllowsRotationWhenEnabled(t *testing.T) {
 	claude, kimi := claudeAccount("work"), kimiAccount("kimi")
 	p := New([]*Account{claude, kimi}, time.Now())
-	p.CrossProvider = true
+	p.crossProvider = true
 
 	first := p.SelectFor("sess", nil)
 	p.Done(first)
@@ -154,9 +154,9 @@ func asIncompatibility(err error, target **Incompatibility) bool {
 // while a preferred one can serve.
 func TestPriorityPrefersLowerNumber(t *testing.T) {
 	reserve := claudeAccount("reserve")
-	reserve.Priority = 100
+	reserve.priority = 100
 	primary := claudeAccount("primary")
-	primary.Priority = 0
+	primary.priority = 0
 	p := New([]*Account{reserve, primary}, time.Now())
 
 	got := p.SelectFor("s1", nil)
@@ -169,9 +169,9 @@ func TestPriorityPrefersLowerNumber(t *testing.T) {
 // block a lower-priority one.
 func TestPriorityFallsThroughWhenPreferredIsSpent(t *testing.T) {
 	reserve := claudeAccount("reserve")
-	reserve.Priority = 100
+	reserve.priority = 100
 	primary := claudeAccount("primary")
-	primary.Priority = 0
+	primary.priority = 0
 	p := New([]*Account{reserve, primary}, time.Now())
 	p.MarkExhausted(primary, time.Now().Add(time.Hour))
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coderage-labs/spillway/internal/netaddr"
 	"github.com/coderage-labs/spillway/internal/provider"
 	"gopkg.in/yaml.v3"
 )
@@ -47,6 +48,13 @@ type Config struct {
 	Proxy struct {
 		Port int    `yaml:"port"`
 		Host string `yaml:"host"`
+		// AllowRemote is the opt-in required to bind the proxy anywhere but
+		// loopback. The proxy port is unauthenticated and injects a pooled
+		// account's credential into everything it forwards, so a non-loopback
+		// bind hands the quota — and with allowOverage, the money — to anyone
+		// who can reach it, along with every prompt in flight. Validate
+		// refuses that bind without this flag; see the guard there.
+		AllowRemote bool `yaml:"allowRemote,omitempty"`
 	} `yaml:"proxy"`
 	Upstream string          `yaml:"upstream"`
 	Accounts []AccountConfig `yaml:"accounts,omitempty"`
@@ -286,6 +294,22 @@ func (c *Config) Validate() error {
 	}
 	if c.Proxy.Host == "" {
 		return errors.New("proxy.host: must not be empty")
+	}
+	// The proxy listener has no authentication of its own and stamps a pooled
+	// account's bearer token onto every request it forwards. Off loopback
+	// that is an open credential-injecting relay: anyone who can reach the
+	// port spends the quota (the money, under allowOverage) and can read or
+	// rewrite every prompt and response passing through. The admin listener
+	// already fails closed on the same question by making its token mandatory
+	// off loopback; this port holds more and so refuses outright unless the
+	// operator says the words. Refusing at Validate means the daemon does not
+	// start, rather than starting and quietly exposing the credential.
+	if !netaddr.IsLoopback(c.Proxy.Host) && !c.Proxy.AllowRemote {
+		return fmt.Errorf("proxy.host: %q is not loopback — the proxy port is "+
+			"unauthenticated and injects a pooled account's credential into every "+
+			"request, so binding it off this machine lets anyone who can reach it "+
+			"spend your quota and read your prompts; use %s, or set proxy.allowRemote: true "+
+			"if you really mean to expose it", c.Proxy.Host, DefaultProxyHost)
 	}
 	if err := validateUpstream("upstream", c.Upstream); err != nil {
 		return err

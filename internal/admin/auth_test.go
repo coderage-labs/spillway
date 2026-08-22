@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"fmt"
 	"github.com/coderage-labs/spillway/internal/config"
 	"net/http"
@@ -50,18 +51,75 @@ func TestRequireTokenWithoutTokenFailsClosed(t *testing.T) {
 	}
 }
 
+func getAuth(t *testing.T, s *Server, path, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7657"+path, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestRequireTokenAcceptsCorrectRejectsWrong(t *testing.T) {
 	s := serverWithToken(t, "sekrit")
 
 	if rec := get(t, s, "/api/accounts"); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no token: got %d, want 401", rec.Code)
 	}
-	if rec := get(t, s, "/api/accounts?token=wrong"); rec.Code != http.StatusUnauthorized {
+	if rec := getAuth(t, s, "/api/accounts", "wrong"); rec.Code != http.StatusUnauthorized {
 		t.Errorf("wrong token: got %d, want 401", rec.Code)
 	}
-	if rec := get(t, s, "/api/accounts?token=sekrit"); rec.Code != http.StatusOK {
+	if rec := getAuth(t, s, "/api/accounts", "sekrit"); rec.Code != http.StatusOK {
 		t.Errorf("correct token: got %d, want 200", rec.Code)
 	}
+}
+
+// A token in the query string ends up in browser history and in every
+// intermediary's access log. The dashboard sends a bearer header everywhere
+// it can, so the query form survives on one endpoint only: the SSE stream,
+// where EventSource gives the page no way to set a header. Anywhere else a
+// correct token in the URL must still be refused, or the narrowing is
+// cosmetic.
+func TestQueryStringTokenOnlyWorksOnTheEventStream(t *testing.T) {
+	for _, path := range []string{
+		"/api/accounts", "/api/state", "/api/requests", "/api/settings",
+		"/api/quota-history", "/api/activity",
+	} {
+		s := serverWithToken(t, "sekrit")
+		if rec := get(t, s, path+"?token=sekrit"); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s with the correct token in the query string: got %d, want 401 "+
+				"(only /api/events may take it there)", path, rec.Code)
+		}
+		if rec := getAuth(t, s, path, "sekrit"); rec.Code == http.StatusUnauthorized {
+			t.Errorf("%s with the correct token in the Authorization header: got 401, "+
+				"want it accepted", path)
+		}
+	}
+
+	// The stream keeps the query form, and still rejects a wrong token there.
+	s := serverWithToken(t, "sekrit")
+	if rec := getStream(t, s, "/api/events?token=sekrit"); rec.Code != http.StatusOK {
+		t.Errorf("event stream with the correct token in the query string: got %d, want 200 "+
+			"(EventSource cannot send a header — removing this breaks the dashboard)", rec.Code)
+	}
+	if rec := getStream(t, s, "/api/events?token=wrong"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("event stream with a wrong token in the query string: got %d, want 401", rec.Code)
+	}
+	if rec := getStream(t, s, "/api/events"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("event stream with no token: got %d, want 401", rec.Code)
+	}
+}
+
+// getStream drives an SSE request with an already-cancelled context, so the
+// handler writes its status and returns instead of blocking on the broker.
+func getStream(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7657"+path, nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	return rec
 }
 
 // Dropping the token must not drop the guards that actually stop browser

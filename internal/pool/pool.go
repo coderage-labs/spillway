@@ -52,19 +52,25 @@ type Account struct {
 	// LastModel is the model this account most recently served, after any
 	// modelMap rewrite — the answer to "what am I actually talking to".
 	lastModel string
-	// Priority orders selection: lower is preferred. Equal priorities fall
-	// back to least-loaded, so this is a preference, not a queue.
-	Priority int
+	// priority orders selection: lower is preferred. Equal priorities fall
+	// back to least-loaded, so this is a preference, not a queue. Guarded by
+	// mu: the dashboard settings handler writes it from the admin HTTP
+	// goroutine while the selector reads it (via Priority/better) from
+	// whatever goroutine is picking an account for a request — an unguarded
+	// field here raced (issue #13).
+	priority int
 	// overage is the provider's last word on serving past quota at cost.
 	// Guarded by mu.
 	overage provider.Overage
-	// AllowOverage permits spending on this account, overriding the pool
+	// allowOverage permits spending on this account, overriding the pool
 	// default. nil means "follow the pool" — the tri-state is deliberate, so
-	// that an account can opt out of a pool-wide yes.
-	AllowOverage *bool
-	// Label is an optional human name for display; the dashboard falls back
-	// to deriving one from Name when it is empty.
-	Label string
+	// that an account can opt out of a pool-wide yes. Guarded by mu for the
+	// same reason as priority — this is the money switch (issue #13): a torn
+	// read here decides whether the request bills.
+	allowOverage *bool
+	// label is an optional human name for display; the dashboard falls back
+	// to deriving one from Name when it is empty. Guarded by mu (issue #13).
+	label string
 	// Source records where credentials live (SourceYAML / SourceKeychain).
 	Source string
 	// Type is the provider kind ("claude-oauth" / "kimi-oauth") — error
@@ -203,19 +209,26 @@ type Pool struct {
 	// families mid-session can change the context ceiling underneath it
 	// (§6.18).
 	sessionProvider map[string]string
-	// CrossProvider allows rotation between providers mid-session. Off by
+	// crossProvider allows rotation between providers mid-session. Off by
 	// default: same-provider rotation is transparent, cross-provider is not.
-	CrossProvider bool
+	// Guarded by mu — see allowOverage below for why (issue #13).
+	crossProvider bool
 	tm            TokenManager
-	// AllowOverage permits the last-resort tier: serving from an account
+	// allowOverage permits the last-resort tier: serving from an account
 	// whose subscription quota is gone but which may bill for extra usage.
 	// Off by default — a proxy that starts spending money because a limit
 	// was reached is not something to opt out of after the fact.
-	AllowOverage bool
-	// SwitchThreshold is the used-fraction (0-1) at or above which an
+	//
+	// Guarded by mu. The dashboard settings handler used to assign this (and
+	// switchThreshold/crossProvider) as a plain exported field from the admin
+	// HTTP goroutine while SelectExcept read it under mu from whatever
+	// goroutine was selecting an account — a data race on the field deciding
+	// whether a request bills (issue #13). Apply is now the only writer.
+	allowOverage bool
+	// switchThreshold is the used-fraction (0-1) at or above which an
 	// account is skipped while another eligible account exists (§6.5
-	// predictive rotation). 0 → default 0.98.
-	SwitchThreshold float64
+	// predictive rotation). 0 → default 0.98. Guarded by mu (issue #13).
+	switchThreshold float64
 	// holds are the requests currently parked waiting for a reset, guarded
 	// by mu. See hold.go.
 	holds map[*hold]struct{}
@@ -232,18 +245,27 @@ func New(accounts []*Account, now time.Time) *Pool {
 		}
 	}
 	return &Pool{accounts: accounts, sticky: map[string]string{},
-		sessionProvider: map[string]string{}, SwitchThreshold: 0.98}
+		sessionProvider: map[string]string{}, switchThreshold: 0.98}
 }
 
 // Threshold is the used-fraction at or above which an account is rotated
 // away from while a better one exists. Exported so that what the dashboard
 // calls "spent" is decided by the same number the selector uses, rather than
 // by a constant copied into the UI.
-func (p *Pool) Threshold() float64 { return p.threshold() }
+//
+// Locked (unlike threshold, its unexported counterpart called from within
+// SelectExcept which already holds mu): callers outside the package have no
+// other synchronization with Apply's write.
+func (p *Pool) Threshold() float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.threshold()
+}
 
+// threshold assumes mu is already held.
 func (p *Pool) threshold() float64 {
-	if p.SwitchThreshold > 0 {
-		return p.SwitchThreshold
+	if p.switchThreshold > 0 {
+		return p.switchThreshold
 	}
 	return 0.98
 }
@@ -328,7 +350,7 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 		if skip[a.Name] {
 			return false
 		}
-		if !p.CrossProvider {
+		if !p.crossProvider {
 			if want, ok := p.sessionProvider[session]; ok && ProviderOf(a.Type) != want {
 				return false
 			}
@@ -386,7 +408,7 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 		// whole tier: p.AllowOverage is only the default, and an account
 		// with an explicit opt-in must work even when the pool says no.
 		best = p.leastLoaded(func(a *Account) bool {
-			return !a.disabledOrParked() && a.CanOverage(p.AllowOverage) && usable(a)
+			return !a.disabledOrParked() && a.CanOverage(p.allowOverage) && usable(a)
 		})
 	}
 	if best == nil {
@@ -438,8 +460,8 @@ func (p *Pool) leastLoaded(match func(*Account) bool) *Account {
 }
 
 func better(a, b *Account) bool {
-	if a.Priority != b.Priority {
-		return a.Priority < b.Priority
+	if pa, pb := a.Priority(), b.Priority(); pa != pb {
+		return pa < pb
 	}
 	return a.load() < b.load()
 }
@@ -559,7 +581,7 @@ func (a *Account) Overage() provider.Overage {
 //     out, so require the provider to have confirmed it.
 func (a *Account) CanOverage(poolAllows bool) bool {
 	a.mu.Lock()
-	ov, allow := a.overage, a.AllowOverage
+	ov, allow := a.overage, a.allowOverage
 	a.mu.Unlock()
 	if ov.Known && !ov.Available {
 		return false
@@ -590,6 +612,50 @@ func (a *Account) Parked() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.parked
+}
+
+// Label returns the display name the dashboard uses instead of Name, or ""
+// to fall back to deriving one from Name.
+func (a *Account) Label() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.label
+}
+
+// SetLabel sets the display name. Locked: this is written from the admin
+// settings handler while the selector and the dashboard's own read path can
+// run concurrently (issue #13).
+func (a *Account) SetLabel(l string) {
+	a.mu.Lock()
+	a.label = l
+	a.mu.Unlock()
+}
+
+// Priority returns the account's selection priority (lower preferred).
+func (a *Account) Priority() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.priority
+}
+
+// SetPriority sets the selection priority. Locked for the same reason as
+// SetLabel — better() reads Priority from the selector goroutine while the
+// dashboard can write it concurrently (issue #13).
+func (a *Account) SetPriority(p int) {
+	a.mu.Lock()
+	a.priority = p
+	a.mu.Unlock()
+}
+
+// SetAllowOverage sets the per-account overage override (nil = follow the
+// pool default). Locked: CanOverage reads this under mu from the selector
+// while the dashboard settings handler can write it concurrently — this is
+// the money switch the issue is named for, so an unguarded write here is not
+// acceptable at any point.
+func (a *Account) SetAllowOverage(v *bool) {
+	a.mu.Lock()
+	a.allowOverage = v
+	a.mu.Unlock()
 }
 
 // SetLastModel records the model this account most recently served.
@@ -725,13 +791,33 @@ func (a *Account) eligible() bool { return !a.Parked() && a.State() == StateOK }
 // misses the commonest case by far — an account whose quota headers say it is
 // finished but which has never been 429'd, which is exactly what a spent
 // account looks like when spillway has been rotating away from it correctly.
-func (p *Pool) WouldBill(a *Account) bool { return p.wouldBill(a) }
+// Locked: unlike wouldBill (its unexported counterpart, called only from
+// within SelectExcept which already holds mu), a caller outside the package
+// has no other synchronization with Apply's write to allowOverage.
+func (p *Pool) WouldBill(a *Account) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.wouldBill(a)
+}
 
+// wouldBill assumes mu is already held.
 func (p *Pool) wouldBill(a *Account) bool {
-	if !a.CanOverage(p.AllowOverage) {
+	if !a.CanOverage(p.allowOverage) {
 		return false
 	}
 	return a.State() == StateExhausted || a.OverThreshold(p.threshold())
+}
+
+// AllowOverage reports the pool-wide default for serving from an account
+// past its subscription quota, at cost (per-account CanOverage can still
+// override it). Locked: this is exactly the field the dashboard settings
+// handler used to overwrite unguarded from the admin HTTP goroutine
+// (issue #13) while this getter's callers (e.g. the dashboard's own account
+// listing) ran concurrently with the selector.
+func (p *Pool) AllowOverage() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.allowOverage
 }
 
 // disabledOrParked is the overage tier's floor. That tier deliberately admits
@@ -770,3 +856,80 @@ func (p *Pool) find(name string) *Account {
 // only from a provider response; tests need to arrange the state that a
 // response would have produced.
 func (a *Account) SetOverageForTest(ov provider.Overage) { a.setOverage(ov) }
+
+// AccountSettings is the subset of one account's config that the dashboard
+// can edit live. A plain DTO rather than *config.AccountConfig so this
+// package doesn't have to import internal/config — pool has no dependency on
+// config today (config doesn't import pool either, so nothing would cycle),
+// but pulling in the whole on-disk config schema for four fields would
+// couple pool's account model to yaml tags, defaults and validation that
+// belong to config, not to selection. The caller (cmd/spillway) does the
+// mapping from *config.Config.
+type AccountSettings struct {
+	// Name identifies the pool account this applies to; entries whose Name
+	// doesn't match any pool account are ignored.
+	Name         string
+	Disabled     bool
+	Label        string
+	Priority     int
+	AllowOverage *bool
+}
+
+// Settings is the subset of pool-wide config the dashboard can edit live,
+// plus any per-account settings to apply alongside it. See AccountSettings
+// for why this isn't *config.Config.
+type Settings struct {
+	SwitchThreshold float64
+	CrossProvider   bool
+	AllowOverage    bool
+	// Accounts, if non-empty, is applied to the matching pool accounts by
+	// Name. Left empty (e.g. from buildPool at startup, where per-account
+	// fields are already set at construction and park state is applied
+	// separately) it touches no account — Apply only ever parks/unparks or
+	// relabels an account explicitly named here, it never unparks one just
+	// because it's absent from this call.
+	Accounts []AccountSettings
+}
+
+// Apply sets pool-wide and named per-account settings atomically with
+// respect to Select/SelectFor/SelectExcept.
+//
+// This replaces the dashboard settings handler assigning SwitchThreshold,
+// CrossProvider, AllowOverage, Label, Priority and AllowOverage as plain
+// struct fields directly from the admin HTTP goroutine (issue #13): every
+// one of those is read by the selector (SelectExcept, better, CanOverage)
+// from a request-handling goroutine, under mu, so a plain field write raced
+// with it — for AllowOverage, a torn read of the money switch mid-selection
+// could decide whether a request bills. Apply is now the only writer, and
+// takes the same locks the selector's reads do.
+func (p *Pool) Apply(s Settings) {
+	p.mu.Lock()
+	p.switchThreshold = s.SwitchThreshold
+	p.crossProvider = s.CrossProvider
+	p.allowOverage = s.AllowOverage
+	p.mu.Unlock()
+
+	if len(s.Accounts) == 0 {
+		return
+	}
+	byName := make(map[string]AccountSettings, len(s.Accounts))
+	for _, as := range s.Accounts {
+		byName[as.Name] = as
+	}
+	for _, a := range p.Accounts() {
+		as, ok := byName[a.Name]
+		if !ok {
+			continue
+		}
+		// Park/Unpark, not Disable/Enable: un-parking must never revive an
+		// account whose credential died.
+		if as.Disabled {
+			a.Park()
+		} else {
+			a.Unpark()
+		}
+		a.SetLabel(as.Label)
+		a.SetPriority(as.Priority)
+		a.SetAllowOverage(as.AllowOverage)
+	}
+}

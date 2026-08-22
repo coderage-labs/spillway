@@ -29,20 +29,22 @@ import (
 func main() {
 	now := time.Now()
 	paid := pool.NewAccount("you@side.example", pool.SourceYAML, "t", "", 0, "")
-	paid.Type, paid.Label = "claude-oauth", "side"
+	paid.Type = "claude-oauth"
+	paid.SetLabel("side")
 	paid.SetOverageForTest(provider.Overage{Known: true, Available: true})
 	paid.SetQuotaWindows([]pool.QuotaWindow{
 		{Name: "5h", Limit: 1, Used: 0.1, ResetAt: now.Add(3 * time.Hour), FetchedAt: now},
 		{Name: "7d", Limit: 1, Used: 1, ResetAt: now.Add(13 * time.Hour), FetchedAt: now},
 	})
 	free := pool.NewAccount("you@acme.example", pool.SourceYAML, "t", "", 0, "")
-	free.Type, free.Label = "claude-oauth", "work"
+	free.Type = "claude-oauth"
+	free.SetLabel("work")
 	free.SetQuotaWindows([]pool.QuotaWindow{
 		{Name: "5h", Limit: 1, Used: 0.97, ResetAt: now.Add(40 * time.Minute), FetchedAt: now},
 		{Name: "7d", Limit: 1, Used: 0.6, ResetAt: now.Add(30 * time.Hour), FetchedAt: now},
 	})
 	p := pool.New([]*pool.Account{free, paid}, now)
-	p.AllowOverage = true
+	p.Apply(pool.Settings{AllowOverage: true})
 	p.MarkExhausted(paid, now.Add(13*time.Hour))
 	release := p.BeginHold(now.Add(2*time.Hour + 14*time.Minute))
 	defer release()

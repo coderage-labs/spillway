@@ -23,6 +23,7 @@ import (
 
 	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/events"
+	"github.com/coderage-labs/spillway/internal/netaddr"
 	"github.com/coderage-labs/spillway/internal/pool"
 	"github.com/coderage-labs/spillway/internal/reqlog"
 )
@@ -32,6 +33,10 @@ const DefaultAddr = "127.0.0.1:7657"
 
 // sseHeartbeat is how often the event stream emits a keep-alive comment.
 const sseHeartbeat = 25 * time.Second
+
+// eventsPath is the SSE stream. Named because authorized() has to single it
+// out: it is the only endpoint that may carry its token in the query string.
+const eventsPath = "/api/events"
 
 //go:embed static/index.html static/logo.svg
 var staticFS embed.FS
@@ -143,19 +148,10 @@ func sunPathMax() int {
 	return 103 // darwin and the BSDs
 }
 
-// IsLoopback reports whether addr binds only to the local machine.
-func IsLoopback(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	host = strings.Trim(host, "[]")
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
+// IsLoopback reports whether addr binds only to the local machine. The
+// implementation lives in netaddr because config gates proxy.host on the same
+// question and cannot import this package.
+func IsLoopback(addr string) bool { return netaddr.IsLoopback(addr) }
 
 // GenerateToken returns a fresh per-start admin token.
 func GenerateToken() (string, error) {
@@ -244,7 +240,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handlePin(w, r)
 	case r.URL.Path == "/api/settings":
 		s.handleSettings(w, r)
-	case r.URL.Path == "/api/events":
+	case r.URL.Path == eventsPath:
 		s.handleEvents(w, r)
 	default:
 		http.NotFound(w, r)
@@ -258,10 +254,15 @@ func (s *Server) authorized(r *http.Request) bool {
 	if s.token == "" {
 		return false // required but absent: fail closed
 	}
-	if r.URL.Query().Get("token") == s.token {
+	if r.Header.Get("Authorization") == "Bearer "+s.token {
 		return true
 	}
-	return r.Header.Get("Authorization") == "Bearer "+s.token
+	// A token in the query string is written into browser history and every
+	// intermediary's access log, so it is accepted on one endpoint only: the
+	// SSE stream, where EventSource gives the page no way to set a header.
+	// Everything else the dashboard calls uses plain fetch and sends the
+	// bearer header, so nothing else needs this.
+	return r.URL.Path == eventsPath && r.URL.Query().Get("token") == s.token
 }
 
 // csrfOK decides whether a write may proceed.
@@ -345,7 +346,7 @@ func (s *Server) accounts() []accountJSON {
 	for _, a := range s.pool.Accounts() {
 		j := accountJSON{
 			Name:          a.Name,
-			Label:         a.Label,
+			Label:         a.Label(),
 			Type:          a.Type,
 			Source:        a.Source,
 			InFlight:      a.InFlight(),
@@ -353,8 +354,8 @@ func (s *Server) accounts() []accountJSON {
 			Overage:       a.Overage().Available,
 			OverageReason: a.Overage().Reason,
 			OverageUsed:   a.Overage().Utilization,
-			Paid:          a.CanOverage(s.pool.AllowOverage),
-			Priority:      a.Priority,
+			Paid:          a.CanOverage(s.pool.AllowOverage()),
+			Priority:      a.Priority(),
 			LastModel:     a.LastModel(),
 			Upstream:      a.Upstream,
 			Windows:       a.QuotaWindows(),

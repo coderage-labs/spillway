@@ -59,14 +59,16 @@ func TestTokenRequired(t *testing.T) {
 		t.Errorf("bearer status = %d, want 200", resp.StatusCode)
 	}
 
-	// ?token= → 200.
+	// ?token= → 401 anywhere but the SSE stream, which is the only endpoint
+	// with no way to send a header. See
+	// TestQueryStringTokenOnlyWorksOnTheEventStream.
 	resp, err = http.Get(front.URL + "/api/accounts?token=" + testToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("query-token status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("query-token status = %d, want 401", resp.StatusCode)
 	}
 }
 
@@ -103,7 +105,8 @@ func TestMutatingOriginRejected(t *testing.T) {
 	front := httptest.NewServer(s)
 	defer front.Close()
 
-	req, _ := http.NewRequest(http.MethodPost, front.URL+"/api/accounts?token="+testToken, strings.NewReader(`{}`))
+	req, _ := http.NewRequest(http.MethodPost, front.URL+"/api/accounts", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Origin", "https://evil.example.com")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -114,7 +117,8 @@ func TestMutatingOriginRejected(t *testing.T) {
 		t.Errorf("POST with Origin status = %d, want 403", resp.StatusCode)
 	}
 
-	req, _ = http.NewRequest(http.MethodPost, front.URL+"/api/accounts?token="+testToken, strings.NewReader(`{}`))
+	req, _ = http.NewRequest(http.MethodPost, front.URL+"/api/accounts", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -165,7 +169,8 @@ func TestRequestsEndpoint(t *testing.T) {
 
 	front := httptest.NewServer(s)
 	defer front.Close()
-	resp, err := http.Get(front.URL + "/api/requests?limit=10&token=" + testToken)
+	req, _ := authed(front.URL + "/api/requests?limit=10")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
