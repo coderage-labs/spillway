@@ -206,7 +206,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Everything except /api/settings is read-only. The CSRF guard above is
 	// load-bearing from here on: /api/settings is the first endpoint that
 	// writes, and a browser page must not be able to drive it.
-	if r.URL.Path != "/api/settings" && r.Method != http.MethodGet && r.Method != http.MethodHead {
+	// /api/pin writes too, and for the same reason as /api/settings it is
+	// behind the CSRF guard rather than this one.
+	if r.URL.Path != "/api/settings" && r.URL.Path != "/api/pin" &&
+		r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -233,6 +236,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleQuotaHistory(w, r)
 	case r.URL.Path == "/api/activity":
 		s.handleActivity(w, r)
+	case r.URL.Path == "/api/pin":
+		s.handlePin(w, r)
 	case r.URL.Path == "/api/settings":
 		s.handleSettings(w, r)
 	case r.URL.Path == eventsPath:

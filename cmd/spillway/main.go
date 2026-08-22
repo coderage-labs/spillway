@@ -44,6 +44,8 @@ func main() {
 		err = runServer(os.Args[2:])
 	case "run":
 		err = runClaude(os.Args[2:])
+	case "switch":
+		err = runSwitch(os.Args[2:])
 	case "status":
 		err = runStatus(len(os.Args) > 2 && os.Args[2] == "--json")
 	case "login":
@@ -97,6 +99,7 @@ func usage() {
 		"       spillway install [--force] [--plugin-source <path|owner/repo>]",
 		"                                                   service + status line + plugin, in one go",
 		"       spillway uninstall                          undo it",
+		"       spillway switch <account>|--auto [--force]   point the pool at one account",
 		"       spillway status [--json]",
 		"       spillway login claude <name>",
 		"       spillway login kimi <name>",

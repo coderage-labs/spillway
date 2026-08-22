@@ -113,9 +113,13 @@
            grid-template-columns:
              repeat(auto-fit, minmax(max(260px, (100% - 3 * .7rem) / 4), 1fr)); }
   .tank { padding: .85rem .95rem 1rem; }
-  .tank-head { display: flex; align-items: baseline; gap: .5rem; }
+  /* Wraps rather than overflows: a narrow card (260px floor) plus a long
+     name, the flag chip AND the pin button is more than one line can hold,
+     and letting the row wrap beats letting the pin button run off the card
+     -- two earlier designs here were rejected for exactly that overflow. */
+  .tank-head { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; row-gap: .3rem; }
   .tank-name { font-weight: 640; letter-spacing: -.015em; font-size: 13.5px;
-               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+               min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .flag { margin-left: auto; font-size: 9px; letter-spacing: .14em; text-transform: uppercase;
           color: var(--ink-2); white-space: nowrap; display: flex; align-items: center; gap: .3rem; }
   .flag.serving { color: var(--water-a); }
@@ -155,6 +159,34 @@
   .tank-addr { color: var(--ink-2); font-size: 10.5px; margin-top: .15rem;
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
   .tank-sub { color: var(--ink-2); font-size: 10.5px; margin: 0 0 .85rem; opacity: .7; }
+
+  /* Pin control (#11). A separate pill beside the flag rather than folded
+     into it: the flag reports what an account is doing right now (serving,
+     dry, paid), which the pool decides; pin reports what the OPERATOR
+     decided, and the two can disagree -- a paid account can still be the
+     one pinned. Unfilled until active so an unpinned card does not read as
+     already carrying a decision. */
+  .pin-btn { font: inherit; font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+             background: transparent; color: var(--ink-2); border: 1px solid var(--wall);
+             border-radius: 999px; padding: .15rem .55rem; line-height: 1.4;
+             cursor: pointer; white-space: nowrap; }
+  .pin-btn:hover { border-color: var(--water-a); color: var(--ink); }
+  .pin-btn.active { background: var(--water-b); color: #fff; border-color: var(--water-b); }
+  .tank.pinned { box-shadow: var(--shadow), inset 0 0 0 1px var(--water-a); }
+  /* Absent, not empty, the rest of the time -- same reasoning as .hold: a
+     result/conflict box that is almost never shown must not render as a
+     blank strip under every tank. */
+  .pin-msg { display: none; margin-top: .5rem; padding: .45rem .6rem;
+             border-radius: 6px; font-size: 11px; line-height: 1.45;
+             background: var(--deep); border: 1px solid var(--wall); }
+  .pin-msg.show { display: block; }
+  .pin-msg p { margin: 0 0 .4rem; }
+  .pin-msg.conflict { border-color: color-mix(in srgb, var(--warning) 60%, var(--wall)); }
+  .pin-msg.bad { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 45%, var(--wall)); }
+  .pin-msg.ok { color: var(--water-a); }
+  .pin-msg .row { display: flex; gap: .5rem; }
+  .pin-msg .row button { font-size: 10.5px; padding: .2rem .55rem; }
+  .pin-msg .row button.ghost { background: transparent; color: var(--ink-2); border: 1px solid var(--wall); }
 
   .cyls { display: flex; gap: .75rem; }
   .cyl { flex: 1; min-width: 0; text-align: center; }
@@ -558,6 +590,12 @@ const labelFor = new Map();
 // /api/settings: anything exposed there is writable, and this is the one
 // setting that spends money.
 const acctBy = new Map();
+// The name the pool is pinned to, or "". Set ONLY from state.pinned on each
+// poll (see refresh()) -- never from a click. A click's own request can
+// fail (400/409), and another client (the CLI `spillway switch`) can pin or
+// unpin between polls, so local state set on click would be wrong the
+// moment either happens. Rendering always asks the server what is true.
+let pinnedAccount = "";
 function setLive(state, label) {
   const el = document.getElementById("live");
   el.dataset.state = state; el.textContent = label;
@@ -810,6 +848,14 @@ function ensureCard(a) {
   const swatch = span("swatch", head);
   const name = span("tank-name", head);
   const flag = span("flag", head);
+  const pinBtn = document.createElement("button");
+  pinBtn.type = "button";
+  pinBtn.className = "pin-btn";
+  head.appendChild(pinBtn);
+  // Inline result/conflict box for the pin control. Sits right under the
+  // header so it appears next to the control that produced it, not in some
+  // shared banner far away that the reader has to connect back to a tank.
+  const pinMsg = div("pin-msg", card);
   // Always present, even when empty: an account whose name IS its display
   // name has nothing to show here, but dropping the line shortens the card
   // and knocks its tanks out of line with its neighbours'.
@@ -817,7 +863,9 @@ function ensureCard(a) {
   const sub = div("tank-sub", card);
   const cylWrap = div("cyls", card);
 
-  entry = { card, swatch, name, flag, addr, sub, cylWrap, cyls: new Map() };
+  entry = { card, swatch, name, flag, pinBtn, pinMsg, addr, sub, cylWrap,
+            cyls: new Map(), acctName: a.name };
+  pinBtn.addEventListener("click", () => onPinClick(entry));
   tankCards.set(a.name, entry);
   document.getElementById("accounts").appendChild(card);
   return entry;
@@ -879,6 +927,101 @@ function ensureCyl(entry, w) {
   return cyl;
 }
 
+// ── pin (#11) ────────────────────────────────────────────────────────────
+// POST/DELETE /api/pin. 409 is the refusal --force overrides (pinning would
+// spend money, or it changes provider mid-session): the request is well
+// formed and the answer may be different if the caller means it, so it gets
+// offered as a choice. 400 means don't retry -- unknown account or a
+// malformed request, which force cannot fix.
+async function pinRequest(name, force) {
+  // auth() wraps the init, not the URL — it moved to header auth when the
+  // query-string token was gated to /api/events. Passing it as the URL left
+  // the request unauthenticated and, with a token set, put an object where
+  // the URL belongs. Invisible on a loopback dashboard, which has no token.
+  const r = await fetch("/api/pin", auth({
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ account: name, force: !!force }),
+  }));
+  const text = await r.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { /* error bodies are plain text */ }
+  return { status: r.status, text, json };
+}
+
+function clearPinMsg(entry) {
+  entry.pinMsg.className = "pin-msg";
+  entry.pinMsg.innerHTML = "";
+}
+
+function showPinNote(entry, tone, text) {
+  entry.pinMsg.className = "pin-msg show" + (tone ? " " + tone : "");
+  entry.pinMsg.innerHTML = "";
+  const p = document.createElement("p");
+  p.textContent = text;
+  entry.pinMsg.appendChild(p);
+  if (tone === "ok") setTimeout(() => clearPinMsg(entry), 6000);
+}
+
+// The 409 body names which of the two refusals applies; strip the leading
+// "spillway: " wrapper the server prefixes every error with so the reader
+// sees the reason, not the transport detail.
+function showPinConflict(entry, name, reasonText) {
+  entry.pinMsg.className = "pin-msg show conflict";
+  entry.pinMsg.innerHTML = "";
+  const p = document.createElement("p");
+  p.textContent = reasonText.replace(/^spillway:\s*/, "");
+  entry.pinMsg.appendChild(p);
+
+  const row = div("row", entry.pinMsg);
+  const force = document.createElement("button");
+  force.type = "button";
+  force.textContent = "pin anyway";
+  force.addEventListener("click", () => doPin(entry, name, true));
+  row.appendChild(force);
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "ghost";
+  cancel.textContent = "cancel";
+  cancel.addEventListener("click", () => clearPinMsg(entry));
+  row.appendChild(cancel);
+}
+
+async function doPin(entry, name, force) {
+  const res = await pinRequest(name, force);
+  if (res.status === 200) {
+    // The warning is what says switching costs the prompt cache -- surface
+    // it rather than a generic "pinned" so the operator knows the trade.
+    showPinNote(entry, "ok", (res.json && res.json.warning) || "pinned to " + short(name));
+    refresh();
+    return;
+  }
+  if (res.status === 409 && !force) {
+    showPinConflict(entry, name, res.text);
+    return;
+  }
+  // 400, or a forced retry that was refused again, or anything else: say
+  // why and stop. No retry offer here -- the caller already chose once.
+  showPinNote(entry, "bad", res.text || ("pin failed (" + res.status + ")"));
+}
+
+async function doUnpin(entry) {
+  const r = await fetch("/api/pin", auth({ method: "DELETE" }));
+  if (r.ok) {
+    clearPinMsg(entry);
+    refresh();
+  } else {
+    showPinNote(entry, "bad", "unpin failed (" + r.status + ")");
+  }
+}
+
+function onPinClick(entry) {
+  // pinnedAccount, not any state the click itself set -- see its declaration.
+  if (pinnedAccount === entry.acctName) doUnpin(entry);
+  else doPin(entry, entry.acctName, false);
+}
+
 function renderTanks(list) {
   const figures = document.getElementById("figures");
   figures.innerHTML = "";
@@ -907,12 +1050,23 @@ function renderTanks(list) {
     else if (a.inFlight > 0) { flag = "serving"; cls = "serving"; }
     else if (spent) { flag = "spent"; cls = "dry"; }
 
-    entry.card.className = "panel tank";
+    // Driven entirely by pinnedAccount, which is only ever set from
+    // state.pinned on a poll (see refresh()) -- so a pin made from another
+    // client (the CLI `spillway switch`) shows up here within one poll
+    // interval, and a click here never lies about the pool's actual state.
+    const isPinned = pinnedAccount === a.name;
+    entry.card.className = "panel tank" + (isPinned ? " pinned" : "");
     entry.swatch.style.background = colourFor(a.name);
     entry.name.textContent = short(a.name);
     entry.name.title = a.name;
     entry.flag.className = "flag " + cls;
     entry.flag.textContent = flag;
+    entry.pinBtn.className = "pin-btn" + (isPinned ? " active" : "");
+    entry.pinBtn.textContent = isPinned ? "pinned" : "pin";
+    entry.pinBtn.setAttribute("aria-pressed", isPinned ? "true" : "false");
+    entry.pinBtn.title = isPinned
+      ? "Pinned to " + short(a.name) + " — click to return to automatic selection"
+      : "Pin the pool to " + short(a.name);
     // Blank rather than a duplicate when the name is already the label.
     entry.addr.innerHTML = short(a.name) !== a.name ? esc(a.name) : "&nbsp;";
     // Extra usage refills on a billing period, not a quota window, so it can
@@ -1087,6 +1241,9 @@ async function refresh() {
       fetch("/api/state", auth()).then(r => r.ok ? r.json() : null),
     ]);
     renderHold(st);
+    // The only writer of pinnedAccount. See its declaration for why a click
+    // must never set it directly.
+    pinnedAccount = (st && st.pinned) || "";
     if (st && typeof st.threshold === "number" && st.threshold > 0) {
       CREST = 1 - st.threshold;
     }
