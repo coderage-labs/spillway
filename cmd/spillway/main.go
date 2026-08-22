@@ -99,7 +99,7 @@ func usage() {
 		"       spillway install [--force] [--plugin-source <path|owner/repo>]",
 		"                                                   service + status line + plugin, in one go",
 		"       spillway uninstall                          undo it",
-		"       spillway switch <account>|--auto [--force]   point the pool at one account",
+		"       spillway switch [<account>|--auto] [--force]  point the pool at one account; bare, reports what's pinned",
 		"       spillway status [--json]",
 		"       spillway login claude <name>",
 		"       spillway login kimi <name>",
