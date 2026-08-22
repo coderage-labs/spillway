@@ -180,7 +180,7 @@ that works over SSH.
 |---|---|
 | `spillway server` | Run the daemon (proxy + admin listener) |
 | `spillway run [-- <claude args>]` | Spawn `claude` wired to the proxy; refuses if the daemon is down |
-| `spillway status` | Compact pool summary in the terminal |
+| `spillway status [--json]` | Compact pool summary in the terminal; `--json` for state, accounts and recent requests |
 | `spillway accounts [remove <name>]` | List or remove accounts |
 | `spillway accounts overage <name> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — see [Extra usage](#extra-usage) |
 | `spillway login claude <name>` | Add a Claude account (OAuth PKCE) |
@@ -220,6 +220,21 @@ spillway statusline install
 Serving account, the model **actually** going upstream, and a headroom bar per
 quota window. Install refuses to replace a status line another tool owns unless
 you pass `--force`, and uninstall leaves a foreign one alone.
+
+### Claude Code plugin
+
+```sh
+claude plugin marketplace add coderage-labs/spillway
+claude plugin install spillway@spillway
+```
+
+Adds `/spillway`, which reports the pool from inside a session: headroom,
+what is serving, whether anything is parked waiting for a reset, and whether
+any request is being billed.
+
+It exists for Remote Control. The status line and the desktop notification
+both live on the machine, so a session driven from a phone has no way to see
+any of this; a slash command is the one channel that travels.
 
 ## MITM mode
 

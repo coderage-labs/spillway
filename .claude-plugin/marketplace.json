@@ -1,0 +1,18 @@
+{
+  "name": "spillway",
+  "owner": {
+    "name": "Kriskit",
+    "email": "chris@coderage.co.uk"
+  },
+  "metadata": {
+    "description": "Claude Code plugin for the spillway account-pool proxy",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "spillway",
+      "source": "./plugin",
+      "description": "Ask the local spillway daemon how the account pool is doing — headroom, rotation, holds, and whether anything is being billed. Works over Remote Control, where the status line and desktop notifications cannot reach."
+    }
+  ]
+}

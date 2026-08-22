@@ -1,0 +1,12 @@
+{
+  "name": "spillway",
+  "description": "Ask the local spillway proxy how the account pool is doing — quota headroom, rotation, holds, and whether anything is being billed — from inside a Claude Code session, including one driven over Remote Control.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Kriskit",
+    "email": "chris@coderage.co.uk"
+  },
+  "homepage": "https://github.com/coderage-labs/spillway",
+  "license": "MIT",
+  "keywords": ["proxy", "quota", "rotation", "claude-code"]
+}
