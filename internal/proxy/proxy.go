@@ -254,6 +254,10 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 	var holdDeadline time.Time // set on first exhaustion
 	rotatedQuota, rotatedConn, rateRetried, held := false, false, false, false
 	onOverage := false
+	// fiveXXHopUsed bounds the upstream-5xx rotation below to a single hop,
+	// unlike rotatedQuota/rotatedConn which chain through every untried
+	// account. See the rotation site for why.
+	fiveXXHopUsed := false
 	event := reqlog.EventServed
 	// Computed once from the buffered body: mapping is a pure lookup, so this
 	// needs no coordination with buildRequest.
@@ -440,6 +444,48 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		}
 		if q, at := acct.Quota(); len(q) > 0 {
 			h.logger.Debug("quota signal", "account", name, "headers", q, "at", at)
+		}
+
+		// Upstream 5xx (issue #26): 529 Overloaded is the clear case, but this
+		// treats the whole 5xx range alike. Every provider's
+		// ClassifiableStatuses stays under 500 — nothing here ever means
+		// "this account's credentials/quota are the problem" the way a
+		// 401/403/429 can, so there is no per-status judgment call to make:
+		// by definition (RFC 7231 §6.6) a 5xx is the server, or a gateway in
+		// front of it, failing to fulfil an otherwise-valid request. Another
+		// account, possibly hitting different upstream capacity, may simply
+		// answer.
+		//
+		// Bounded to ONE hop, unlike rotatedQuota/rotatedConn which chain
+		// through every untried account: those signals mean THIS account is
+		// done, so trying the rest of the pool is straightforward progress.
+		// A 5xx carries no such guarantee — if the upstream is down for
+		// everyone, chaining through N accounts just serialises N failures
+		// (each up to ResponseHeaderTimeout) before the client sees the exact
+		// same 5xx it would have gotten immediately. One extra hop catches
+		// the case this issue is actually about (a sibling account, on
+		// different capacity, answers); a second 5xx is treated as the
+		// outage it probably is.
+		//
+		// Not the account's fault, so no MarkExhausted (that would penalize
+		// it for an upstream problem) — but it also must not be retried
+		// forever on the same account, so it still joins `tried` like a dead
+		// connection does. And only ever a hop, never a synthesized response:
+		// when no untried account remains, this falls through to the
+		// terminal branch below and the client gets the real 5xx, not a
+		// fabricated exhaustion error that would hide an upstream outage.
+		if buffered && !fiveXXHopUsed && resp.StatusCode >= 500 &&
+			len(tried)+1 < len(h.pool.Accounts()) {
+			resp.Body.Close()
+			h.pool.Done(acct)
+			tried[name] = true
+			acct = nil
+			fiveXXHopUsed = true
+			rotatedConn = true
+			h.logger.Warn("upstream 5xx, rotating once", "account", name, "status", resp.StatusCode)
+			h.publish(events.Event{Type: reqlog.EventRotatedConn, Account: name,
+				Detail: "upstream " + strconv.Itoa(resp.StatusCode) + ", rotating"})
+			continue
 		}
 
 		is401 := resp.StatusCode == http.StatusUnauthorized
