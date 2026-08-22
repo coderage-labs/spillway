@@ -41,10 +41,14 @@ func TestTaskXMLRegistersWithARealScheduler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// UTF-16LE with a BOM: schtasks /XML rejects UTF-8 on some systems, and
-	// this is the encoding the scheduler's own export produces.
+	// Exactly the bytes serviceInstall writes: UTF-8, matching the UTF-8
+	// declaration xml.Header emits. Transcoding to UTF-16 here — which the
+	// first version of this test did, on the folklore that schtasks demands
+	// it — leaves the declaration saying UTF-8 over UTF-16 bytes, and the
+	// scheduler answers "unable to switch the encoding". A test that writes
+	// the file differently from the code is testing the test.
 	xmlPath := filepath.Join(dir, "task.xml")
-	if err := os.WriteFile(xmlPath, utf16LE(doc), 0o600); err != nil {
+	if err := os.WriteFile(xmlPath, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,16 +85,4 @@ func TestTaskXMLRegistersWithARealScheduler(t *testing.T) {
 	if !strings.Contains(got, "server") {
 		t.Errorf("the registered task does not run `server`:\n%s", got)
 	}
-}
-
-// utf16LE encodes with a BOM, which is what schtasks /XML expects.
-func utf16LE(s string) []byte {
-	out := []byte{0xFF, 0xFE}
-	for _, r := range s {
-		if r > 0xFFFF {
-			r = 0xFFFD
-		}
-		out = append(out, byte(r), byte(r>>8))
-	}
-	return out
 }
