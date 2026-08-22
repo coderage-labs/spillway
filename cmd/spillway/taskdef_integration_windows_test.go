@@ -24,6 +24,9 @@ const probeTaskName = `\dev.coderage.spillway-test`
 
 func TestTaskXMLRegistersWithARealScheduler(t *testing.T) {
 	if _, err := exec.LookPath("schtasks"); err != nil {
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			t.Fatal("no schtasks on the CI runner, so this test is not running anywhere")
+		}
 		t.Skip("no schtasks on this machine")
 	}
 
@@ -50,6 +53,13 @@ func TestTaskXMLRegistersWithARealScheduler(t *testing.T) {
 	if err != nil {
 		s := string(out)
 		if strings.Contains(s, "Access is denied") || strings.Contains(s, "privilege") {
+			// A locked-down machine may genuinely forbid this. CI may not:
+			// skipping there would leave the only real coverage of this
+			// document silently doing nothing, which is indistinguishable
+			// from passing in a run without -v.
+			if os.Getenv("GITHUB_ACTIONS") == "true" {
+				t.Fatalf("CI could not register a task, so this never actually ran: %s", s)
+			}
 			t.Skipf("not permitted to register a task here: %s", s)
 		}
 		t.Fatalf("the scheduler rejected our XML: %v\n%s", err, s)
