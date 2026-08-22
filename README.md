@@ -184,6 +184,7 @@ that works over SSH.
 | `spillway status [--json]` | Compact pool summary in the terminal; `--json` for state, accounts and recent requests |
 | `spillway accounts [remove <name>]` | List or remove accounts |
 | `spillway accounts overage <name> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — see [Extra usage](#extra-usage) |
+| `spillway accounts priority <name> <n>` | Order selection; lower is preferred |
 | `spillway login claude <name>` | Add a Claude account (OAuth PKCE) |
 | `spillway login kimi <name>` | Add a Kimi account (OAuth device flow) |
 | `spillway statusline` | Print the Claude Code status line |
@@ -352,6 +353,20 @@ exhaustion, or when an account crosses `pool.switchThreshold` in any window
 (predictive rotation — skipped while another eligible account exists, used
 anyway when it is the last one). Claude quota comes from
 `anthropic-ratelimit-*` response headers; Kimi's from `/v1/usages` polling.
+
+**Rank accounts of different providers.** At equal priority the tie-break is
+in-flight count, and headroom below the threshold does not enter into it — so
+whichever account happens to be idle at that instant wins the session, and
+`crossProvider: false` then keeps that session on that provider for the rest
+of its life. One stray request is enough to run a whole conversation on the
+wrong model. `spillway accounts priority <name> <n>` makes the choice
+deliberate:
+
+```sh
+spillway accounts priority you@work.example 0    # preferred
+spillway accounts priority you@side.example 1    # next
+spillway accounts priority kimi 2                # last resort
+```
 
 A quota-429 marks the account exhausted until its reset and re-sends the
 buffered request on the next account, invisibly to the client. A transient

@@ -333,3 +333,33 @@ func TestWindowSourcesReplaceIndependently(t *testing.T) {
 		}
 	}
 }
+
+// Priority must beat load, and beat it even when the preferred account is
+// the busier one.
+//
+// This is the setting that stops unlike accounts being treated as peers.
+// Below the rotate-away threshold the selector otherwise breaks ties on
+// in-flight count alone, so one stray request landing at the wrong moment
+// picks the other provider — and §6.18 then pins the session there for its
+// whole life. A Claude session spent its entire run on Kimi's k3 that way.
+func TestPriorityOutranksLoad(t *testing.T) {
+	now := time.Now()
+	primary := NewAccount("primary", SourceYAML, "t", "", 0, "")
+	primary.Type = "claude-oauth"
+	fallback := NewAccount("fallback", SourceYAML, "t", "", 0, "")
+	fallback.Type = "claude-oauth"
+	fallback.Priority = 2
+
+	p := New([]*Account{primary, fallback}, now)
+	// Make the preferred account the busy one: without priority, load alone
+	// would hand this to the fallback.
+	primary.addInFlight(3)
+
+	got := p.Select("session-a")
+	if got == nil {
+		t.Fatal("nothing selected")
+	}
+	if got.Name != "primary" {
+		t.Fatalf("selected %q; a busier account with better priority must still win", got.Name)
+	}
+}

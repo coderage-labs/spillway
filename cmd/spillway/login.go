@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -155,6 +156,10 @@ type accountRow struct {
 	// Shown in the listing so the one setting that spends money is visible
 	// without opening the config.
 	Overage *bool
+	// Priority orders selection; lower is preferred. Listed because equal
+	// priorities are what let a transient load blip decide which provider a
+	// session spends its life on.
+	Priority int
 }
 
 // listAccounts builds the listing from config metadata + the secret store.
@@ -168,7 +173,7 @@ func listAccounts(cfg *config.Config, store secrets.Store, live liveClaude, now 
 		row := accountRow{
 			Name: a.Name, Type: a.Type, Source: a.Source,
 			ExpiresAt: a.ExpiresAt, UUID: a.AccountUUID,
-			Overage: a.AllowOverage,
+			Overage: a.AllowOverage, Priority: a.Priority,
 		}
 		if a.Source == "keychain" {
 			row.Secrets = "keychain"
@@ -229,8 +234,12 @@ func runAccounts(args []string) error {
 	if len(args) >= 2 && args[0] == "overage" {
 		return setOverage(cfgPath, args[1:])
 	}
+	if len(args) >= 2 && args[0] == "priority" {
+		return setPriority(cfgPath, args[1:])
+	}
 	if len(args) > 0 {
-		return fmt.Errorf("usage: spillway accounts [remove <name>] [overage <name> on|off|default]")
+		return fmt.Errorf("usage: spillway accounts [remove <name>] " +
+			"[overage <name> on|off|default] [priority <name> <n>]")
 	}
 
 	cfg, err := config.LoadFrom(cfgPath)
@@ -242,7 +251,8 @@ func runAccounts(args []string) error {
 		fmt.Println("no accounts — run `spillway login claude <name>`")
 		return nil
 	}
-	t := newTable("account", "type", "status", "secrets", "expires", "extra usage", "uuid")
+	t := newTable("account", "type", "status", "secrets", "expires", "priority", "extra usage", "uuid")
+	t.rightAlign(5)
 	for _, r := range rows {
 		expiry := "never"
 		if r.ExpiresAt > 0 {
@@ -261,7 +271,7 @@ func runAccounts(args []string) error {
 				overage = "ON (billable)"
 			}
 		}
-		t.add(r.Name, r.Type, r.Status, r.Secrets, expiry, overage, uuid)
+		t.add(r.Name, r.Type, r.Status, r.Secrets, expiry, strconv.Itoa(r.Priority), overage, uuid)
 	}
 	t.render(os.Stdout)
 	return nil
@@ -367,5 +377,32 @@ func setOverage(cfgPath string, args []string) error {
 			"  even if pool.allowOverage is true\n", name)
 	}
 	fmt.Println("restart the daemon for this to take effect")
+	return nil
+}
+
+// setPriority implements `spillway accounts priority <name> <n>`.
+//
+// Priority is what stops the pool treating unlike accounts as peers. Below
+// the rotate-away threshold the selector breaks ties on in-flight count
+// alone, so a stray request landing on the wrong account at the wrong moment
+// is enough to pick the other one — and the session then stays there, on that
+// provider, for its whole life (§6.18). Ranking them makes that decision
+// deliberate rather than a race.
+func setPriority(cfgPath string, args []string) error {
+	name := args[0]
+	if len(args) < 2 {
+		return fmt.Errorf("usage: spillway accounts priority %s <n>", name)
+	}
+	prio, err := strconv.Atoi(args[1])
+	if err != nil {
+		return fmt.Errorf("priority must be a whole number (got %q)", args[1])
+	}
+	if err := config.SetAccountPriority(cfgPath, name, prio); err != nil {
+		return err
+	}
+	fmt.Printf("%s: priority %d — lower is preferred, and an account is only\n"+
+		"  reached for when everything above it cannot serve\n", name, prio)
+	fmt.Println("restart the daemon for this to take effect, or set it in the dashboard,")
+	fmt.Println("which applies immediately")
 	return nil
 }

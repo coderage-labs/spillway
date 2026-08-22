@@ -130,3 +130,21 @@ func SetAccountOverage(path, name string, v *bool) error {
 	}
 	return fmt.Errorf("account %q not found in %s", name, path)
 }
+
+// SetAccountPriority sets one account's selection priority; lower is
+// preferred. Unlike overage this is not a money decision, so it takes any
+// integer and says nothing dire about it.
+func SetAccountPriority(path, name string, prio int) error {
+	cfg, err := readOrDefaults(path)
+	if err != nil {
+		return err
+	}
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].Name != name {
+			continue
+		}
+		cfg.Accounts[i].Priority = prio
+		return validateAndWrite(path, cfg)
+	}
+	return fmt.Errorf("account %q not found in %s", name, path)
+}
