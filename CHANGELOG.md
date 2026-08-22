@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/coderage-labs/spillway/compare/v0.7.0...v0.7.1) (2026-08-22)
+
+
+### Internal
+
+* **docs:** guard the README commands table against the CLI dispatch ([#20](https://github.com/coderage-labs/spillway/issues/20)) ([#21](https://github.com/coderage-labs/spillway/issues/21)) ([12cbf09](https://github.com/coderage-labs/spillway/commit/12cbf096706a90435e2894c10b71741b6538d2a0))
+
 ## [0.7.0](https://github.com/coderage-labs/spillway/compare/v0.6.0...v0.7.0) (2026-08-22)
 
 
