@@ -1,6 +1,6 @@
 package accounts
 
-// Live canary (design doc §6.8b).
+// Live canary (design doc §6.8, decision (b)).
 //
 // The probe fills quota for an idle account. This is the other half: it
 // watches for the failures that arrive without any request of yours failing

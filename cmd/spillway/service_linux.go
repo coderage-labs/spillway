@@ -2,7 +2,7 @@
 
 package main
 
-// systemd user units (§9). A *user* unit, not a system one, for the same
+// systemd user units. A *user* unit, not a system one, for the same
 // reason launchd gets an agent and Windows a per-user task: the account
 // tokens live in the user's Secret Service keyring, which a daemon running as
 // root cannot read.
