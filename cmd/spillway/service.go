@@ -1,6 +1,9 @@
 package main
 
-// `spillway service` runs the daemon without a terminal (design doc §9).
+// `spillway service` runs the daemon without a terminal. The design doc
+// has no general section on this — §6.22 covers the Windows half only —
+// so the reasoning lives here rather than behind a reference that was
+// pointing at a §9 the doc has never had.
 // The proxy core needs no TTY — only login and `run` are interactive — so the
 // daemon is the natural default and `run` becomes a thin convenience.
 //

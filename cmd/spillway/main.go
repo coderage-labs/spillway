@@ -237,7 +237,7 @@ func runServer(args []string) error {
 	}
 
 	// Canary: watch for credentials that die without any request of yours
-	// failing first (§6.8b). Shares the probe's request, and only for
+	// failing first (§6.8, decision (b)). Shares the probe's request, and only for
 	// accounts that have gone unused.
 	if cfg.Pool.CanaryInterval != "0" {
 		every := cfg.PoolCanaryInterval()
