@@ -89,6 +89,26 @@ jobs:
             throw "the scheduled task did not produce a serving daemon"
           }
 
+      # What /End actually does to the process tree. The task's action is
+      # powershell, and spillway is its child, so "end the task" and "stop the
+      # daemon" are not obviously the same thing.
+      - name: Anatomy of the running task
+        run: |
+          function Tree($label) {
+            Write-Host "--- $label ---"
+            Get-CimInstance Win32_Process -Filter "Name='spillway.exe' OR Name='powershell.exe'" |
+              Select-Object ProcessId, ParentProcessId, Name,
+                @{n='Cmd';e={$_.CommandLine -replace '\s+',' ' }} |
+              Format-Table -AutoSize -Wrap | Out-String -Width 200 | Write-Host
+            $held = (Get-NetTCPConnection -LocalPort 7657 -State Listen -ErrorAction SilentlyContinue)
+            if ($held) { Write-Host "7657 held by pid $($held.OwningProcess)" } else { Write-Host "7657 free" }
+          }
+          Tree "before /End"
+          schtasks /End /TN "\dev.coderage.spillway"
+          Write-Host "schtasks /End exit=$LASTEXITCODE"
+          Start-Sleep -Seconds 3
+          Tree "after /End"
+
       # The upgrade case: reinstall over a running daemon and prove the
       # process was actually replaced rather than left alone.
       - name: Reinstall over the running daemon
@@ -99,6 +119,9 @@ jobs:
           Start-Sleep -Seconds 5
           $after = (Get-Process spillway -ErrorAction SilentlyContinue | Select-Object -First 1).Id
           Write-Host "pid after:  $after"
+          Get-CimInstance Win32_Process -Filter "Name='spillway.exe'" |
+            Select-Object ProcessId, ParentProcessId, CreationDate |
+            Format-Table -AutoSize | Out-String | Write-Host
           if (-not $after) { throw "no daemon running after reinstall" }
           if ($before -eq $after) {
             throw "reinstall left the original process alive - an upgrade would keep serving the old binary"
