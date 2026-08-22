@@ -192,28 +192,16 @@ that works over SSH.
 
 ### Attaching clients
 
-Two ways:
-
 ```sh
 spillway run                                       # MITM mode — the supported path
 ANTHROPIC_BASE_URL=http://127.0.0.1:7654 claude    # base URL only, this invocation
 ```
 
-`run` sets the proxy environment and then execs `claude`, which is the part
-that matters: `NODE_EXTRA_CA_CERTS` is read by Node **once, at startup**, when
-it builds its root store. Anything that supplies the CA after the process has
-booted is too late, and TLS never trusts spillway's certificate.
-
-That is why there is no "route every launch" option. An earlier `hook install`
-wrote the same variables into the `env` block of `~/.claude/settings.json`,
-which Claude Code applies to itself after boot. Ordinary API traffic still
-worked, because Claude Code passes the CA to its own HTTP client explicitly —
-but anything opening its own TLS connection, Remote Control's WebSocket
-included, rejected the certificate and reconnected forever. It looked like the
-pool working perfectly and Remote Control being broken. The command has been
-removed rather than fixed: a shell alias has the same startup-timing
-requirement and only covers interactive shells, and there is no mechanism that
-sets a process's environment before it starts except starting it yourself.
+`run` sets the proxy environment and then execs `claude`. That ordering is
+load-bearing: Node reads `NODE_EXTRA_CA_CERTS` once, at startup, when it
+builds its root store, so a CA supplied after the process has booted is never
+trusted — which is why rolling your own wrapper means exporting it *before*
+launching, not from inside anything the client runs.
 
 **Remote Control needs MITM mode.** `claude --remote-control` refuses to start
 when `ANTHROPIC_BASE_URL` points anywhere but `api.anthropic.com`, so the
