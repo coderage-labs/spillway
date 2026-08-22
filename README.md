@@ -228,7 +228,7 @@ claude plugin marketplace add coderage-labs/spillway
 claude plugin install spillway@spillway
 ```
 
-Adds `/spillway`, which reports the pool from inside a session: headroom,
+Adds `/spillway:status`, which reports the pool from inside a session: headroom,
 what is serving, whether anything is parked waiting for a reset, and whether
 any request is being billed.
 

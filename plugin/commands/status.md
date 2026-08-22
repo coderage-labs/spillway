@@ -3,7 +3,7 @@ description: "Pool status from the local spillway daemon — headroom, rotation,
 allowed-tools: ["Bash"]
 ---
 
-# spillway status
+# status
 
 Report the state of the local account pool. Works over Remote Control, which
 is the point: the status line and desktop notifications only exist on the

@@ -3,8 +3,8 @@
 A slash command that asks the local spillway daemon how the pool is doing.
 
 ```
-/spillway            # pool status
-/spillway arena      # focus on one account
+/spillway:status         # pool status
+/spillway:status arena   # focus on one account
 ```
 
 Why a command rather than a notification: the status line and desktop
