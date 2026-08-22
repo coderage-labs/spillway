@@ -46,6 +46,49 @@ func TestInstallStopsTheRunningTaskBeforeReplacingIt(t *testing.T) {
 	}
 }
 
+// After /End the scheduler still reports the task running for a moment, and
+// the process still holds the port. Starting the replacement into that window
+// is what an upgrade does, and the new daemon exits unable to bind — leaving
+// the machine with no proxy, because the task reads "Ready" rather than
+// failed and RestartOnFailure never fires.
+func TestInstallWaitsForTheOldTaskToStop(t *testing.T) {
+	running := 3
+	calls := fakeSchtasks(t, func(args ...string) (string, error) {
+		if args[0] == "/Query" {
+			if running > 0 {
+				running--
+				return "TaskName: \\dev.coderage.spillway\nStatus: Running", nil
+			}
+			return "TaskName: \\dev.coderage.spillway\nStatus: Ready", nil
+		}
+		return "", nil
+	})
+	if err := serviceInstall(); err != nil {
+		t.Fatal(err)
+	}
+	// It must have kept asking until the task stopped, and only then created.
+	queries, create := 0, -1
+	for i, c := range *calls {
+		if strings.HasPrefix(c, "/Query") {
+			queries++
+		}
+		if strings.HasPrefix(c, "/Create") && create < 0 {
+			create = i
+		}
+	}
+	if queries == 0 {
+		t.Fatalf("never waited for the task to stop: %v", *calls)
+	}
+	for i, c := range *calls {
+		if strings.HasPrefix(c, "/Query") && i > create {
+			continue // status checks after creating are fine
+		}
+	}
+	if create >= 0 && idxOfArg(*calls, "/Query") > create {
+		t.Errorf("created the task before waiting for the old one: %v", *calls)
+	}
+}
+
 // /End fails when nothing is running and when nothing is registered — both
 // ordinary on a first install — and neither may abort it.
 func TestInstallProceedsWhenNothingIsRunning(t *testing.T) {

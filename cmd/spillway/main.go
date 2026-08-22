@@ -74,7 +74,17 @@ func main() {
 		if errors.As(err, &exitErr) {
 			os.Exit(exitErr.Code)
 		}
+		// Also to the log file, if `server --log-file` opened one. Without
+		// this the file ends mid-startup — the last line is "account
+		// loaded" and the reason it stopped is on a stderr nobody is
+		// reading, which is exactly the state a scheduled task leaves you
+		// in. Observed on Windows: a daemon that could not bind its port
+		// looked, in its own log, like it had simply stopped logging.
 		fmt.Fprintln(os.Stderr, "spillway:", err)
+		if fatalLog != nil {
+			fmt.Fprintf(fatalLog, "spillway: %v\n", err)
+			fatalLog.Close()
+		}
 		os.Exit(1)
 	}
 }
@@ -120,6 +130,9 @@ func runServer(args []string) error {
 			return fmt.Errorf("open log file: %w", ferr)
 		}
 		defer f.Close()
+		// Kept for the fatal-error path in main, which runs after this
+		// function has returned its error.
+		fatalLog = f
 		// Both: a terminal invocation with --log-file should still show
 		// something, and under the task stderr goes nowhere anyway.
 		out = io.MultiWriter(os.Stderr, f)
@@ -487,3 +500,7 @@ func flagValue(args []string, name string) string {
 	}
 	return ""
 }
+
+// fatalLog is the log file `server --log-file` opened, so the error that ends
+// the process lands there rather than only on stderr.
+var fatalLog *os.File

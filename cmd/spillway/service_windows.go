@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func serviceLogPaths() (out string, err error) {
@@ -84,6 +85,7 @@ func serviceInstall() error {
 	// when nothing is registered, which are the ordinary cases on a first
 	// install.
 	_, _ = schtasks("/End", "/TN", taskName)
+	waitUntilTaskStopped()
 
 	// /F replaces an existing registration rather than failing.
 	if out, err := schtasks("/Create", "/TN", taskName, "/XML", f.Name(), "/F"); err != nil {
@@ -129,4 +131,26 @@ func serviceStatus() error {
 	logPath, _ := serviceLogPaths()
 	fmt.Printf("service installed (%s)\nstate: %s\nlogs: %s\n", taskName, status, logPath)
 	return nil
+}
+
+// waitUntilTaskStopped blocks until the scheduler stops reporting the task as
+// running, or gives up.
+//
+// /End returns as soon as the scheduler has asked; the process is still there
+// for a moment afterwards, still holding port 7654. Starting the replacement
+// into that window is a reinstall — which is every upgrade — and the new
+// daemon failed to bind and exited. RestartOnFailure did not bring it back:
+// the task simply read "Ready" and the machine had no proxy at all. Measured
+// on a Windows runner at over ninety seconds before the probe gave up.
+func waitUntilTaskStopped() {
+	for attempt := 0; attempt < 40; attempt++ {
+		out, err := schtasks("/Query", "/TN", taskName, "/FO", "LIST")
+		if err != nil {
+			return // not registered; nothing to wait for
+		}
+		if !strings.Contains(out, "Running") {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
