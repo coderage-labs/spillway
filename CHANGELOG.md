@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/coderage-labs/spillway/compare/v0.2.0...v0.3.0) (2026-08-22)
+
+
+### Features
+
+* `spillway install` sets up everything in one command ([e4fd537](https://github.com/coderage-labs/spillway/commit/e4fd537a9d1b04c356999cafb8988eb93168e6f1))
+* `spillway status --json`, and one way to reach the admin API ([d433490](https://github.com/coderage-labs/spillway/commit/d433490e66e320a982ae59efbf77f6d5b81e8e2c))
+* a Claude Code plugin that reports pool status in-session ([9aec2f5](https://github.com/coderage-labs/spillway/commit/9aec2f544120751a2be7ed1f299f96ec4c8339f5))
+
+
+### Fixes
+
+* name the plugin command `status`, not `spillway` ([bae4d2c](https://github.com/coderage-labs/spillway/commit/bae4d2cf3f754d2d7bdc3f6073840264623c594a))
+* stop kimi quota windows accumulating on every poll ([4f6bcd5](https://github.com/coderage-labs/spillway/commit/4f6bcd526a6ba690881ed91d4a6828f15d7c6be7))
+
+
+### Internal
+
+* drop the /spawn plugin to v2 ([48433d2](https://github.com/coderage-labs/spillway/commit/48433d29ace5229fcaf47133c0e665cba1409613))
+
 ## [0.2.0](https://github.com/coderage-labs/spillway/compare/v0.1.2...v0.2.0) (2026-08-22)
 
 
