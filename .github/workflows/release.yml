@@ -101,3 +101,6 @@ jobs:
           # Separate, because GITHUB_TOKEN cannot write to another repository.
           # Fine-grained PAT, Contents:write on coderage-labs/homebrew-tap only.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # Likewise for the scoop bucket: Contents:write on
+          # coderage-labs/scoop-bucket only.
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}

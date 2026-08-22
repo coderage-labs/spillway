@@ -126,17 +126,11 @@ homebrew_casks:
 # from leaving the old daemon running.
 scoops:
   - name: spillway
-    # Flip to false once coderage-labs/scoop-bucket exists and
-    # SCOOP_BUCKET_TOKEN is set on this repo. Until then the manifest is
-    # still generated and checked into dist/ by every release, so it is not
-    # rotting unnoticed — it just has nowhere to be published to, and a
-    # release must not fail over that.
-    skip_upload: true
     repository:
       owner: coderage-labs
       name: scoop-bucket
       branch: main
-      token: "{{ envOrDefault \"SCOOP_BUCKET_TOKEN\" \"\" }}"
+      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
     directory: bucket
     homepage: "https://github.com/coderage-labs/spillway"
     description: "Pool your own AI subscription accounts behind one local proxy"
