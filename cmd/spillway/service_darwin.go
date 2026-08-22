@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func servicePlistPath() (string, error) {
@@ -94,12 +95,36 @@ func serviceInstall() error {
 	// Replace any previous registration; bootout failure is fine when
 	// nothing was loaded.
 	_, _ = launchctl("bootout", launchdTarget())
-	if out, err := launchctl("bootstrap", "gui/"+strconv.Itoa(os.Getuid()), plist); err != nil {
+	if out, err := bootstrapService(plist); err != nil {
 		return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
 	}
 	fmt.Printf("service installed: %s\n", plist)
 	fmt.Printf("logs: %s\n", outLog)
 	return nil
+}
+
+// bootstrapService loads the plist, waiting out a bootout that has not
+// finished. bootout returns before launchd has actually torn the job down, so
+// bootstrapping straight after one — which is what reinstalling over a running
+// service does — intermittently hits "service already loaded" and reports it
+// as the unhelpful "try re-running as root". Reinstall is the common case now
+// that `spillway install` exists, so it has to be reliable rather than
+// usually-fine.
+func bootstrapService(plist string) (string, error) {
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	var out string
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		if out, err = launchctl("bootstrap", domain, plist); err == nil {
+			return out, nil
+		}
+		if _, perr := launchctl("print", launchdTarget()); perr != nil {
+			// Gone, so the failure is not the old job still being there.
+			return out, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return out, err
 }
 
 func serviceUninstall() error {

@@ -56,6 +56,8 @@ func main() {
 		}
 	case "accounts":
 		err = runAccounts(os.Args[2:])
+	case "install", "uninstall":
+		err = runInstall(append([]string{os.Args[1]}, os.Args[2:]...))
 	case "statusline":
 		err = runStatusline(os.Args[2:])
 	case "service":
@@ -80,6 +82,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, strings.Join([]string{
 		"usage: spillway server",
 		"       spillway run [-- <claude args>]",
+		"       spillway install [--force] [--plugin-source <path|owner/repo>]",
+		"                                                   service + status line + plugin, in one go",
+		"       spillway uninstall                          undo it",
 		"       spillway status [--json]",
 		"       spillway login claude <name>",
 		"       spillway login kimi <name>",

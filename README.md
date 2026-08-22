@@ -178,6 +178,7 @@ that works over SSH.
 
 | Command | What it does |
 |---|---|
+| `spillway install [--force]` | Service + status line + plugin, in one go; `uninstall` reverses it |
 | `spillway server` | Run the daemon (proxy + admin listener) |
 | `spillway run [-- <claude args>]` | Spawn `claude` wired to the proxy; refuses if the daemon is down |
 | `spillway status [--json]` | Compact pool summary in the terminal; `--json` for state, accounts and recent requests |
@@ -224,6 +225,7 @@ you pass `--force`, and uninstall leaves a foreign one alone.
 ### Claude Code plugin
 
 ```sh
+spillway install          # or, on its own:
 claude plugin marketplace add coderage-labs/spillway
 claude plugin install spillway@spillway
 ```
