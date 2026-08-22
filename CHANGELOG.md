@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.2.0](https://github.com/coderage-labs/spillway/compare/v0.1.2...v0.2.0) (2026-08-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove `spillway hook` — it cannot do what it promised
+
+### Features
+
+* default model map for Kimi, measured from its own /v1/models ([51d6ccd](https://github.com/coderage-labs/spillway/commit/51d6ccd01fe1d5f8000d3071bfbfd8cdef8b3e01))
+
+
+### Fixes
+
+* negotiate ALPN tolerantly in MITM mode instead of refusing the connection ([596ec3a](https://github.com/coderage-labs/spillway/commit/596ec3a70e18d0daeb2886afb0d353c86aaa88e5))
+* negotiate ALPN tolerantly in MITM mode, and log CONNECT ([1c8e127](https://github.com/coderage-labs/spillway/commit/1c8e127d5e918a808aa50b031a3c3b2d1b9ce7ad))
+
+
+### Internal
+
+* one file per provider, and no provider named outside the registry ([b2a2c3f](https://github.com/coderage-labs/spillway/commit/b2a2c3f0c9aff1df32331c6da123caedaa7b8eef))
+* remove `spillway hook` — it cannot do what it promised ([4324b3b](https://github.com/coderage-labs/spillway/commit/4324b3b22c8a4f49db73c78721cc0b148e8b28b5))
+
+
+### Documentation
+
+* Remote Control is fixed — correcting the previous commit ([4cff7e2](https://github.com/coderage-labs/spillway/commit/4cff7e26cc2162d3349e19b70b101962352fa512))
+* stop explaining a feature that no longer exists ([2af2673](https://github.com/coderage-labs/spillway/commit/2af26736a6b4ef097e151a609a8bce927efee456))
+
 ## [0.1.2](https://github.com/coderage-labs/spillway/compare/v0.1.1...v0.1.2) (2026-08-22)
 
 
