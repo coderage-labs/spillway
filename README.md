@@ -295,6 +295,7 @@ startup, so this file settles to metadata only.
 proxy:
   port: 7654
   host: 127.0.0.1
+  allowRemote: false        # required to bind anywhere but loopback — see below
 upstream: https://api.anthropic.com
 egress:
   mode: direct              # direct | http-connect | environment
@@ -325,6 +326,23 @@ accounts:
       claude-haiku-4-5-20251001: kimi-for-coding   # exact match wins
       claude-*: k3                                  # glob; longest pattern wins
 ```
+
+### Binding the proxy off loopback
+
+The proxy port has no authentication of its own and stamps a pooled account's
+bearer token onto every request it forwards. Off loopback that makes it an
+open credential-injecting relay: anyone who can reach it spends your quota —
+your money, under `allowOverage` — and can read or rewrite every prompt and
+response going through it.
+
+So a non-loopback `proxy.host` is refused outright and the daemon does not
+start. Setting `proxy.allowRemote: true` is the opt-in, and the daemon warns
+at every startup while it is on. If you need the pool reachable from another
+machine, prefer an SSH tunnel or a reverse proxy that terminates TLS and
+authenticates callers over exposing this port directly.
+
+(The admin listener answers the same question its own way: off loopback its
+token becomes mandatory, and a missing one fails closed.)
 
 ## Credentials
 

@@ -507,9 +507,20 @@ function colourFor(name) {
   return seriesColour.get(name);
 }
 
-// The loopback listener needs no token, so only append one when we have it.
+// The loopback listener needs no token, so only send one when we have it.
 // A 401 still drops to the gate, which covers a non-loopback deployment.
-function auth(url) {
+//
+// The token goes in a header, not the query string: a URL-borne secret is
+// written into browser history and every intermediary's access log. The
+// server accepts the query form on /api/events alone, because EventSource
+// offers no way to set a header on the stream.
+function auth(init) {
+  if (!token) return init;
+  const o = Object.assign({}, init);
+  o.headers = Object.assign({}, o.headers, { Authorization: "Bearer " + token });
+  return o;
+}
+function streamURL(url) {
   if (!token) return url;
   return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
 }
@@ -1003,7 +1014,7 @@ function renderTanks(list) {
 
 async function start() {
   try {
-    const r = await fetch(auth("/api/accounts"));
+    const r = await fetch("/api/accounts", auth());
     if (r.status === 401) { gate.hidden = false; app.hidden = true; input.focus(); return; }
     gate.hidden = true; app.hidden = false;
     await refresh();
@@ -1015,7 +1026,7 @@ async function start() {
     // traffic worth watching.
     if (!start.polling) start.polling = setInterval(refresh, 5000);
 
-    const es = new EventSource(auth("/api/events"));
+    const es = new EventSource(streamURL("/api/events"));
     es.onopen = () => setLive("live", "live");
     es.onerror = () => setLive("down", "reconnecting");
     es.onmessage = e => {
@@ -1070,10 +1081,10 @@ function renderHold(st) {
 async function refresh() {
   try {
     const [accts, hist, act, st] = await Promise.all([
-      fetch(auth("/api/accounts")).then(r => r.ok ? r.json() : []),
-      fetch(auth("/api/quota-history?hours=" + HOURS)).then(r => r.ok ? r.json() : []),
-      fetch(auth("/api/activity?hours=" + HOURS)).then(r => r.ok ? r.json() : []),
-      fetch(auth("/api/state")).then(r => r.ok ? r.json() : null),
+      fetch("/api/accounts", auth()).then(r => r.ok ? r.json() : []),
+      fetch("/api/quota-history?hours=" + HOURS, auth()).then(r => r.ok ? r.json() : []),
+      fetch("/api/activity?hours=" + HOURS, auth()).then(r => r.ok ? r.json() : []),
+      fetch("/api/state", auth()).then(r => r.ok ? r.json() : null),
     ]);
     renderHold(st);
     if (st && typeof st.threshold === "number" && st.threshold > 0) {
@@ -1266,11 +1277,11 @@ async function saveSettings(button) {
   msg.className = "hint";
   msg.textContent = "saving\u2026";
   try {
-    const r = await fetch(auth("/api/settings"), {
+    const r = await fetch("/api/settings", auth({
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(collectSettings()),
-    });
+    }));
     const text = await r.text();
     if (!r.ok) {
       // The server names the offending field; show that rather than "failed".
@@ -1292,14 +1303,14 @@ async function saveSettings(button) {
 
 async function loadSettings() {
   if (settingsBuilt) return;
-  const r = await fetch(auth("/api/settings"));
+  const r = await fetch("/api/settings", auth());
   if (!r.ok) return;               // endpoint disabled: leave the panel empty
   buildSettings(await r.json());
   settingsBuilt = true;
 }
 
 async function refreshRequests() {
-  const r = await fetch(auth("/api/requests?limit=50"));
+  const r = await fetch("/api/requests?limit=50", auth());
   if (!r.ok) return;
   const rows = await r.json();
   const tb = document.getElementById("requests");
