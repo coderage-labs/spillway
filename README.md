@@ -77,16 +77,44 @@ pure Go and the dashboard is embedded in the binary.
 
 ## Install
 
-```sh
-git clone git@github.com:coderage-labs/spillway.git
-cd spillway && go install ./cmd/spillway
-```
-
-Or, once a release exists:
+macOS:
 
 ```sh
-brew install coderage-labs/tap/spillway
+brew install --cask coderage-labs/tap/spillway
 ```
+
+Windows:
+
+```powershell
+scoop bucket add coderage-labs https://github.com/coderage-labs/scoop-bucket
+scoop install spillway
+```
+
+Linux, or any tagged build:
+
+```sh
+gh release download --repo coderage-labs/spillway --pattern '*linux_amd64*'
+tar xzf spillway_*_linux_amd64.tar.gz && ./spillway version
+```
+
+Asset names carry the version — `spillway_v0.6.0_linux_amd64.tar.gz` — so
+`releases/latest/download/<name>` cannot be written without knowing it.
+Without `gh`, resolve it first:
+
+```sh
+url=$(curl -s https://api.github.com/repos/coderage-labs/spillway/releases/latest \
+      | grep -oE 'https://[^"]*linux_amd64\.tar\.gz' | head -1)
+curl -sL "$url" | tar xz && ./spillway version
+```
+
+From source:
+
+```sh
+go install github.com/coderage-labs/spillway/cmd/spillway@latest
+```
+
+A build made that way reports `spillway dev` — the release workflow injects
+the tag, commit and date at link time, and `go install` does not.
 
 `go install` writes to `$(go env GOPATH)/bin` and does not touch your `PATH`.
 If `spillway` is not found afterwards, that directory is missing from it:
@@ -98,19 +126,12 @@ echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.zshrc && exec zsh
 (`spillway statusline install` and `service install` record the binary's
 absolute path, so those keep working either way.)
 
-The repo is private, so `go install <module>@latest` needs `GOPRIVATE` and
-credentials — cloning is simpler.
-
-Or take a tagged build. The assets are on a private repo, so `gh` (which
-authenticates) is the way in; plain `curl` gets a 404:
-
-```sh
-gh release download --repo coderage-labs/spillway --pattern '*darwin_arm64*'
-tar xzf spillway_*.tar.gz && ./spillway version
-```
-
 Releases are cut by release-please from commit messages — see
-[RELEASING.md](RELEASING.md). Binaries are unsigned.
+[RELEASING.md](RELEASING.md). Binaries are unsigned: the cask strips the
+quarantine attribute on install, but a tarball fetched through a **browser**
+carries it and Gatekeeper will refuse to run the binary until you clear it
+with `xattr -d com.apple.quarantine spillway`. `curl`, `gh` and `tar` do not
+set the attribute, so a download by any of those needs nothing.
 
 ### Windows
 
@@ -119,9 +140,9 @@ Supported, with two differences and one caveat.
 | | macOS | Linux | Windows |
 |---|---|---|---|
 | Config, CA, request log | `~/Library/Application Support/spillway/` | `~/.config/spillway/` | `%AppData%\spillway\` |
-| Background daemon | launchd agent | your init system | Task Scheduler task |
-| Credential storage | Keychain | Secret Service | Credential Manager |
-| Daemon log | `~/Library/Logs/spillway.log` | your init system's | `%LocalAppData%\spillway\spillway.log` |
+| Background daemon | launchd agent | systemd **user** unit | Task Scheduler task |
+| Credential storage | Keychain | Secret Service, else a 0600 file | Credential Manager |
+| Daemon log | `~/Library/Logs/spillway.log` | `journalctl --user -u spillway` | `%LocalAppData%\spillway\spillway.log` |
 
 All three come from `os.UserConfigDir()`.
 
@@ -146,34 +167,17 @@ ignore:
   socket that binds while providing none of the protection it is chosen for is
   worse than no socket. Use `127.0.0.1:7657` with `admin.token` set.
 
-**Caveat: no Windows machine has ever run this.** CI builds and tests on
-`windows-latest` on every push, which catches compile and unit-test breakage,
-but `service install`, toast notifications and the browser hand-off during
-login are exercised by nobody. Treat first use as a bug hunt and please file
-what breaks. That is fine here: Gatekeeper only inspects files
-carrying the `com.apple.quarantine` attribute, which browsers set and `curl`,
-`gh` and `tar` do not. Downloading one through a browser would need
-`xattr -d com.apple.quarantine spillway`.
+**Caveat: no ordinary Windows machine has run this.** What is exercised, on
+`windows-latest`, is more than it used to be — the task XML is registered with
+a real Task Scheduler, and an integration test installs the service, waits for
+the daemon to answer, reinstalls over it and requires the process to be
+replaced, then uninstalls and requires it to stop. That found four bugs that
+compiled and unit-tested cleanly, including task XML the scheduler rejected
+outright, so `service install` had never once worked.
 
-No npm, no CDN, no build step for the UI: the dashboard is embedded in the
-binary and fetches nothing at runtime.
-
-### Upgrading
-
-```sh
-brew upgrade --cask spillway
-```
-
-If the daemon is registered as a service, the upgrade restarts it onto the
-new binary. This is not cosmetic: `brew` replaces the file, but a running
-daemon keeps serving from the deleted inode of the version it started on, so
-without the restart an upgrade looks like it worked while the old code is
-still handling every request.
-
-`brew uninstall --cask spillway` removes the binary and leaves the launch
-agent behind, pointing at nothing. Use `brew uninstall --zap --cask spillway`
-to take the service with it. Neither touches your config or your credentials
-— remove those with `spillway accounts remove <name>`.
+Still exercised by nobody: the logon trigger actually firing at a logon (a CI
+runner never logs in), toast notifications, and the browser hand-off during
+login. Treat first use as a bug hunt and please file what breaks.
 
 ## Quickstart
 
