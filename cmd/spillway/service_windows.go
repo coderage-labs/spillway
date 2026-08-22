@@ -14,6 +14,7 @@ package main
 // daemon a log file, which schtasks has no way to configure.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -93,8 +94,8 @@ func serviceInstall() error {
 	}
 	// A logon trigger will not fire until the next logon, and nobody expects
 	// `service install` to leave the daemon stopped.
-	if out, err := schtasks("/Run", "/TN", taskName); err != nil {
-		fmt.Fprintf(os.Stderr, "spillway: task registered but did not start: %v: %s\n", err, out)
+	if err := runUntilItStays(); err != nil {
+		fmt.Fprintf(os.Stderr, "spillway: task registered but did not start: %v\n", err)
 	}
 	fmt.Printf("service installed: Task Scheduler task %s\n", taskName)
 	fmt.Printf("logs: %s\n", logPath)
@@ -131,6 +132,38 @@ func serviceStatus() error {
 	logPath, _ := serviceLogPaths()
 	fmt.Printf("service installed (%s)\nstate: %s\nlogs: %s\n", taskName, status, logPath)
 	return nil
+}
+
+// runUntilItStays starts the task and checks it is still running a moment
+// later, retrying if not.
+//
+// Waiting for the previous task to stop is not enough on its own. The
+// scheduler reports Ready as soon as it has finished with the task, and the
+// old process can still hold the port for a moment after that — so the
+// replacement starts, fails to bind, and exits. The scheduler then records a
+// completed run rather than a failure, RestartOnFailure never fires, and the
+// machine is left with no proxy until the next logon. Intermittent, which is
+// worse: it passed one probe run and failed the next on identical code.
+//
+// Checking that it is still running after a second is the part that matters.
+// A /Run that "succeeds" and dies immediately is the failure being retried.
+func runUntilItStays() error {
+	var last string
+	for attempt := 0; attempt < 8; attempt++ {
+		if out, err := schtasks("/Run", "/TN", taskName); err != nil {
+			last = fmt.Sprintf("%v: %s", err, out)
+			time.Sleep(time.Second)
+			continue
+		}
+		time.Sleep(1500 * time.Millisecond)
+		out, err := schtasks("/Query", "/TN", taskName, "/FO", "LIST")
+		if err == nil && strings.Contains(out, "Running") {
+			return nil
+		}
+		last = "started and exited immediately"
+		time.Sleep(time.Second)
+	}
+	return errors.New(last)
 }
 
 // waitUntilTaskStopped blocks until the scheduler stops reporting the task as

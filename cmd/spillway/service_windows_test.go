@@ -126,3 +126,60 @@ func idxOfArg(all []string, want string) int {
 	}
 	return len(all)
 }
+
+// A /Run that succeeds and dies a second later is the failure to retry: the
+// old daemon still had the port, the replacement could not bind, and the
+// scheduler recorded a completed run rather than a failure — so nothing
+// restarted it and the machine had no proxy until the next logon.
+func TestInstallRetriesUntilTheDaemonStays(t *testing.T) {
+	runs, ready := 0, 0
+	fakeSchtasks(t, func(args ...string) (string, error) {
+		switch args[0] {
+		case "/Run":
+			runs++
+			return "", nil
+		case "/Query":
+			// The first two starts die immediately; the third stays up.
+			if runs >= 3 {
+				return "Status: Running", nil
+			}
+			ready++
+			return "Status: Ready", nil
+		}
+		return "", nil
+	})
+	if err := serviceInstall(); err != nil {
+		t.Fatal(err)
+	}
+	if runs < 3 {
+		t.Errorf("gave up after %d /Run attempts; a start that dies must be retried", runs)
+	}
+	if ready == 0 {
+		t.Error("never checked whether the task was still running after starting it")
+	}
+}
+
+// It must not retry for ever, and it must report rather than claim success.
+func TestInstallGivesUpAndSaysSoWhenTheDaemonNeverStays(t *testing.T) {
+	runs := 0
+	fakeSchtasks(t, func(args ...string) (string, error) {
+		if args[0] == "/Run" {
+			runs++
+		}
+		if args[0] == "/Query" {
+			return "Status: Ready", nil
+		}
+		return "", nil
+	})
+	// serviceInstall reports this on stderr rather than failing: the task is
+	// registered, and a logon will start it even if this attempt could not.
+	if err := serviceInstall(); err != nil {
+		t.Fatalf("registration itself should still succeed: %v", err)
+	}
+	if runs < 2 {
+		t.Errorf("only tried %d time(s)", runs)
+	}
+	if runs > 20 {
+		t.Errorf("retried %d times — that is a hang, not a retry", runs)
+	}
+}
