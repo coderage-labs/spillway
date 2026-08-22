@@ -37,7 +37,7 @@ func TestTaskXMLRegistersWithARealScheduler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := taskXML(bin, log)
+	doc, err := taskXMLFile(bin, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestTaskXMLRegistersWithARealScheduler(t *testing.T) {
 	// scheduler answers "unable to switch the encoding". A test that writes
 	// the file differently from the code is testing the test.
 	xmlPath := filepath.Join(dir, "task.xml")
-	if err := os.WriteFile(xmlPath, []byte(doc), 0o600); err != nil {
+	if err := os.WriteFile(xmlPath, doc, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

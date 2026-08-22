@@ -54,7 +54,7 @@ func serviceInstall() error {
 		return err
 	}
 
-	doc, err := taskXML(bin, logPath)
+	doc, err := taskXMLFile(bin, logPath)
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func serviceInstall() error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	if _, err := f.WriteString(doc); err != nil {
+	if _, err := f.Write(doc); err != nil {
 		f.Close()
 		return err
 	}

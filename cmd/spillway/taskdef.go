@@ -12,6 +12,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"strings"
+	"unicode/utf16"
 )
 
 // taskName is what appears in Task Scheduler. Backslash-prefixed so it lands
@@ -103,8 +104,37 @@ func taskXML(binPath, logPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// schtasks /XML rejects a file without the UTF-16 declaration on some
-	// systems; UTF-8 with an explicit declaration is accepted everywhere
-	// tested and avoids having to transcode.
-	return xml.Header + string(body) + "\n", nil
+	// UTF-16, and the bytes on disk have to match: schtasks parses the file
+	// with a reader that will not switch encodings mid-document, so a UTF-8
+	// declaration — whatever the bytes are — gets
+	//
+	//	(1,40)::ERROR: unable to switch the encoding
+	//
+	// and the task is never registered. The comment that used to be here
+	// claimed UTF-8 "is accepted everywhere tested", which was true only in
+	// the sense that it had been tested nowhere. See taskXMLFile for the
+	// bytes; the two have to agree, so nothing writes this string directly.
+	return `<?xml version="1.0" encoding="UTF-16"?>` + "\n" + string(body) + "\n", nil
+}
+
+// taskXMLFile is the exact byte sequence to hand schtasks /XML: UTF-16LE
+// with a BOM, matching the declaration above.
+//
+// It exists so the caller cannot choose an encoding of its own. The first
+// version of the integration test did, transcoding to UTF-16 while the
+// document still said UTF-8, and produced the same rejection from the other
+// direction — a test and a caller disagreeing about the file format is not
+// something either of them can catch.
+func taskXMLFile(binPath, logPath string) ([]byte, error) {
+	doc, err := taskXML(binPath, logPath)
+	if err != nil {
+		return nil, err
+	}
+	out := []byte{0xFF, 0xFE} // BOM, little-endian
+	// utf16.Encode, not a hand-rolled loop: anything above the BMP needs a
+	// surrogate pair, and a path can contain one.
+	for _, u := range utf16.Encode([]rune(doc)) {
+		out = append(out, byte(u), byte(u>>8))
+	}
+	return out, nil
 }

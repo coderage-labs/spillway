@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
+	"io"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestTaskXMLIsValidAndComplete(t *testing.T) {
@@ -12,7 +15,7 @@ func TestTaskXMLIsValidAndComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	var parsed any
-	if err := xml.Unmarshal([]byte(x), &parsed); err != nil {
+	if err := parseTaskXML([]byte(x), &parsed); err != nil {
 		t.Fatalf("task definition is not valid XML: %v", err)
 	}
 	for _, want := range []string{
@@ -60,7 +63,7 @@ func decodeArguments(t *testing.T, doc string) string {
 			} `xml:"Exec"`
 		} `xml:"Actions"`
 	}
-	if err := xml.Unmarshal([]byte(doc), &parsed); err != nil {
+	if err := parseTaskXML([]byte(doc), &parsed); err != nil {
 		t.Fatalf("task definition is not valid XML: %v", err)
 	}
 	return parsed.Actions.Exec.Arguments
@@ -104,4 +107,56 @@ func TestTaskNameIsRooted(t *testing.T) {
 	if !strings.Contains(taskName, serviceLabel) {
 		t.Errorf("taskName = %q, want it to carry the service label", taskName)
 	}
+}
+
+// parseTaskXML decodes the document these tests work with.
+//
+// taskXML returns a Go string — UTF-8 bytes — carrying a UTF-16 declaration,
+// because the declaration describes the file taskXMLFile writes, not the
+// string in memory. encoding/xml refuses that pairing outright, so the tests
+// hand it a CharsetReader that passes the bytes through: they are checking
+// structure and escaping, and the encoding is checked where it is real, by
+// the integration test that hands the file to a scheduler.
+func parseTaskXML(b []byte, v any) error {
+	d := xml.NewDecoder(bytes.NewReader(b))
+	d.CharsetReader = func(_ string, r io.Reader) (io.Reader, error) { return r, nil }
+	return d.Decode(v)
+}
+
+// The bytes and the declaration have to agree, or schtasks answers
+// "unable to switch the encoding" and registers nothing. This is checkable
+// without Windows, and it is the failure that shipped: the document said
+// UTF-8, was written as UTF-8, and a real scheduler rejected it anyway.
+func TestTaskXMLFileIsUTF16WithAMatchingDeclaration(t *testing.T) {
+	b, err := taskXMLFile(`C:\Users\me\spillway.exe`, `C:\logs\spillway.log`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) < 2 || b[0] != 0xFF || b[1] != 0xFE {
+		t.Fatalf("no UTF-16LE BOM: % x", b[:min(4, len(b))])
+	}
+	// Decoded back, the declaration must say UTF-16 — the pairing schtasks
+	// accepts. Either half alone is the rejection.
+	var u16 []uint16
+	for i := 2; i+1 < len(b); i += 2 {
+		u16 = append(u16, uint16(b[i])|uint16(b[i+1])<<8)
+	}
+	text := string(utf16.Decode(u16))
+	if !strings.Contains(text, `encoding="UTF-16"`) {
+		t.Errorf("declaration does not say UTF-16:\n%s", firstLine(text))
+	}
+	if strings.Contains(text, "UTF-8") {
+		t.Errorf("a UTF-8 declaration over UTF-16 bytes is the exact rejected combination:\n%s", firstLine(text))
+	}
+	// And the content survived the transcode.
+	if !strings.Contains(text, "spillway.exe") {
+		t.Errorf("binary path lost in encoding:\n%s", text[:min(300, len(text))])
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
