@@ -206,7 +206,7 @@ that works over SSH.
 | `spillway login kimi <name>` | Add a Kimi account (OAuth device flow) |
 | `spillway statusline` | Print the Claude Code status line |
 | `spillway statusline install\|uninstall\|status` | Wire it into `~/.claude/settings.json` |
-| `spillway service install\|uninstall\|status` | Run the daemon in the background — launchd on macOS, a Scheduled Task on Windows |
+| `spillway service install\|uninstall\|status` | Run the daemon in the background — launchd on macOS, a Scheduled Task on Windows, a systemd user unit on Linux |
 | `spillway version` | Build identity: tag, commit, date, Go version |
 
 ### Attaching clients

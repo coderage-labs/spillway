@@ -1,4 +1,4 @@
-//go:build !darwin && !windows
+//go:build !darwin && !windows && !linux
 
 package main
 
@@ -7,12 +7,11 @@ import (
 	"runtime"
 )
 
-// Linux and the BSDs are left to their own init systems on purpose. Writing a
-// systemd unit would cover most of Linux and quietly fail for anyone on
-// runit, OpenRC or a container — and unlike launchd and Task Scheduler there
-// is no per-user mechanism that is present everywhere.
+// The BSDs and anything else are left to their own init systems. Linux moved
+// to service_linux.go: systemd has a per-user mechanism, and detecting it is
+// better than supporting nothing because it is not universal.
 func serviceUnsupported() error {
-	return fmt.Errorf("`service` supports macOS (launchd) and Windows (Task Scheduler); "+
+	return fmt.Errorf("`service` supports macOS (launchd), Windows (Task Scheduler) and Linux (systemd); "+
 		"this is %s — run `spillway server` under your init system, e.g. a systemd user unit",
 		runtime.GOOS)
 }
