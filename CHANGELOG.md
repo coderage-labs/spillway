@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.2](https://github.com/coderage-labs/spillway/compare/v0.1.1...v0.1.2) (2026-08-22)
+
+
+### Fixes
+
+* record the invoked path, not the symlink target ([2a45f15](https://github.com/coderage-labs/spillway/commit/2a45f155c7c2d94f3ded05d2aa6373ec3dd0169c))
+
+
+### Internal
+
+* give the selfPath fixtures a Windows-executable extension ([944e8bb](https://github.com/coderage-labs/spillway/commit/944e8bbcbe2b8de8918ba1c7446eb175eecd651e))
+
 ## [0.1.1](https://github.com/coderage-labs/spillway/compare/v0.1.0...v0.1.1) (2026-08-22)
 
 
