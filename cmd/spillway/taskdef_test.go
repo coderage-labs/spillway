@@ -32,28 +32,27 @@ func TestTaskXMLIsValidAndComplete(t *testing.T) {
 		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
 		"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
 		"RestartOnFailure",
-		"powershell.exe",
-		"-WindowStyle Hidden",
 		"spillway.exe",
 		"server",
+		"--log-file",
 	} {
 		if !strings.Contains(x, want) {
 			t.Errorf("task definition missing %q", want)
 		}
 	}
-	// Without a redirect the daemon's log goes nowhere, and *>> rather than
-	// >> because slog writes to stderr.
-	if !strings.Contains(x, "*&gt;&gt;") && !strings.Contains(x, "*>>") {
-		t.Error("no output redirection: the daemon's log would be discarded")
+	// The log reaches disk because the daemon opens the file itself, not
+	// because a shell redirects into it — the shell is what orphaned the
+	// daemon on /End.
+	if strings.Contains(x, "*&gt;&gt;") || strings.Contains(x, "*>>") {
+		t.Error("shell redirection is back, which means the action is a shell again")
 	}
 }
 
-// decodeArguments pulls the PowerShell command line back out of the task
+// decodeAction pulls the command and arguments back out of the task
 // definition. Asserting against the raw XML would be testing the wrong layer:
-// encoding/xml renders a quote as &#39;, so a check for doubled quotes in the
-// raw text fails on correct output. What matters is what the scheduler
-// actually hands PowerShell.
-func decodeArguments(t *testing.T, doc string) string {
+// encoding/xml escapes quotes and ampersands, so a check against the raw text
+// fails on correct output. What matters is what the scheduler runs.
+func decodeAction(t *testing.T, doc string) (command, arguments string) {
 	t.Helper()
 	var parsed struct {
 		Actions struct {
@@ -66,36 +65,61 @@ func decodeArguments(t *testing.T, doc string) string {
 	if err := parseTaskXML([]byte(doc), &parsed); err != nil {
 		t.Fatalf("task definition is not valid XML: %v", err)
 	}
-	return parsed.Actions.Exec.Arguments
+	return parsed.Actions.Exec.Command, parsed.Actions.Exec.Arguments
 }
 
-// A Windows username can contain a quote, and the binary path contains the
-// username. Unescaped, that ends the PowerShell string literal and the rest
-// of the path becomes commands the scheduler runs at every logon.
-func TestTaskXMLEscapesHostilePaths(t *testing.T) {
+// The action must be the daemon, not a shell running the daemon.
+//
+// This is the regression guard for the bug a Windows runner found: with
+// powershell as the action, powershell was the task's process and spillway
+// was its child, so schtasks /End killed the shell, reported success, and
+// left the daemon orphaned holding the port. Every upgrade then kept serving
+// from the old binary. A shell here also reintroduces command injection,
+// since the binary path contains the user's name.
+func TestTaskActionIsTheBinaryNotAShell(t *testing.T) {
 	evil := `C:\Users\o'brien'; Remove-Item C:\ -Recurse; '\spillway.exe`
 	x, err := taskXML(evil, `C:\logs\a&b.log`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := decodeArguments(t, x)
+	cmd, args := decodeAction(t, x)
 
-	// Every single quote doubled, so the injected text stays inside the
-	// string literal instead of escaping into a new statement.
-	if strings.Contains(args, `o'brien';`) {
-		t.Errorf("single quote not doubled — this is a command injection:\n%s", args)
+	for _, shell := range []string{"powershell", "pwsh", "cmd.exe", "cmd /c", "/c "} {
+		if strings.Contains(strings.ToLower(cmd), shell) {
+			t.Fatalf("the action runs a shell (%q), so ending the task will not stop the daemon: %s", shell, cmd)
+		}
 	}
-	if !strings.Contains(args, `o''brien''`) {
-		t.Errorf("expected doubled quotes in the escaped path:\n%s", args)
+	if cmd != evil {
+		t.Errorf("Command should be the binary path verbatim:\n got %q\nwant %q", cmd, evil)
 	}
-	// The ampersand round-trips through XML rather than breaking the document.
+	// Nothing shell-ish smuggled into the arguments either.
+	for _, bad := range []string{"*>>", "&", "|", ";"} {
+		if strings.Contains(args, bad) && bad != "&" {
+			t.Errorf("arguments contain shell syntax %q: %s", bad, args)
+		}
+	}
+	if !strings.Contains(args, "server") || !strings.Contains(args, "--log-file") {
+		t.Errorf("arguments do not start the server with a log file: %s", args)
+	}
+	// The log path survives XML round-trip and stays one argument.
 	if !strings.Contains(args, `a&b.log`) {
 		t.Errorf("log path did not survive XML round-trip:\n%s", args)
 	}
-	// The command must still be one PowerShell statement: an odd number of
-	// quotes means one of them terminated the literal.
-	if n := strings.Count(args, "'"); n%2 != 0 {
-		t.Errorf("odd number of single quotes (%d) — the literal is unbalanced:\n%s", n, args)
+}
+
+// A log path with a space or a quote in it must stay a single argument.
+// Windows splits a command line in the callee, so an unquoted path with a
+// space becomes two arguments and --log-file silently gets the wrong value.
+func TestLogPathIsOneArgument(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`C:\logs\spillway.log`, `C:\logs\spillway.log`},
+		{`C:\Program Files\s.log`, `"C:\Program Files\s.log"`},
+		{`C:\a b\c"d.log`, `"C:\a b\c\"d.log"`},
+		{`C:\ends\with\slash\ `, `"C:\ends\with\slash\ "`},
+	} {
+		if got := quoteArg(tc.in); got != tc.want {
+			t.Errorf("quoteArg(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+		}
 	}
 }
 

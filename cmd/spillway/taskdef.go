@@ -10,7 +10,6 @@ package main
 
 import (
 	"encoding/xml"
-	"fmt"
 	"strings"
 	"unicode/utf16"
 )
@@ -25,12 +24,6 @@ const taskName = `\` + serviceLabel
 // contains the user's name, which can contain anything, and a mis-escaped
 // path here is an injection into a scheduled command.
 func taskXML(binPath, logPath string) (string, error) {
-	// *>> redirects every stream, including stderr, which is where slog
-	// writes. Without the redirect the daemon's log goes nowhere at all.
-	command := fmt.Sprintf(`& '%s' server *>> '%s'`,
-		strings.ReplaceAll(binPath, "'", "''"),
-		strings.ReplaceAll(logPath, "'", "''"))
-
 	type exec struct {
 		Command   string `xml:"Command"`
 		Arguments string `xml:"Arguments"`
@@ -96,9 +89,21 @@ func taskXML(binPath, logPath string) (string, error) {
 	doc.Settings.RestartOnFailure.Interval = "PT1M"
 	doc.Settings.RestartOnFailure.Count = 3
 	doc.Actions.Context = "Author"
-	doc.Actions.Exec.Command = "powershell.exe"
-	doc.Actions.Exec.Arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -Command " +
-		`"` + strings.ReplaceAll(command, `"`, `\"`) + `"`
+	// The binary itself, not powershell running it.
+	//
+	// The task used to run `powershell -Command "& 'spillway.exe' server *>>
+	// 'log'"`, for the redirect and a hidden window. That made powershell the
+	// task's process and spillway its child, and schtasks /End ends the
+	// task's process: on a real scheduler it killed the shell, reported
+	// "terminated successfully", and left the daemon orphaned and still
+	// holding port 7657. The replacement could not bind, so every upgrade
+	// kept serving from the old binary. Proven on a Windows runner —
+	// powershell gone, spillway.exe alive with the port.
+	//
+	// The daemon writes its own log via --log-file, so no shell is needed
+	// for that either.
+	doc.Actions.Exec.Command = binPath
+	doc.Actions.Exec.Arguments = "server --log-file " + quoteArg(logPath)
 
 	body, err := xml.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -137,4 +142,34 @@ func taskXMLFile(binPath, logPath string) ([]byte, error) {
 		out = append(out, byte(u), byte(u>>8))
 	}
 	return out, nil
+}
+
+// quoteArg wraps a path for a Windows command line, where a quote inside an
+// argument is escaped by doubling the preceding backslashes and prefixing the
+// quote. The path contains the user's name, which can contain anything.
+func quoteArg(s string) string {
+	if !strings.ContainsAny(s, " \t\"") {
+		return s
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	slashes := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			slashes++
+			b.WriteByte('\\')
+		case '"':
+			// Double every backslash that ran up to the quote, then escape it.
+			b.WriteString(strings.Repeat(`\`, slashes+1))
+			b.WriteByte('"')
+			slashes = 0
+		default:
+			slashes = 0
+			b.WriteByte(s[i])
+		}
+	}
+	b.WriteString(strings.Repeat(`\`, slashes))
+	b.WriteByte('"')
+	return b.String()
 }

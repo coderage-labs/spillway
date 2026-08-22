@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -39,7 +40,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "server":
-		err = runServer()
+		err = runServer(os.Args[2:])
 	case "run":
 		err = runClaude(os.Args[2:])
 	case "status":
@@ -97,13 +98,34 @@ func usage() {
 	}, "\n"))
 }
 
-func runServer() error {
+func runServer(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+	// --log-file exists for the Windows Scheduled Task, which cannot
+	// redirect a stream itself. It used to get one by running the daemon
+	// under powershell with *>> — and that wrapper became the task's
+	// process, so ending the task killed the shell and orphaned the daemon,
+	// still holding the port. Writing the log here means the task can run
+	// the binary directly and stopping the task stops the daemon.
+	var out io.Writer = os.Stderr
+	if path := flagValue(args, "--log-file"); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if ferr != nil {
+			return fmt.Errorf("open log file: %w", ferr)
+		}
+		defer f.Close()
+		// Both: a terminal invocation with --log-file should still show
+		// something, and under the task stderr goes nowhere anyway.
+		out = io.MultiWriter(os.Stderr, f)
+	}
+
+	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{
 		Level: parseLevel(cfg.Log.Level),
 	}))
 
@@ -451,4 +473,17 @@ func parseLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// flagValue reads --name=value or --name value out of args.
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+		if v, ok := strings.CutPrefix(a, name+"="); ok {
+			return v
+		}
+	}
+	return ""
 }
