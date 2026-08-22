@@ -196,8 +196,23 @@ jobs:
           # wrapper process that spawns the real exe, ending the task kills
           # the wrapper and orphans the daemon — the powershell bug again,
           # wearing a different hat.
+          # scoop installed the *released* build, which is whatever was last
+          # published — on the run that wrote this comment, a version whose
+          # task XML the scheduler rejects. Swap in the binary built from this
+          # commit so the shim question is asked of current code. The shim
+          # itself is untouched, which is the part under test.
+          $app = (Get-Item (Get-Command spillway.exe).Source).Target
+          Write-Host "shim points at: $app"
+          $appDir = Split-Path (scoop prefix spillway)
+          Copy-Item "$env:RUNNER_TEMP\spillway.exe" `
+            -Destination (Join-Path (scoop prefix spillway) "spillway.exe") -Force
+          Write-Host "replaced with: $(spillway version)"
+
           Write-Host "--- registering the service through the shim ---"
           spillway service install
+          if ($LASTEXITCODE -ne 0) {
+            throw "service install through the shim failed with $LASTEXITCODE"
+          }
           Start-Sleep -Seconds 6
           schtasks /Query /TN "\dev.coderage.spillway" /XML 2>$null |
             Select-String -Pattern "<Command>|<Arguments>" | Write-Host
@@ -206,6 +221,12 @@ jobs:
             Select-Object ProcessId, ParentProcessId,
               @{n='Path';e={$_.ExecutablePath}} |
             Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+
+          $live = Get-Process spillway -ErrorAction SilentlyContinue
+          if (-not $live) {
+            throw "no daemon running via the shim, so the orphan question was not asked"
+          }
+          Write-Host "running via shim: pid $($live.Id)"
 
           schtasks /End /TN "\dev.coderage.spillway"
           $global:LASTEXITCODE = 0
