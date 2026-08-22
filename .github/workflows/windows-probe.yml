@@ -130,13 +130,29 @@ jobs:
       - name: service uninstall
         run: |
           & "$env:RUNNER_TEMP\spillway.exe" service uninstall
+          if ($LASTEXITCODE -ne 0) { throw "service uninstall exited $LASTEXITCODE" }
+
+          # Expected to fail: the task should be gone. $LASTEXITCODE is reset
+          # afterwards so it cannot become the step's own exit code.
           schtasks /Query /TN "\dev.coderage.spillway" 2>&1 | Out-String | Write-Host
-          if ($LASTEXITCODE -eq 0) { throw "the task survived uninstall" }
-          $left = Get-Process spillway -ErrorAction SilentlyContinue
-          if ($left) {
-            Write-Host "::warning::daemon still running after uninstall: $($left.Id)"
-            $left | Stop-Process -Force
+          $queryFound = ($LASTEXITCODE -eq 0)
+          $global:LASTEXITCODE = 0
+          if ($queryFound) { throw "the task survived uninstall" }
+
+          # /End is asynchronous, so give the process a moment before calling
+          # it a leak. It has to go: nothing owns it once the task is deleted.
+          $left = $null
+          foreach ($i in 1..15) {
+            $left = Get-Process spillway -ErrorAction SilentlyContinue
+            if (-not $left) { break }
+            Start-Sleep -Seconds 1
           }
+          if ($left) {
+            $left | Select-Object Id, Path | Format-Table -AutoSize | Out-String | Write-Host
+            $left | Stop-Process -Force
+            throw "uninstall left a daemon running with no task to stop it by"
+          }
+          Write-Host "no spillway process left"
 
       - name: Install from the scoop bucket
         if: inputs.scoop
