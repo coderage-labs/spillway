@@ -1,14 +1,33 @@
 package accounts
 
-// Startup quota probe. An idle account reports no quota until something is
-// routed to it, so a standby account's tank stays blank — possibly for days,
-// which reads as a broken dashboard rather than an unused account.
+// Quota probe: the one place spillway acts as a client rather than proxying
+// one. An idle account reports no quota until something is routed to it, so a
+// standby account's tank stays blank — possibly for days, which reads as a
+// broken dashboard rather than an unused account.
 //
-// This is spillway acting as a client rather than proxying one, which the
-// design doc lists as a deliberate non-goal (§9, "no fake traffic"): it is the
-// most ToS-provocative thing here. It is therefore opt-out, one
-// request per account, only for accounts with no quota data at all, and only
-// at startup — never on a timer.
+// Sending a provider traffic nobody asked for is the most ToS-provocative
+// thing here, so the limits want to be findable, and this is where they are:
+// the design doc states no non-goal covering synthetic traffic. (This comment
+// used to cite "§9, no fake traffic". There is no §9 — the doc runs 1-6, then
+// 12a and 13 — and no section of it rules this out. §6.21 is the one probe
+// rule it does state, and that one is about money; see below.)
+//
+// The schedule: opt-out via `probeOnStart`, one cheap request per account, at
+// startup for accounts with no reading at all, then on a `probeInterval`
+// ticker — 30m by default, `0` for startup only — for readings older than
+// that interval. An account that is serving gets fresh quota headers for free
+// and never goes stale, so steady state costs one request per *idle* account
+// per tick.
+//
+// Two suppressions, both deliberate. Disabled accounts are skipped outright.
+// So is an account whose quota is spent and whose stored reset has not passed
+// (wouldBill), and that one is a money question: with extra usage enabled such
+// an account answers a probe with a 200 and a charge, while the reading and
+// reset time already on file say everything the probe would (design doc §6.21,
+// "a probe must never be a purchase"). The guard is incomplete by construction
+// — needsProbe returns true for an account with no windows at all before
+// reaching it, so the first probe after a daemon restart can still bill. Known,
+// and open in §6.21.
 
 import (
 	"bytes"
@@ -36,7 +55,9 @@ func probeModel(a *pool.Account) string {
 // ProbeIdle sends one minimal request per account whose quota data is missing
 // or older than staleAfter, so a standby tank shows a current level instead of
 // "awaiting signal" or a reading from hours ago. Accounts that are serving get
-// fresh headers for free and are skipped, as are disabled ones.
+// fresh headers for free and are skipped, as are disabled ones and any whose
+// quota is spent and unreset — probing those costs money, not information
+// (see wouldBill).
 func ProbeIdle(ctx context.Context, p *pool.Pool, client *http.Client, defaultUpstream string,
 	staleAfter time.Duration, logger *slog.Logger) {
 	for _, a := range p.Accounts() {
@@ -103,7 +124,14 @@ func wouldBill(a *pool.Account, now time.Time) bool {
 }
 
 // needsProbe is true when we have no quota reading, or the newest one has
-// aged past staleAfter — and never when probing would be billed.
+// aged past staleAfter.
+//
+// The wouldBill guard sits after the no-reading case, not before it, so it
+// only stops repeat probes: an account with no windows at all is probed even
+// when that bills, which is one charge per daemon restart. Deliberately not
+// fixed by moving the check — that would leave such a tank blank forever. The
+// fix is seeding windows from quota_samples at startup (design doc §6.21,
+// open).
 func needsProbe(a *pool.Account, staleAfter time.Duration) bool {
 	wins := a.QuotaWindows()
 	if len(wins) == 0 {
