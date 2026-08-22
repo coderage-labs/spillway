@@ -12,7 +12,9 @@ import (
 	"github.com/coderage-labs/spillway/internal/pool"
 )
 
-// A kimi /usages payload in the verified live shape: weekly + 5h + parallel.
+// A kimi /usages payload in the verified live shape. The parallel entry is
+// a concurrency cap and deliberately does not become a window, so this
+// yields two: 7d and 5h.
 const usagesBody = `{
 	"usage": {"limit": 100, "used": 96, "resetTime": "2026-08-23T00:00:00Z"},
 	"limits": [{"window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
@@ -47,8 +49,8 @@ func TestRepeatedPollsDoNotAccumulateWindows(t *testing.T) {
 		counts = append(counts, len(a.QuotaWindows()))
 	}
 	for i, n := range counts {
-		if n != 3 {
-			t.Fatalf("poll %d left %d windows, want 3 (counts across polls: %v)", i+1, n, counts)
+		if n != 2 {
+			t.Fatalf("poll %d left %d windows, want 2 (counts across polls: %v)", i+1, n, counts)
 		}
 	}
 }

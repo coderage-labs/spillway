@@ -292,9 +292,12 @@ func parseKimiUsages(m map[string]any) ([]KimiUsage, error) {
 			})
 		}
 	}
-	if p, ok := m["parallel"].(map[string]any); ok {
-		out = append(out, KimiUsage{Name: "parallel", Limit: numField(p, "limit")})
-	}
+	// "parallel" is deliberately not a window. Kimi reports it as a bare
+	// {limit} — the number of requests it will serve at once — with no used
+	// and no reset, so as a quota window it was a tank that could never move
+	// off full and a column that could never say anything. Worse than noise:
+	// it read as headroom. Concurrency is not quota, and spillway tracks its
+	// own in-flight count for the part of it that matters.
 	if len(out) == 0 {
 		return nil, errors.New("/usages: no windows parsed")
 	}

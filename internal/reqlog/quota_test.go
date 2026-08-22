@@ -184,3 +184,45 @@ func TestOpenRenamesLegacyWeeklySamples(t *testing.T) {
 		t.Errorf("used = %v, want the sample's data left alone", used)
 	}
 }
+
+// The concurrency cap was never a quota, and its samples are a flat line at
+// zero. Dropped on open so the chart is not asked to draw one.
+func TestOpenDropsParallelSamples(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.db")
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	for _, w := range []string{"parallel", "5h"} {
+		if _, err := l.db.Exec(
+			`INSERT INTO quota_samples (ts, account, window, lim, used) VALUES (?,?,?,?,?)`,
+			now, "kimi", w, 30.0, 0.0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l.Close()
+
+	l2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+
+	rows, err := l2.db.Query(`SELECT window FROM quota_samples`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var w string
+		if err := rows.Scan(&w); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, w)
+	}
+	if len(got) != 1 || got[0] != "5h" {
+		t.Errorf("windows left = %v, want just 5h", got)
+	}
+}

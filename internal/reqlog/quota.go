@@ -44,7 +44,13 @@ func (l *Log) initQuota() error {
 	// of the row, so without this the same window draws as two series that
 	// each stop or start on the day of the upgrade. Idempotent, and a no-op
 	// on every database that never held a Kimi account.
-	_, err = l.db.Exec(`UPDATE quota_samples SET window = '7d' WHERE window = 'weekly'`)
+	if _, err = l.db.Exec(`UPDATE quota_samples SET window = '7d' WHERE window = 'weekly'`); err != nil {
+		return err
+	}
+	// "parallel" was Kimi's concurrency cap recorded as a quota window. It
+	// had no used value, so every sample is the same flat line at zero
+	// against a limit — nothing a chart can say anything with.
+	_, err = l.db.Exec(`DELETE FROM quota_samples WHERE window = 'parallel'`)
 	return err
 }
 

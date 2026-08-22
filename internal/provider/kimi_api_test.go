@@ -211,9 +211,14 @@ func TestParseUsagesRealShape(t *testing.T) {
 	if !ok || fiveH.Limit != 100 || fiveH.Used != 65 || fiveH.ResetAt.IsZero() {
 		t.Errorf("5h = %+v", fiveH)
 	}
-	par, ok := byName["parallel"]
-	if !ok || par.Limit != 30 {
-		t.Errorf("parallel = %+v", par)
+	// "parallel" is a concurrency cap, not a quota: Kimi sends a bare limit
+	// with no used and no reset, so as a window it was a permanently full
+	// tank claiming headroom that does not exist.
+	if par, ok := byName["parallel"]; ok {
+		t.Errorf("parallel became a quota window: %+v", par)
+	}
+	if len(usages) != 2 {
+		t.Errorf("parsed %d windows, want just 5h and 7d: %+v", len(usages), usages)
 	}
 }
 
