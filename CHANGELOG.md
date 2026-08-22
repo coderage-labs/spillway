@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.1](https://github.com/coderage-labs/spillway/compare/v0.5.0...v0.5.1) (2026-08-22)
+
+
+### Fixes
+
+* an upgrade on Windows left the machine with no daemon at all ([9ec1b2f](https://github.com/coderage-labs/spillway/commit/9ec1b2f028043db727c8911fd0644dbd04352603))
+* retry the Windows task start until the daemon actually stays up ([6feb497](https://github.com/coderage-labs/spillway/commit/6feb497e38b4781bf1f972de7399fc780cb5eb2e))
+* the Windows task ran a shell, so stopping it orphaned the daemon ([63af7c0](https://github.com/coderage-labs/spillway/commit/63af7c02c4ac4fb61082e072f94a888a888f8ba9))
+* the Windows task XML was rejected by every real scheduler ([aaa3ad5](https://github.com/coderage-labs/spillway/commit/aaa3ad562637865325293f21a837aa47209d776d))
+
+
+### Internal
+
+* a manually-run Windows probe ([e74ad6f](https://github.com/coderage-labs/spillway/commit/e74ad6fbaa28c0f52e3ea7ada670b549b91c41cd))
+* feed the task XML to a real Task Scheduler on CI ([5846bdd](https://github.com/coderage-labs/spillway/commit/5846bdd3caa6d322e13836397b45c80908b93eb2))
+* let the probe tell a slow stop from a leaked daemon ([27a4136](https://github.com/coderage-labs/spillway/commit/27a413675761f712935ccb79582993c78b415383))
+* make the Windows probe explain /End before judging it ([580a15b](https://github.com/coderage-labs/spillway/commit/580a15bb23c8d4385e2bcc37f7f20f27bf4d6689))
+* measure the gap instead of sampling it once ([24b2810](https://github.com/coderage-labs/spillway/commit/24b2810713b199661b90f1b2e74525f208684fdb))
+* PLANTED invalid task Version - verifying CI actually runs this ([7c4f7a7](https://github.com/coderage-labs/spillway/commit/7c4f7a7fcda19aabdcafb0067ea0b16179f5e6a6))
+* probe the scoop shim, and stop the reinstall step testing nothing ([b6f3d6c](https://github.com/coderage-labs/spillway/commit/b6f3d6c58f2a6d99cf55749fb2630d1e9c984e9f))
+* the shim step passed without asking the question ([17c327c](https://github.com/coderage-labs/spillway/commit/17c327c5bf2fd19340ac0fd6b30eaedd1488a731))
+* write the task XML the way serviceInstall writes it ([8fc2b3a](https://github.com/coderage-labs/spillway/commit/8fc2b3a4a84ff833b73830be63058802117a71d7))
+
 ## [0.5.0](https://github.com/coderage-labs/spillway/compare/v0.4.0...v0.5.0) (2026-08-22)
 
 
