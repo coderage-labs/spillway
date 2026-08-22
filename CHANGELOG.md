@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/coderage-labs/spillway/compare/v0.5.2...v0.6.0) (2026-08-22)
+
+
+### Features
+
+* the status line stays silent in a session that is not on spillway ([cff78c7](https://github.com/coderage-labs/spillway/commit/cff78c741f8c2baa0e892ea0c098371da144a95d))
+
 ## [0.5.2](https://github.com/coderage-labs/spillway/compare/v0.5.1...v0.5.2) (2026-08-22)
 
 
