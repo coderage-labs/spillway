@@ -158,6 +158,23 @@ carrying the `com.apple.quarantine` attribute, which browsers set and `curl`,
 No npm, no CDN, no build step for the UI: the dashboard is embedded in the
 binary and fetches nothing at runtime.
 
+### Upgrading
+
+```sh
+brew upgrade --cask spillway
+```
+
+If the daemon is registered as a service, the upgrade restarts it onto the
+new binary. This is not cosmetic: `brew` replaces the file, but a running
+daemon keeps serving from the deleted inode of the version it started on, so
+without the restart an upgrade looks like it worked while the old code is
+still handling every request.
+
+`brew uninstall --cask spillway` removes the binary and leaves the launch
+agent behind, pointing at nothing. Use `brew uninstall --zap --cask spillway`
+to take the service with it. Neither touches your config or your credentials
+— remove those with `spillway accounts remove <name>`.
+
 ## Quickstart
 
 ```sh

@@ -77,12 +77,43 @@ homebrew_casks:
     commit_author:
       name: Kriskit
       email: chris@coderage.co.uk
+    # Only on `brew uninstall --zap`, never on upgrade — which is what makes
+    # it the safe place for this. A plain uninstall deletes the binary and
+    # leaves the launch agent pointing at nothing, so it is worth knowing
+    # that --zap is the one that tidies up after itself.
+    zap:
+      launchctl:
+        - dev.coderage.spillway
+      trash:
+        - ~/Library/LaunchAgents/dev.coderage.spillway.plist
+        - ~/Library/Logs/spillway.log
     hooks:
       post:
         # Downloaded archives carry the quarantine attribute, and the binary
         # is unsigned. Without this every install is met with "cannot be
         # opened because the developer cannot be verified".
+        #
+        # Then: if a launch agent is already registered, re-register it. brew
+        # replaces the binary but does not touch the running daemon, which
+        # keeps serving from the deleted inode of the version it started on —
+        # so an upgrade appeared to work while the old code was still running,
+        # and only a manual `spillway service install` actually swapped it.
+        #
+        # Guarded on the plist existing, so this never installs a service for
+        # someone who has not asked for one, and must_succeed:false so a
+        # failure to restart cannot fail the upgrade.
+        #
+        # HOMEBREW_PREFIX, not staged_path: the plist records the path it is
+        # invoked by, and the Caskroom path is versioned and deleted by the
+        # next upgrade.
         install: |
           if OS.mac?
             system "xattr", "-d", "-r", "com.apple.quarantine", "#{staged_path}/spillway"
+
+            if File.exist?("#{Dir.home}/Library/LaunchAgents/dev.coderage.spillway.plist")
+              ohai "Restarting the spillway service on the new binary"
+              system_command "#{HOMEBREW_PREFIX}/bin/spillway",
+                             args: ["service", "install"],
+                             must_succeed: false
+            end
           end
