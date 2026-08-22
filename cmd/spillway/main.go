@@ -21,6 +21,7 @@ import (
 	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/events"
 	"github.com/coderage-labs/spillway/internal/mitm"
+	"github.com/coderage-labs/spillway/internal/netaddr"
 	"github.com/coderage-labs/spillway/internal/pool"
 	"github.com/coderage-labs/spillway/internal/proxy"
 	"github.com/coderage-labs/spillway/internal/reqlog"
@@ -346,6 +347,16 @@ func runServer(args []string) error {
 
 	addr := net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))
 	srv := &http.Server{Addr: addr, Handler: handler}
+
+	// Validate has already refused a non-loopback bind without the opt-in, so
+	// reaching here off loopback means the operator asked for it. Say plainly
+	// what they have exposed: unlike the admin port there is no token to fall
+	// back on, and the credential goes out with every forwarded request.
+	if !netaddr.IsLoopback(cfg.Proxy.Host) {
+		logger.Warn("proxy listener is NOT loopback and has NO authentication — "+
+			"anyone who can reach it spends this pool's quota and sees every prompt "+
+			"(proxy.allowRemote is set)", "addr", addr)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
