@@ -198,14 +198,14 @@ func TestParseUsagesRealShape(t *testing.T) {
 	for _, u := range usages {
 		byName[u.Name] = u
 	}
-	weekly, ok := byName["weekly"]
+	weekly, ok := byName["7d"]
 	if !ok || weekly.Limit != 100 || weekly.Used != 42 {
-		t.Errorf("weekly = %+v (parsed %v)", weekly, usages)
+		t.Errorf("7d = %+v (parsed %v)", weekly, usages)
 	}
 	if weekly.ResetAt.IsZero() {
-		t.Error("weekly resetTime not parsed")
+		t.Error("7d resetTime not parsed")
 	} else if weekly.ResetAt.UTC().Format("2006-01-02 15:04") != "2026-08-23 04:45" {
-		t.Errorf("weekly reset = %v", weekly.ResetAt)
+		t.Errorf("7d reset = %v", weekly.ResetAt)
 	}
 	fiveH, ok := byName["5h"]
 	if !ok || fiveH.Limit != 100 || fiveH.Used != 65 || fiveH.ResetAt.IsZero() {
@@ -233,5 +233,45 @@ func TestKimiWindowName(t *testing.T) {
 		if got := kimiWindowName(w); got != tc.want {
 			t.Errorf("(%v, %s) = %q, want %q", tc.dur, tc.unit, got, tc.want)
 		}
+	}
+}
+
+// One vocabulary for window names across providers.
+//
+// Claude's are 5h / 7d / 7d-fable, from its response headers. Kimi's come
+// from a different shape entirely — an unnamed top-level object for the week,
+// and a {duration, timeUnit} pair for the rest — so its names are constructed
+// here, and were constructed differently: "weekly" for the week and "1w" had
+// a week ever arrived through the other path. Nothing downstream knew they
+// meant the same thing as 7d, so a pool holding both providers listed two
+// separate week columns and could not compare the two accounts' headroom.
+func TestKimiWindowNamesUseTheSharedVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		dur   float64
+		unit  string
+		want  string
+		about string
+	}{
+		{300, "TIME_UNIT_MINUTE", "5h", "Kimi's own 5h window, as minutes"},
+		{90, "TIME_UNIT_MINUTE", "90m", "minutes that are not whole hours stay minutes"},
+		{5, "TIME_UNIT_HOUR", "5h", "hours"},
+		{7, "TIME_UNIT_DAY", "7d", "days"},
+		{1, "TIME_UNIT_WEEK", "7d", "a week is 7d, matching Claude"},
+		{2, "TIME_UNIT_WEEK", "14d", "two weeks is 14d, not 2w"},
+	} {
+		got := kimiWindowName(map[string]any{"duration": tc.dur, "timeUnit": tc.unit})
+		if got != tc.want {
+			t.Errorf("%s: %g %s -> %q, want %q", tc.about, tc.dur, tc.unit, got, tc.want)
+		}
+	}
+
+	// And the unnamed top-level usage object, which is the one that was
+	// called "weekly".
+	got, err := parseUsages([]byte(`{"usage":{"limit":"100","used":"52","resetTime":"2026-08-23T04:45:32Z"},"limits":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "7d" {
+		t.Errorf("top-level usage parsed as %+v, want one window named 7d", got)
 	}
 }

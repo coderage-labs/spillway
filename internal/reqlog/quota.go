@@ -36,7 +36,15 @@ func (l *Log) initQuota() error {
 	if err != nil {
 		return err
 	}
-	_, err = l.db.Exec(`CREATE INDEX IF NOT EXISTS quota_ts ON quota_samples (ts)`)
+	if _, err = l.db.Exec(`CREATE INDEX IF NOT EXISTS quota_ts ON quota_samples (ts)`); err != nil {
+		return err
+	}
+	// Kimi's 7-day window used to be recorded as "weekly", before window
+	// names were normalised onto Claude's 5h/7d vocabulary. The name is part
+	// of the row, so without this the same window draws as two series that
+	// each stop or start on the day of the upgrade. Idempotent, and a no-op
+	// on every database that never held a Kimi account.
+	_, err = l.db.Exec(`UPDATE quota_samples SET window = '7d' WHERE window = 'weekly'`)
 	return err
 }
 

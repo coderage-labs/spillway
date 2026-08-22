@@ -94,7 +94,11 @@ type Account struct {
 // QuotaWindow is one provider quota bucket in a provider-agnostic shape:
 // anthropic-ratelimit headers and kimi /usages both fill this (§6.5).
 type QuotaWindow struct {
-	Name      string    `json:"name"`    // window identifier, e.g. "5h", "7d", "weekly"
+	// Name is the window identifier in one vocabulary across providers:
+	// "5h", "7d", "7d-fable". Providers that name their windows differently
+	// are normalised at the edge, in their own spec, so nothing downstream
+	// has to know that Kimi calls a week something else.
+	Name      string    `json:"name"`
 	Limit     float64   `json:"limit"`   // 0 when the provider doesn't report one
 	Used      float64   `json:"used"`    // consumed units (for header windows: utilization, Limit=1)
 	ResetAt   time.Time `json:"resetAt"` // zero when unknown

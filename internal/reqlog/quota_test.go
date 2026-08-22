@@ -146,3 +146,41 @@ func TestP95(t *testing.T) {
 		}
 	}
 }
+
+// Samples written under the old "weekly" name must be carried over, or the
+// history chart draws one window as two series that hand over on upgrade day.
+func TestOpenRenamesLegacyWeeklySamples(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "q.db")
+
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write a sample under the old name, the way an older build would have.
+	if _, err := l.db.Exec(
+		`INSERT INTO quota_samples (ts, account, window, lim, used) VALUES (?,?,?,?,?)`,
+		time.Now().UnixMilli(), "kimi", "weekly", 100.0, 52.0); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+
+	// Reopening runs the migration.
+	l2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+
+	var name string
+	var used float64
+	if err := l2.db.QueryRow(`SELECT window, used FROM quota_samples`).Scan(&name, &used); err != nil {
+		t.Fatal(err)
+	}
+	if name != "7d" {
+		t.Errorf("window = %q, want the legacy sample renamed to 7d", name)
+	}
+	if used != 52 {
+		t.Errorf("used = %v, want the sample's data left alone", used)
+	}
+}

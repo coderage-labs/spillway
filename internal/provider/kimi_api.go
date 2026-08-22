@@ -241,7 +241,7 @@ func FetchKimiUsages(ctx context.Context, client *http.Client, upstream, accessT
 // parseUsages parses the /usages response. The real shape (verified live
 // 2026-08-21) uses STRING values and resetTime (RFC3339Nano):
 //
-//	{"usage":     {"limit":"100","used":"42","remaining":"58","resetTime":"..."},   // weekly window
+//	{"usage":     {"limit":"100","used":"42","remaining":"58","resetTime":"..."},   // the 7-day window
 //	 "limits":    [{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},
 //	               "detail":{"limit":"100","used":"65","remaining":"35","resetTime":"..."}}],
 //	 "parallel":  {"limit":"30"}}                                                    // concurrency cap
@@ -266,7 +266,11 @@ func parseKimiUsages(m map[string]any) ([]KimiUsage, error) {
 	var out []KimiUsage
 	if u, ok := m["usage"].(map[string]any); ok {
 		out = append(out, KimiUsage{
-			Name:    "weekly", // top-level usage is the weekly window
+			// "7d", not "weekly": Claude's windows are named 5h / 7d / 7d-fable,
+			// and a pool holding both providers has to be sortable and
+			// comparable across them. Two names for one week put Kimi in its
+			// own column in every listing that unions window names.
+			Name:    "7d", // top-level usage is the 7-day window
 			Limit:   numField(u, "limit"),
 			Used:    numField(u, "used"),
 			ResetAt: parseReset(strField(u, "resetTime")),
@@ -314,7 +318,9 @@ func kimiWindowName(w map[string]any) string {
 	case "TIME_UNIT_DAY":
 		return fmt.Sprintf("%dd", int(dur))
 	case "TIME_UNIT_WEEK":
-		return fmt.Sprintf("%dw", int(dur))
+		// Days, not weeks: one vocabulary across providers, so a week is 7d
+		// wherever it comes from.
+		return fmt.Sprintf("%dd", int(dur)*7)
 	}
 	if unit != "" {
 		return fmt.Sprintf("%s-%d", strings.ToLower(unit), int(dur))
