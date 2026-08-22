@@ -43,7 +43,7 @@ func main() {
 	case "run":
 		err = runClaude(os.Args[2:])
 	case "status":
-		err = runStatus()
+		err = runStatus(len(os.Args) > 2 && os.Args[2] == "--json")
 	case "login":
 		if len(os.Args) < 3 || (os.Args[2] != "claude" && os.Args[2] != "kimi") {
 			usage()
@@ -80,7 +80,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, strings.Join([]string{
 		"usage: spillway server",
 		"       spillway run [-- <claude args>]",
-		"       spillway status",
+		"       spillway status [--json]",
 		"       spillway login claude <name>",
 		"       spillway login kimi <name>",
 		"       spillway accounts [remove <name>]",

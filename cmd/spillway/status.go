@@ -3,16 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
-
-	"github.com/coderage-labs/spillway/internal/admin"
-	"github.com/coderage-labs/spillway/internal/config"
 )
 
 // tokenPathFor locates the admin token beside the config. Absent on a
@@ -22,37 +16,17 @@ func tokenPathFor(cfgPath string) string {
 }
 
 // runStatus implements `spillway status`: query the running daemon's admin
-// API and print a compact pool summary. A loopback listener needs no token,
-// so the token file is used only when one exists.
-func runStatus() error {
-	cfgPath, err := config.Path()
+// API and print a compact pool summary. With --json it prints the pool view
+// the dashboard sees instead, for anything that wants to read it rather than
+// look at it — the spillway Claude Code plugin, mainly, which would otherwise
+// have to hardcode the port and could not present an admin token.
+func runStatus(jsonOut bool) error {
+	api, err := dialAdmin()
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	addr := cfg.Admin.Addr
-	if addr == "" {
-		addr = admin.DefaultAddr
-	}
-
-	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/api/accounts", nil)
-	if err != nil {
-		return err
-	}
-	if b, err := os.ReadFile(tokenPathFor(cfgPath)); err == nil {
-		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(b)))
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("admin API unreachable (is `spillway server` running?): %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("admin API %d", resp.StatusCode)
+	if jsonOut {
+		return statusJSON(api)
 	}
 	var accounts []struct {
 		Name           string `json:"name"`
@@ -67,8 +41,8 @@ func runStatus() error {
 			ResetAt time.Time `json:"resetAt"`
 		} `json:"quotaWindows"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&accounts); err != nil {
-		return fmt.Errorf("decode admin response: %w", err)
+	if err := api.get("/api/accounts", &accounts); err != nil {
+		return err
 	}
 	if len(accounts) == 0 {
 		fmt.Println("no accounts")
@@ -124,4 +98,27 @@ func runStatus() error {
 	}
 	t.render(os.Stdout)
 	return nil
+}
+
+// statusJSON prints state, accounts and recent requests as one object. It
+// stays raw rather than summarising: the caller is a model, and pre-digesting
+// this into prose here would only mean two places deciding what matters.
+func statusJSON(api *adminAPI) error {
+	out := map[string]any{}
+	for _, e := range []struct {
+		key, path string
+	}{
+		{"state", "/api/state"},
+		{"accounts", "/api/accounts"},
+		{"requests", "/api/requests?limit=20"},
+	} {
+		var v any
+		if err := api.get(e.path, &v); err != nil {
+			return err
+		}
+		out[e.key] = v
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }
