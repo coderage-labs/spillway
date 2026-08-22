@@ -1,0 +1,126 @@
+name: Windows probe
+
+# A Windows machine for a repo that has none.
+#
+# The unit tests cover what a fake schtasks can answer and the CI integration
+# test covers what a real scheduler says about our XML, but neither starts the
+# daemon, and the bugs found on this platform so far have all been in the part
+# that only runs when something actually runs: an XML encoding no test parsed,
+# a /Run discarded because the old instance was still alive. This drives the
+# whole thing end to end and prints what happened.
+#
+# Manual only. It exists to be read, not to gate anything.
+on:
+  workflow_dispatch:
+    inputs:
+      scoop:
+        description: "Also install from the scoop bucket (needs a published release)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Build
+        run: go build -o "$env:RUNNER_TEMP\spillway.exe" ./cmd/spillway
+
+      # An account with a token, so the daemon has something to load and stays
+      # up. The token is nonsense: nothing here talks to a provider.
+      - name: Configure
+        run: |
+          $cfg = "$env:AppData\spillway"
+          New-Item -ItemType Directory -Force -Path $cfg | Out-Null
+          @"
+          upstream: https://api.anthropic.com
+          accounts:
+              - name: probe
+                type: claude-oauth
+                accessToken: not-a-real-token
+                expiresAt: 99999999999999
+          admin:
+              addr: 127.0.0.1:7657
+          pool:
+              probeOnStart: false
+          log:
+              level: info
+          "@ | Set-Content -Path "$cfg\spillway.yaml" -Encoding utf8
+          Get-Content "$cfg\spillway.yaml"
+
+      - name: service install
+        run: |
+          & "$env:RUNNER_TEMP\spillway.exe" service install
+          if ($LASTEXITCODE -ne 0) { throw "service install exited $LASTEXITCODE" }
+
+      - name: Did the task register, and is it running?
+        run: |
+          schtasks /Query /TN "\dev.coderage.spillway" /FO LIST /V
+          & "$env:RUNNER_TEMP\spillway.exe" service status
+
+      # The question the unit tests cannot answer: did /Run actually start a
+      # process, and did that process get far enough to serve.
+      - name: Is the daemon answering?
+        run: |
+          $ok = $false
+          foreach ($i in 1..20) {
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:7657/api/state
+              Write-Host "admin API: $($r.StatusCode) $($r.Content)"
+              $ok = $true; break
+            } catch { Start-Sleep -Seconds 1 }
+          }
+          Get-Process spillway -ErrorAction SilentlyContinue |
+            Format-Table Id, ProcessName, Path -AutoSize
+          if (-not $ok) {
+            Write-Host "::warning::daemon never answered on 7657"
+            Get-Content "$env:LocalAppData\spillway\spillway.log" -Tail 40 -ErrorAction SilentlyContinue
+            throw "the scheduled task did not produce a serving daemon"
+          }
+
+      # The upgrade case: reinstall over a running daemon and prove the
+      # process was actually replaced rather than left alone.
+      - name: Reinstall over the running daemon
+        run: |
+          $before = (Get-Process spillway -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+          Write-Host "pid before: $before"
+          & "$env:RUNNER_TEMP\spillway.exe" service install
+          Start-Sleep -Seconds 5
+          $after = (Get-Process spillway -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+          Write-Host "pid after:  $after"
+          if (-not $after) { throw "no daemon running after reinstall" }
+          if ($before -eq $after) {
+            throw "reinstall left the original process alive - an upgrade would keep serving the old binary"
+          }
+
+      - name: service uninstall
+        run: |
+          & "$env:RUNNER_TEMP\spillway.exe" service uninstall
+          schtasks /Query /TN "\dev.coderage.spillway" 2>&1 | Out-String | Write-Host
+          if ($LASTEXITCODE -eq 0) { throw "the task survived uninstall" }
+          $left = Get-Process spillway -ErrorAction SilentlyContinue
+          if ($left) {
+            Write-Host "::warning::daemon still running after uninstall: $($left.Id)"
+            $left | Stop-Process -Force
+          }
+
+      - name: Install from the scoop bucket
+        if: inputs.scoop
+        run: |
+          Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+          scoop bucket add coderage-labs https://github.com/coderage-labs/scoop-bucket
+          scoop install spillway
+          Write-Host "--- shim resolves to ---"
+          (Get-Command spillway.exe).Source
+          spillway version
