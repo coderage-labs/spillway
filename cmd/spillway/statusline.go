@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -428,11 +429,28 @@ func shortModel(m string) string {
 // minimal environment, so a bare command name is unreliable — GOPATH/bin is
 // frequently absent from that PATH, and the failure is silent (an empty line).
 func selfPath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
+	// Deliberately does NOT resolve symlinks.
+	//
+	// It used to. A package manager installs a stable symlink into a bin
+	// directory and points it at a versioned path — Homebrew's
+	// /opt/homebrew/bin/spillway -> Caskroom/spillway/0.1.1/spillway — and
+	// resolving through it records a path that the next upgrade deletes. The
+	// launchd job and the Claude Code status line both bake this in, so both
+	// would break at the next release, silently and later.
+	//
+	// Prefer the name we were invoked as, looked up on PATH. LookPath returns
+	// an absolute argv[0] unchanged and finds a bare name in the bin
+	// directory, which is the stable one either way.
+	if p, err := exec.LookPath(os.Args[0]); err == nil {
+		if abs, aerr := filepath.Abs(p); aerr == nil {
+			if _, serr := os.Stat(abs); serr == nil {
+				return abs, nil
+			}
+		}
 	}
-	return filepath.EvalSymlinks(exe)
+	// No usable argv[0] (launchd re-exec, a stripped environment): fall back
+	// to whatever the OS reports, absolute but possibly already resolved.
+	return os.Executable()
 }
 
 func statuslineCommand() (string, error) {

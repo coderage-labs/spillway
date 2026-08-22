@@ -37,12 +37,12 @@ func schtasks(args ...string) (string, error) {
 }
 
 func serviceInstall() error {
-	bin, err := os.Executable()
+	// selfPath, not os.Executable + EvalSymlinks: the scheduled task stores
+	// this path and runs it at every logon, so resolving a package manager's
+	// stable symlink records something the next upgrade removes.
+	bin, err := selfPath()
 	if err != nil {
 		return err
-	}
-	if resolved, err := filepath.EvalSymlinks(bin); err == nil {
-		bin = resolved
 	}
 	logPath, err := serviceLogPaths()
 	if err != nil {

@@ -3,6 +3,8 @@ package main
 import (
 	"math"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -342,5 +344,66 @@ func TestRenderReserveOnlyPoolIsNotDry(t *testing.T) {
 	}
 	if !strings.Contains(got, "1 spent") {
 		t.Errorf("%q does not warn that the last account is on its reserve", got)
+	}
+}
+
+// selfPath must not resolve symlinks.
+//
+// Homebrew installs /opt/homebrew/bin/spillway as a symlink to a VERSIONED
+// path under Caskroom, which the next upgrade deletes. Both the launchd job
+// and the Claude Code status line record this path once, at install time, so
+// resolving through the symlink breaks them at the next release — silently,
+// and much later than the change that caused it.
+func TestSelfPathKeepsTheSymlinkItWasInvokedAs(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "versioned", "spillway")
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "bin", "spillway")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Invoked by absolute path through the symlink, as a shell would.
+	old := os.Args
+	t.Cleanup(func() { os.Args = old })
+	os.Args = []string{link}
+
+	got, err := selfPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != link {
+		t.Errorf("selfPath() = %q, want the symlink %q — recording the target "+
+			"bakes in a path the next upgrade removes", got, link)
+	}
+}
+
+// A bare name is resolved on PATH, since the status line runs with a minimal
+// environment where a relative command is not findable later.
+func TestSelfPathResolvesABareNameOnPath(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "spillway-test-bin")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	old := os.Args
+	t.Cleanup(func() { os.Args = old })
+	os.Args = []string{"spillway-test-bin"}
+
+	got, err := selfPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != bin {
+		t.Errorf("selfPath() = %q, want the absolute %q", got, bin)
 	}
 }

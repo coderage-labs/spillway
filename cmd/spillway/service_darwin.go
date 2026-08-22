@@ -70,11 +70,12 @@ func serviceInstall() error {
 	if err != nil {
 		return err
 	}
-	bin, err := os.Executable()
+	// selfPath, not os.Executable + EvalSymlinks: this path is written into
+	// the plist once and read at every logon, and resolving a package
+	// manager's stable symlink records a versioned path that the next
+	// upgrade deletes.
+	bin, err := selfPath()
 	if err != nil {
-		return err
-	}
-	if bin, err = filepath.EvalSymlinks(bin); err != nil {
 		return err
 	}
 	outLog, errLog, err := serviceLogPaths()
