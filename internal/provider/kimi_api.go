@@ -1,4 +1,4 @@
-package accounts
+package provider
 
 // Kimi provider: device-flow login, token refresh, and /usages quota reads.
 // Endpoint shapes spiked from kimi-cli (design doc §12a, 2026-08-21).

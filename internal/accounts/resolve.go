@@ -17,10 +17,12 @@ func ResolveYAML(a config.AccountConfig, store secrets.Store) (*pool.Account, er
 	}
 	upstream := a.Upstream
 	if upstream == "" {
-		// The provider's own default; an empty one means "use the global
-		// upstream", which is Claude's case.
-		if d := provider.For(a.Type).DefaultUpstream; d != "" && a.Type != "" && a.Type != "claude-oauth" {
-			upstream = d
+		// Ask the registry rather than naming a provider. Claude's default
+		// upstream restates the global setting, so applying it here would
+		// pin the account to api.anthropic.com and quietly ignore a
+		// configured `upstream`.
+		if spec := provider.For(a.Type); spec.OwnsUpstream {
+			upstream = spec.DefaultUpstream
 		}
 	}
 	acct := pool.NewAccount(a.Name, pool.SourceYAML,

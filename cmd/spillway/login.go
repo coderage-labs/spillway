@@ -13,6 +13,7 @@ import (
 
 	"github.com/coderage-labs/spillway/internal/accounts"
 	"github.com/coderage-labs/spillway/internal/config"
+	"github.com/coderage-labs/spillway/internal/provider"
 	"github.com/coderage-labs/spillway/internal/secrets"
 )
 
@@ -103,7 +104,7 @@ func runLoginKimi(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 
-	da, err := accounts.KimiDeviceAuthorize(ctx, nil, "")
+	da, err := provider.KimiDeviceAuthorize(ctx, nil, "")
 	if err != nil {
 		return err
 	}
@@ -111,7 +112,7 @@ func runLoginKimi(args []string) error {
 	openBrowser(da.VerificationURIComplete)
 	fmt.Println("Waiting for approval...")
 
-	tokens, err := accounts.KimiPollDevice(ctx, nil, "", da)
+	tokens, err := provider.KimiPollDevice(ctx, nil, "", da)
 	if err != nil {
 		return err
 	}
@@ -130,7 +131,7 @@ func runLoginKimi(args []string) error {
 	if err := config.UpsertAccount(cfgPath, config.AccountConfig{
 		Name:      name,
 		Type:      "kimi-oauth",
-		Upstream:  accounts.KimiUpstream,
+		Upstream:  provider.KimiUpstream,
 		ExpiresAt: tokens.ExpiresAtMs(time.Now()),
 	}); err != nil {
 		return err

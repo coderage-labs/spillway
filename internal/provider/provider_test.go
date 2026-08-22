@@ -1,7 +1,14 @@
 package provider
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -268,5 +275,62 @@ func TestAllowedWarningIsAvailableWithoutInUse(t *testing.T) {
 	}
 	if ov.InUse {
 		t.Error("InUse set with no In-Use header")
+	}
+}
+
+// Every provider lives in the registry, and nothing outside it should have to
+// name one. This guards the shape rather than any single behaviour: the last
+// two branches were `a.Type != "claude-oauth"` in resolve.go and a refresh
+// dispatch, and the first came back after being removed once.
+func TestNoProviderNamedOutsideTheRegistry(t *testing.T) {
+	root := ".."
+	var offenders []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			// The registry is allowed to name providers; that is its job.
+			if info.Name() == "provider" || info.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, src, 0) // comments excluded
+		if perr != nil {
+			return nil // not our business here
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			bin, ok := n.(*ast.BinaryExpr)
+			if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
+				return true
+			}
+			for _, side := range []ast.Expr{bin.X, bin.Y} {
+				lit, ok := side.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				if v := strings.Trim(lit.Value, `"`); v == "claude-oauth" || v == "kimi-oauth" {
+					offenders = append(offenders,
+						fmt.Sprintf("%s:%d compares against %q", path, fset.Position(lit.Pos()).Line, v))
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range offenders {
+		t.Errorf("%s — put the decision in the registry instead", o)
 	}
 }

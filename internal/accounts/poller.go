@@ -25,7 +25,7 @@ func PollKimiUsages(ctx context.Context, p *pool.Pool, logger *slog.Logger) {
 		if !provider.For(a.Type).PollsUsage || a.State() == pool.StateDisabled {
 			continue
 		}
-		usages, err := FetchKimiUsages(ctx, nil, a.Upstream, a.Token())
+		usages, err := provider.FetchKimiUsages(ctx, nil, a.Upstream, a.Token())
 		if err != nil {
 			logger.Warn("kimi /usages poll failed", "account", a.Name, "err", err)
 			continue

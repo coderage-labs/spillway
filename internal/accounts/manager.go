@@ -143,8 +143,8 @@ func (m *Manager) refreshOne(ctx context.Context, a *pool.Account) error {
 	)
 	switch provider.For(a.Type).RefreshFlavour {
 	case provider.KimiDevice:
-		var res *KimiTokens
-		if res, err = KimiRefresh(ctx, nil, m.KimiAuthBase, refresh); err == nil {
+		var res *provider.KimiTokens
+		if res, err = provider.KimiRefresh(ctx, nil, m.KimiAuthBase, refresh); err == nil {
 			access, newRefresh, expiresAt = res.AccessToken, res.RefreshToken, res.ExpiresAtMs(m.now())
 		}
 	default: // provider.AnthropicOAuth

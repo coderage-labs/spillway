@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/coderage-labs/spillway/internal/provider"
 	"io"
 	"net/http"
 	"time"
@@ -17,9 +18,11 @@ const (
 	claudeClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 )
 
-// ErrRefreshDead marks a permanently rejected refresh token (400/401) — the
+// ErrRefreshDead is provider.ErrRefreshDead, re-exported so callers in this
+// package read naturally. It marks a permanently rejected refresh token
+// (400/401) — the
 // account needs re-login, not a retry.
-var ErrRefreshDead = errors.New("refresh token rejected")
+var ErrRefreshDead = provider.ErrRefreshDead
 
 // TokenResult is a normalized refresh response.
 type TokenResult struct {
