@@ -186,6 +186,15 @@ func runServer(args []string) error {
 		return fmt.Errorf("open request log: %w", err)
 	}
 	defer rl.Close()
+
+	// Quota windows live in memory only, so every restart clears them to
+	// nothing — which used to mean an account that is spent with overage
+	// permitted gets probed unconditionally on the first check after each
+	// restart, a real request that gets billed (issue #34). Seeding from
+	// the persisted quota_samples table means an account genuinely has no
+	// reading only when that is actually true.
+	accounts.SeedQuota(p, rl, time.Now(), logger)
+
 	broker := events.New()
 
 	handler, err := proxy.NewHandler(cfg, logger, p)
