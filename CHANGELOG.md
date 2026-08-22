@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/coderage-labs/spillway/compare/v0.4.0...v0.5.0) (2026-08-22)
+
+
+### Features
+
+* keep secrets in a 0600 file where there is no keychain ([e6938cf](https://github.com/coderage-labs/spillway/commit/e6938cf4a3f0d7c0391a82334899e8e571e562d5))
+* run as a systemd user unit on Linux ([aca5c39](https://github.com/coderage-labs/spillway/commit/aca5c3932ee53bba1ab2e0a4e87ab8f680ccf5c9))
+
+
+### Fixes
+
+* don't assert cross-process file locking on windows ([0c665d9](https://github.com/coderage-labs/spillway/commit/0c665d9b845eff0c60be026747db2444cd9c748d))
+* restart the service on upgrade, and zap it on uninstall ([0463f3c](https://github.com/coderage-labs/spillway/commit/0463f3c818ad3aa3b7a078be287e78ce7af1bac6))
+* Windows reinstall left the old daemon running, and add a scoop bucket ([1d7ed8d](https://github.com/coderage-labs/spillway/commit/1d7ed8de0c182586ddb82b956a1459bc4a132d73))
+
 ## [0.4.0](https://github.com/coderage-labs/spillway/compare/v0.3.0...v0.4.0) (2026-08-22)
 
 
