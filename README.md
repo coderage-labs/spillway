@@ -240,6 +240,14 @@ Serving account, the model **actually** going upstream, and a headroom bar per
 quota window. Install refuses to replace a status line another tool owns unless
 you pass `--force`, and uninstall leaves a foreign one alone.
 
+**It prints nothing in a session that is not going through spillway.** The
+line is installed once and then runs for every Claude Code session on the
+machine, and showing the pool to one that is not attached is worse than
+silence — the numbers are real, but they describe traffic that session is not
+part of. Attachment is read from `HTTPS_PROXY` (or `ANTHROPIC_BASE_URL`)
+pointing at the configured listener. Pass `--always` in the command if you
+want it regardless.
+
 ### Claude Code plugin
 
 ```sh

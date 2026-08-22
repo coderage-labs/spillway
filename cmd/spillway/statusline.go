@@ -16,10 +16,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -264,8 +267,10 @@ func pickAccount(list []slAccount) *slAccount {
 
 func runStatusline(args []string) error {
 	// Subcommands manage the Claude Code wiring; bare `statusline` prints the
-	// line itself, which is what the hook invokes.
-	if len(args) > 0 {
+	// line itself, which is what Claude Code invokes. A leading flag is not a
+	// subcommand — `statusline --always` printed an unknown-action error into
+	// the prompt.
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		switch args[0] {
 		case "install":
 			return runStatuslineInstall(args[1:])
@@ -282,6 +287,23 @@ func runStatusline(args []string) error {
 	if err != nil {
 		return nil // silent: a broken config must not garble the prompt
 	}
+
+	// Nothing at all unless this client is actually going through spillway.
+	//
+	// The status line is installed once into ~/.claude/settings.json and then
+	// applies to every Claude Code session on the machine, including the ones
+	// started without `spillway run`. Reporting the pool to those is worse
+	// than saying nothing: the numbers are real but they describe traffic
+	// this session is not part of, which reads as "you are on spillway" when
+	// you are not.
+	//
+	// Claude Code passes its own environment to the status line command —
+	// verified by having it run a wrapper that dumped env — so HTTPS_PROXY is
+	// visible here and says exactly what the client was told to do.
+	if !attachedToSpillway(cfg) && !hasFlag(args, "--always") {
+		return nil
+	}
+
 	addr := cfg.Admin.Addr
 	if addr == "" {
 		addr = admin.DefaultAddr
@@ -562,4 +584,64 @@ func runStatuslineStatus() error {
 	}
 	fmt.Printf("status line installed (%s), %s:\n  %s\n", path, who, existing)
 	return nil
+}
+
+// attachedToSpillway reports whether the process that invoked us was pointed
+// at this spillway, by either supported attach path.
+func attachedToSpillway(cfg *config.Config) bool {
+	host := cfg.Proxy.Host
+	if host == "" {
+		host = config.DefaultProxyHost
+	}
+	port := cfg.Proxy.Port
+	if port == 0 {
+		port = config.DefaultProxyPort
+	}
+	want := net.JoinHostPort(host, strconv.Itoa(port))
+
+	for _, k := range []string{
+		// MITM mode, which is what `spillway run` sets.
+		"HTTPS_PROXY", "https_proxy",
+		// The base-URL route, for a client attached that way instead.
+		"ANTHROPIC_BASE_URL",
+	} {
+		if hostPortOf(os.Getenv(k)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// hostPortOf reduces a proxy or base URL to host:port, so a trailing slash or
+// a missing scheme cannot make an equal address compare unequal.
+func hostPortOf(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if !strings.Contains(v, "//") {
+		v = "//" + v
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if u.Port() == "" {
+		switch u.Scheme {
+		case "https":
+			return net.JoinHostPort(u.Hostname(), "443")
+		default:
+			return net.JoinHostPort(u.Hostname(), "80")
+		}
+	}
+	return net.JoinHostPort(u.Hostname(), u.Port())
+}
+
+func hasFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == name {
+			return true
+		}
+	}
+	return false
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coderage-labs/spillway/internal/admin"
+	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/events"
 	"github.com/coderage-labs/spillway/internal/pool"
 )
@@ -418,4 +419,77 @@ func exeName(n string) string {
 		return n + ".exe"
 	}
 	return n
+}
+
+// The status line is installed once and then runs for every Claude Code
+// session on the machine, including ones started without `spillway run`.
+// Reporting the pool to those is worse than silence: the numbers are real,
+// but they describe traffic the session is not part of, and the line reads as
+// "you are on spillway" when you are not.
+func TestAttachedToSpillway(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Proxy.Host, cfg.Proxy.Port = "127.0.0.1", 7654
+
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{"nothing set", nil, false},
+		{"HTTPS_PROXY at us", map[string]string{"HTTPS_PROXY": "http://127.0.0.1:7654"}, true},
+		{"lowercase https_proxy", map[string]string{"https_proxy": "http://127.0.0.1:7654"}, true},
+		{"trailing slash", map[string]string{"HTTPS_PROXY": "http://127.0.0.1:7654/"}, true},
+		{"no scheme", map[string]string{"HTTPS_PROXY": "127.0.0.1:7654"}, true},
+		{"base URL route", map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:7654"}, true},
+		// Somebody else's proxy is the case this exists for: a corporate
+		// proxy in the environment must not light up spillway's line.
+		{"a different proxy", map[string]string{"HTTPS_PROXY": "http://proxy.corp:8080"}, false},
+		{"right host, wrong port", map[string]string{"HTTPS_PROXY": "http://127.0.0.1:9999"}, false},
+		{"empty value", map[string]string{"HTTPS_PROXY": ""}, false},
+		{"garbage", map[string]string{"HTTPS_PROXY": "::::"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ANTHROPIC_BASE_URL"} {
+				t.Setenv(k, "")
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := attachedToSpillway(&cfg); got != tc.want {
+				t.Errorf("attachedToSpillway = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A non-default listener has to be honoured, or anyone who moved the port
+// gets a permanently blank line.
+func TestAttachedHonoursAConfiguredPort(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Proxy.Port = 9100
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9100")
+	if !attachedToSpillway(&cfg) {
+		t.Error("did not recognise the configured port")
+	}
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:7654")
+	if attachedToSpillway(&cfg) {
+		t.Error("matched the default port while configured for another")
+	}
+}
+
+// A leading flag is not a subcommand. `statusline --always` printed
+// `unknown statusline action "--always"` straight into the prompt.
+func TestStatuslineFlagIsNotASubcommand(t *testing.T) {
+	t.Setenv("SPILLWAY_CONFIG", filepath.Join(t.TempDir(), "spillway.yaml"))
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ANTHROPIC_BASE_URL"} {
+		t.Setenv(k, "")
+	}
+	// No daemon to reach, so this renders nothing either way; what matters is
+	// that it is not an error.
+	if err := runStatusline([]string{"--always"}); err != nil {
+		t.Errorf("--always treated as an action: %v", err)
+	}
+	if err := runStatusline([]string{"instal"}); err == nil {
+		t.Error("a mistyped subcommand should still be an error")
+	}
 }

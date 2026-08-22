@@ -111,11 +111,20 @@ type Config struct {
 	} `yaml:"log"`
 }
 
+// DefaultProxyPort and DefaultProxyHost are the listener written on first
+// run. Named because more than one place has to reconstruct the same address
+// — the status line decides whether the client that invoked it is pointed
+// here, and comparing against a different literal would answer wrongly.
+const (
+	DefaultProxyPort = 7654
+	DefaultProxyHost = "127.0.0.1"
+)
+
 // Defaults returns the configuration written on first run.
 func Defaults() Config {
 	var c Config
-	c.Proxy.Port = 7654
-	c.Proxy.Host = "127.0.0.1"
+	c.Proxy.Port = DefaultProxyPort
+	c.Proxy.Host = DefaultProxyHost
 	c.Upstream = "https://api.anthropic.com"
 	c.Admin.Addr = "127.0.0.1:7657"
 	c.Pool.ExhaustedMode = "notify"
