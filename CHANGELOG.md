@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.0](https://github.com/coderage-labs/spillway/compare/v0.6.0...v0.7.0) (2026-08-22)
+
+
+### Features
+
+* pin the pool to a named account ([#18](https://github.com/coderage-labs/spillway/issues/18)) ([f5b08d2](https://github.com/coderage-labs/spillway/commit/f5b08d23a5e4c0cc1cd3703d20828b2972a9b26e))
+
+
+### Fixes
+
+* guard the pool fields the dashboard writes ([#16](https://github.com/coderage-labs/spillway/issues/16)) ([2254349](https://github.com/coderage-labs/spillway/commit/2254349471ba8ec8f117e901d34bf7f1b84b3026))
+* **proxy:** record the mapped model on early-return responses too ([#14](https://github.com/coderage-labs/spillway/issues/14)) ([#15](https://github.com/coderage-labs/spillway/issues/15)) ([5cd2ade](https://github.com/coderage-labs/spillway/commit/5cd2adee0e99e026af095506f0db32a14ca24ce5))
+* refuse a non-loopback proxy bind unless explicitly opted in ([#17](https://github.com/coderage-labs/spillway/issues/17)) ([df35f56](https://github.com/coderage-labs/spillway/commit/df35f56dea8f2cf3281d6daa54929455404188ba)), closes [#12](https://github.com/coderage-labs/spillway/issues/12)
+
+
+### Documentation
+
+* bring the README back in line with what the thing does ([ee01732](https://github.com/coderage-labs/spillway/commit/ee01732250a06ddc2faf5e0b005dd5fbaaceec98))
+* document the pin ([#19](https://github.com/coderage-labs/spillway/issues/19)) ([583d267](https://github.com/coderage-labs/spillway/commit/583d267eefc21dbe73347d0a5ed5dcac47150f26))
+
 ## [0.6.0](https://github.com/coderage-labs/spillway/compare/v0.5.2...v0.6.0) (2026-08-22)
 
 
