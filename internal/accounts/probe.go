@@ -24,10 +24,12 @@ package accounts
 // (wouldBill), and that one is a money question: with extra usage enabled such
 // an account answers a probe with a 200 and a charge, while the reading and
 // reset time already on file say everything the probe would (design doc §6.21,
-// "a probe must never be a purchase"). The guard is incomplete by construction
-// — needsProbe returns true for an account with no windows at all before
-// reaching it, so the first probe after a daemon restart can still bill. Known,
-// and open in §6.21.
+// "a probe must never be a purchase"). needsProbe returns true for an account
+// with no windows at all before ever reaching this guard, so on its own that
+// would let the first probe after a daemon restart bill (issue #34) — fixed
+// not here but one level up, by never actually starting a restart with zero
+// windows: SeedQuota (seed.go) installs last-known state from quota_samples
+// before the probe loop runs, so "no windows" means genuinely unknown again.
 
 import (
 	"bytes"
@@ -118,20 +120,38 @@ func wouldBill(a *pool.Account, now time.Time) bool {
 	if !spent {
 		return false
 	}
-	// Past its reset with no fresh reading: probe again, that is the only way
-	// to learn it has refilled.
+	// now.Before(reset): still within the window that made it spent, so the
+	// stored reading already says what a probe would — wait for the reset
+	// instead of paying to re-learn it.
+	//
+	// reset.IsZero(): no reset was ever recorded for the spent window (a
+	// provider that didn't report one), so there is no time to wait for and
+	// no way to tell "still spent" from "reset already happened but nobody
+	// looked". This deliberately still returns true — never probe rather
+	// than risk a bill — which means such an account's tank can go stuck
+	// until something other than a probe updates it (ordinary proxied
+	// traffic, which bills only because the request itself was real, still
+	// refreshes it via RecordQuota). The alternative, probing whenever the
+	// reset is unknown, would turn "unknown" into "bill every staleAfter
+	// tick forever" for any provider window that omits a reset — worse than
+	// a stuck tank against the one hard rule here (never spend uninvited),
+	// so this is the deliberate choice, not a latent bug.
 	return reset.IsZero() || now.Before(reset)
 }
 
 // needsProbe is true when we have no quota reading, or the newest one has
 // aged past staleAfter.
 //
-// The wouldBill guard sits after the no-reading case, not before it, so it
-// only stops repeat probes: an account with no windows at all is probed even
-// when that bills, which is one charge per daemon restart. Deliberately not
-// fixed by moving the check — that would leave such a tank blank forever. The
-// fix is seeding windows from quota_samples at startup (design doc §6.21,
-// open).
+// The wouldBill guard sits after the no-reading case, not before it, so on
+// its own it would only stop repeat probes: an account with no windows at
+// all would be probed even when that bills, which used to be one charge per
+// daemon restart (issue #34). Deliberately not fixed by moving the check
+// above the empty-windows return — that would leave a never-yet-probed
+// account's tank blank forever, since nothing else refreshes an idle
+// account. The actual fix is that "no windows" no longer happens on a normal
+// restart: SeedQuota (seed.go) installs last-known state from quota_samples
+// before this ever runs, so len(wins) == 0 here means the account genuinely
+// has never had a reading, not "we just restarted".
 func needsProbe(a *pool.Account, staleAfter time.Duration) bool {
 	wins := a.QuotaWindows()
 	if len(wins) == 0 {

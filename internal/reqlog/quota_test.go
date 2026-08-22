@@ -226,3 +226,43 @@ func TestOpenDropsParallelSamples(t *testing.T) {
 		t.Errorf("windows left = %v, want just 5h", got)
 	}
 }
+
+// LatestQuotaSamples is what startup seeding reads from: one row per
+// account/window pair, the newest write, regardless of how many older ones
+// are sitting in the table.
+func TestLatestQuotaSamplesReturnsNewestPerAccountWindow(t *testing.T) {
+	l := openTest(t)
+	base := time.Now()
+	write := func(account, window string, used float64, offset time.Duration) {
+		t.Helper()
+		if err := l.RecordQuota(Sample{Ts: base.Add(offset), Account: account, Window: window,
+			Limit: 1, Used: used, ResetAt: base.Add(offset + time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a", "5h", 0.1, 0)
+	write("a", "5h", 0.5, 2*time.Minute) // past sampleInterval: lands as a second row
+	write("a", "7d", 0.2, 0)
+	write("b", "5h", 0.9, 0)
+
+	got, err := l.LatestQuotaSamples()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want one row per (account, window) pair (a/5h, a/7d, b/5h), got %d: %+v", len(got), got)
+	}
+	byKey := map[string]Sample{}
+	for _, s := range got {
+		byKey[s.Account+"/"+s.Window] = s
+	}
+	if s, ok := byKey["a/5h"]; !ok || s.Used != 0.5 {
+		t.Errorf("a/5h should be the newest write (used=0.5), got %+v", s)
+	}
+	if s, ok := byKey["a/7d"]; !ok || s.Used != 0.2 {
+		t.Errorf("a/7d missing or wrong: %+v", s)
+	}
+	if s, ok := byKey["b/5h"]; !ok || s.Used != 0.9 {
+		t.Errorf("b/5h missing or wrong: %+v", s)
+	}
+}

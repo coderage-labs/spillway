@@ -495,6 +495,14 @@ is spillway originating traffic rather than proxying it, so it is deliberately
 narrow: never for an account that already reported recently, never fatal on
 failure, and switchable off.
 
+Quota windows live in memory, so a restart used to mean every tank went blank
+until the next probe or request — and, for an account that was spent with
+extra usage permitted, meant the next probe could itself be a charge. The
+daemon now seeds each account's last recorded reading from the request log on
+startup, provided it is still within its own reset window, so a restart shows
+last-known state immediately and only a genuinely never-seen account is
+probed unconditionally.
+
 ### Settings
 
 The dashboard can edit an allowlisted subset of the config —

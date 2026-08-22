@@ -6,6 +6,7 @@ package reqlog
 // "dry in 2h10m, before its 3h22m refill".
 
 import (
+	"database/sql"
 	"time"
 )
 
@@ -84,6 +85,27 @@ func (l *Log) QuotaSince(cutoff time.Time) ([]Sample, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanSamples(rows)
+}
+
+// LatestQuotaSamples returns the newest recorded sample for each
+// account/window pair — last-known state, read once at startup to seed
+// in-memory quota windows before anything has probed or polled (issue #34:
+// without this, an account with no reading at all is probed unconditionally,
+// including when that would bill).
+func (l *Log) LatestQuotaSamples() ([]Sample, error) {
+	rows, err := l.db.Query(`SELECT ts, account, window, lim, used, reset_at
+		FROM quota_samples q
+		WHERE ts = (SELECT MAX(ts) FROM quota_samples q2
+			WHERE q2.account = q.account AND q2.window = q.window)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSamples(rows)
+}
+
+func scanSamples(rows *sql.Rows) ([]Sample, error) {
 	var out []Sample
 	for rows.Next() {
 		var s Sample
