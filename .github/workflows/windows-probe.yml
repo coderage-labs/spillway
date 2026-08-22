@@ -120,17 +120,38 @@ jobs:
         run: |
           $before = (Get-Process spillway -ErrorAction SilentlyContinue | Select-Object -First 1).Id
           Write-Host "pid before: $before"
-          & "$env:RUNNER_TEMP\spillway.exe" service install
-          Start-Sleep -Seconds 5
-          $after = (Get-Process spillway -ErrorAction SilentlyContinue | Select-Object -First 1).Id
-          Write-Host "pid after:  $after"
-          Get-CimInstance Win32_Process -Filter "Name='spillway.exe'" |
-            Select-Object ProcessId, ParentProcessId, CreationDate |
-            Format-Table -AutoSize | Out-String | Write-Host
           if (-not $before) { throw "nothing was running, so this did not test the upgrade case" }
-          if (-not $after) { throw "no daemon running after reinstall" }
+
+          & "$env:RUNNER_TEMP\spillway.exe" service install
+
+          # How long until a daemon is serving again? A gap here is a real
+          # outage on every upgrade, and RestartOnFailure would paper over it
+          # after a minute in a way that a 5-second check cannot see.
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $after = $null
+          foreach ($i in 1..90) {
+            $after = (Get-Process spillway -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+            if ($after -and $after -ne $before) {
+              try {
+                Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:7657/api/state | Out-Null
+                break
+              } catch { }
+            }
+            Start-Sleep -Seconds 1
+          }
+          Write-Host "pid after: $after, serving again after $($sw.Elapsed.TotalSeconds)s"
+          Write-Host "--- daemon log ---"
+          Get-Content "$env:LocalAppData\spillway\spillway.log" -Tail 30 -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host $_ }
+          schtasks /Query /TN "\dev.coderage.spillway" /FO LIST | Select-String "Status:" | Write-Host
+          $global:LASTEXITCODE = 0
+
+          if (-not $after) { throw "no daemon at all after reinstall" }
           if ($before -eq $after) {
             throw "reinstall left the original process alive - an upgrade would keep serving the old binary"
+          }
+          if ($sw.Elapsed.TotalSeconds -gt 15) {
+            Write-Host "::warning::the daemon was down for $($sw.Elapsed.TotalSeconds)s across the upgrade"
           }
 
       - name: service uninstall
