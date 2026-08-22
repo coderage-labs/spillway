@@ -1,0 +1,713 @@
+// Package pool tracks account health and selects accounts for requests.
+//
+// Rotation policy is sticky-until-exhausted (design doc §6.2): a session
+// stays on one account for prompt-cache affinity and rotates only when that
+// account reports quota exhaustion. Selection runs under a mutex with
+// per-account in-flight counters (§6.3); on contention the account with the
+// fewest in-flight requests wins.
+package pool
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/coderage-labs/spillway/internal/provider"
+)
+
+// State is an account's eligibility state.
+type State int
+
+const (
+	// StateOK serves requests.
+	StateOK State = iota
+	// StateExhausted is out of quota until ExhaustedUntil.
+	StateExhausted
+	// StateDisabled never serves requests (e.g. dead refresh token).
+	StateDisabled
+)
+
+// Credential sources.
+const (
+	// SourceYAML is an account whose tokens live in spillway.yaml; refreshes
+	// are written back to that file.
+	SourceYAML = "yaml"
+	// SourceKeychain is the local claude CLI login. The CLI owns that
+	// keychain item and refreshes it itself — we only ever reload from it,
+	// never write.
+	SourceKeychain = "keychain"
+)
+
+// Account is one pooled subscription account.
+type Account struct {
+	Name     string
+	Upstream string
+	// parked is an operator disable from config. Kept separate from
+	// StateDisabled, which means the credential died: un-parking must never
+	// revive an account whose token is dead.
+	parked bool
+	// LastModel is the model this account most recently served, after any
+	// modelMap rewrite — the answer to "what am I actually talking to".
+	lastModel string
+	// Priority orders selection: lower is preferred. Equal priorities fall
+	// back to least-loaded, so this is a preference, not a queue.
+	Priority int
+	// overage is the provider's last word on serving past quota at cost.
+	// Guarded by mu.
+	overage provider.Overage
+	// AllowOverage permits spending on this account, overriding the pool
+	// default. nil means "follow the pool" — the tri-state is deliberate, so
+	// that an account can opt out of a pool-wide yes.
+	AllowOverage *bool
+	// Label is an optional human name for display; the dashboard falls back
+	// to deriving one from Name when it is empty.
+	Label string
+	// Source records where credentials live (SourceYAML / SourceKeychain).
+	Source string
+	// Type is the provider kind ("claude-oauth" / "kimi-oauth") — error
+	// classification and refresh endpoints are provider-specific.
+	Type string
+	// ModelMap rewrites the request body's model id when serving through
+	// this account (§4 allowed mutation #3, cross-provider only). nil for
+	// same-provider accounts.
+	ModelMap map[string]string
+	// AccountUUID is the UUID Claude Code embeds in metadata.user_id for
+	// this account; empty disables the rewrite (pass through rather than
+	// guess). Immutable after wiring.
+	AccountUUID string
+
+	mu             sync.Mutex
+	accessToken    string
+	refreshToken   string
+	expiresAt      int64 // epoch milliseconds
+	state          State
+	exhaustedUntil time.Time
+	inFlight       int
+	quota          map[string]string // last seen anthropic-ratelimit-* headers
+	quotaAt        time.Time
+	windows        []QuotaWindow // provider-agnostic quota state (§6.5)
+}
+
+// QuotaWindow is one provider quota bucket in a provider-agnostic shape:
+// anthropic-ratelimit headers and kimi /usages both fill this (§6.5).
+type QuotaWindow struct {
+	Name      string    `json:"name"`    // window identifier, e.g. "5h", "7d", "weekly"
+	Limit     float64   `json:"limit"`   // 0 when the provider doesn't report one
+	Used      float64   `json:"used"`    // consumed units (for header windows: utilization, Limit=1)
+	ResetAt   time.Time `json:"resetAt"` // zero when unknown
+	Source    string    `json:"source"`  // "headers" (anthropic responses) or "poll" (kimi /usages)
+	FetchedAt time.Time `json:"fetchedAt"`
+}
+
+// NewAccount builds an account.
+func NewAccount(name, source, accessToken, refreshToken string, expiresAt int64, upstream string) *Account {
+	return &Account{
+		Name:         name,
+		Source:       source,
+		Upstream:     upstream,
+		accessToken:  accessToken,
+		refreshToken: refreshToken,
+		expiresAt:    expiresAt,
+	}
+}
+
+// Token returns the current access token (refresh-safe).
+func (a *Account) Token() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.accessToken
+}
+
+// Credentials returns all credential fields under one lock.
+func (a *Account) Credentials() (access, refresh string, expiresAt int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.accessToken, a.refreshToken, a.expiresAt
+}
+
+// SetCredentials replaces the credential fields after a refresh/reload (§6.4:
+// persisted by the caller before waiters are released).
+func (a *Account) SetCredentials(access, refresh string, expiresAt int64) {
+	a.mu.Lock()
+	a.accessToken = access
+	a.refreshToken = refresh
+	a.expiresAt = expiresAt
+	// Fresh credentials revive an account disabled for auth failure.
+	if a.state == StateDisabled {
+		a.state = StateOK
+	}
+	a.mu.Unlock()
+}
+
+// CanRefresh reports whether the account has a recovery path: a refresh
+// token (yaml) or a keychain item to reload.
+func (a *Account) CanRefresh() bool {
+	if a.Source == SourceKeychain {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.refreshToken != ""
+}
+
+// IsStaticKey reports whether the account holds a static credential: an
+// access token with no refresh token and no expiry (e.g. a console API key).
+// Static keys are never refresh-attempted and never disabled for lacking a
+// refresh token — they only die when the upstream rejects them (401).
+func (a *Account) IsStaticKey() bool {
+	if a.Source == SourceKeychain {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.refreshToken == "" && a.expiresAt <= 0
+}
+
+// Disable permanently removes the account from rotation (e.g. dead refresh
+// token).
+func (a *Account) Disable() {
+	a.mu.Lock()
+	a.state = StateDisabled
+	a.mu.Unlock()
+}
+
+// TokenManager recovers account credentials. Implemented by
+// accounts.Manager; pool only depends on the interface.
+type TokenManager interface {
+	// EnsureFresh proactively refreshes when expiry is near.
+	EnsureFresh(ctx context.Context, a *Account) error
+	// Recover forces one refresh/reload after an upstream 401.
+	Recover(ctx context.Context, a *Account) error
+}
+
+// ErrNoTokenManager is returned by Recover/EnsureFresh when no manager is
+// wired (tests, single-account fallback).
+var ErrNoTokenManager = errors.New("pool: no token manager configured")
+
+// Pool is a set of accounts with sticky session affinity.
+type Pool struct {
+	mu       sync.Mutex
+	accounts []*Account
+	sticky   map[string]string // session key -> account name
+	// sessionProvider pins a session to the provider it started on. The
+	// client configured its capabilities from that first model, so switching
+	// families mid-session can change the context ceiling underneath it
+	// (§6.18).
+	sessionProvider map[string]string
+	// CrossProvider allows rotation between providers mid-session. Off by
+	// default: same-provider rotation is transparent, cross-provider is not.
+	CrossProvider bool
+	tm            TokenManager
+	// AllowOverage permits the last-resort tier: serving from an account
+	// whose subscription quota is gone but which may bill for extra usage.
+	// Off by default — a proxy that starts spending money because a limit
+	// was reached is not something to opt out of after the fact.
+	AllowOverage bool
+	// SwitchThreshold is the used-fraction (0-1) at or above which an
+	// account is skipped while another eligible account exists (§6.5
+	// predictive rotation). 0 → default 0.98.
+	SwitchThreshold float64
+	// holds are the requests currently parked waiting for a reset, guarded
+	// by mu. See hold.go.
+	holds map[*hold]struct{}
+}
+
+// New builds a Pool. Accounts with expired tokens and no recovery path start
+// disabled; refreshable accounts stay eligible and are refreshed at Select
+// time (§6.4).
+func New(accounts []*Account, now time.Time) *Pool {
+	for _, a := range accounts {
+		_, _, exp := a.Credentials()
+		if exp > 0 && exp <= now.UnixMilli() && !a.CanRefresh() {
+			a.state = StateDisabled
+		}
+	}
+	return &Pool{accounts: accounts, sticky: map[string]string{},
+		sessionProvider: map[string]string{}, SwitchThreshold: 0.98}
+}
+
+// Threshold is the used-fraction at or above which an account is rotated
+// away from while a better one exists. Exported so that what the dashboard
+// calls "spent" is decided by the same number the selector uses, rather than
+// by a constant copied into the UI.
+func (p *Pool) Threshold() float64 { return p.threshold() }
+
+func (p *Pool) threshold() float64 {
+	if p.SwitchThreshold > 0 {
+		return p.SwitchThreshold
+	}
+	return 0.98
+}
+
+// SetTokenManager wires credential recovery (refresh-on-select, 401
+// recovery).
+func (p *Pool) SetTokenManager(tm TokenManager) { p.tm = tm }
+
+// EnsureFresh proactively refreshes an account nearing expiry. Called by the
+// proxy right after Select — never under the pool mutex.
+func (p *Pool) EnsureFresh(ctx context.Context, a *Account) error {
+	if p.tm == nil {
+		return nil
+	}
+	return p.tm.EnsureFresh(ctx, a)
+}
+
+// Recover forces one credential recovery after an upstream 401.
+func (p *Pool) Recover(ctx context.Context, a *Account) error {
+	if p.tm == nil {
+		return ErrNoTokenManager
+	}
+	return p.tm.Recover(ctx, a)
+}
+
+// Accounts returns the pool's accounts (shared pointers; read state via the
+// Account methods).
+func (p *Pool) Accounts() []*Account { return p.accounts }
+
+// EarliestReset reports the soonest time an exhausted account becomes
+// eligible again; ok=false when no account is merely exhausted (e.g. all
+// disabled — waiting won't help).
+func (p *Pool) EarliestReset() (time.Time, bool) {
+	var earliest time.Time
+	ok := false
+	for _, a := range p.accounts {
+		if a.State() != StateExhausted {
+			continue
+		}
+		if u := a.ExhaustedUntil(); !ok || u.Before(earliest) {
+			earliest = u
+			ok = true
+		}
+	}
+	return earliest, ok
+}
+
+// Select picks the account for a session: the sticky account if still
+// eligible and under the switch threshold, else the eligible, under-threshold
+// account with the fewest in-flight requests. Over-threshold is a PREFERENCE,
+// not a ban: when only over-threshold accounts remain, the least-loaded one
+// serves anyway. Returns nil when every account is exhausted or disabled.
+// The caller must call Done when the request finishes.
+// Select picks the account for a session. Deprecated in favour of SelectFor,
+// which can also honour request-shape capability; kept for callers that have
+// no body to check.
+func (p *Pool) Select(session string) *Account {
+	return p.SelectFor(session, nil)
+}
+
+// SelectFor picks the account for a session, skipping any that cannot serve
+// this request body (design doc §6.19) and, unless CrossProvider is set,
+// keeping the session on the provider it started with (§6.18: the client
+// configured its capabilities from the first model it saw).
+func (p *Pool) SelectFor(session string, body []byte) *Account {
+	return p.SelectExcept(session, body, nil)
+}
+
+// SelectExcept is SelectFor with a set of account names this request has
+// already tried and failed on.
+//
+// The exclusion is not optional for the overage tier. Every other tier is
+// self-limiting — a quota 429 marks the account exhausted, which removes it
+// from consideration — but the overage tier deliberately admits exhausted
+// accounts, so without a skip set a refused overage request re-selects the
+// same account immediately and spins.
+func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	usable := func(a *Account) bool {
+		if skip[a.Name] {
+			return false
+		}
+		if !p.CrossProvider {
+			if want, ok := p.sessionProvider[session]; ok && ProviderOf(a.Type) != want {
+				return false
+			}
+		}
+		return CanServe(a, body) == nil
+	}
+
+	if name, ok := p.sticky[session]; ok {
+		if a := p.find(name); a != nil && a.eligible() && !a.OverThreshold(p.threshold()) && usable(a) {
+			a.addInFlight(1)
+			return a
+		}
+		delete(p.sticky, session)
+	}
+
+	// Three tiers, cheapest first. Nothing in a later tier is touched while
+	// anything in an earlier one can serve.
+	best := p.leastLoaded(func(a *Account) bool {
+		return a.eligible() && !a.OverThreshold(p.threshold()) && usable(a)
+	})
+	if best == nil {
+		// Over-threshold but not yet rejected: the provider may still say
+		// yes, and refusing locally turns a maybe into a certain failure.
+		//
+		// Excludes accounts that would bill. Without that, once every
+		// account is over threshold this tier picks by load and can reach
+		// for the paid one while a free account has not even been asked —
+		// and a free account being over threshold costs nothing to try. All
+		// free quota is spent before any money is.
+		best = p.leastLoaded(func(a *Account) bool {
+			return a.eligible() && !p.wouldBill(a) && usable(a)
+		})
+	}
+	if best == nil {
+		// Last tier: quota is gone, but the account has extra usage
+		// available and the user has agreed to pay for it. Reached only when
+		// every free option is spent — the alternative here is holding for
+		// hours or failing outright, and this is the only tier that costs
+		// money, so it must never be entered while anything above it works.
+		//
+		// The permission check is per account rather than a gate on the
+		// whole tier: p.AllowOverage is only the default, and an account
+		// with an explicit opt-in must work even when the pool says no.
+		best = p.leastLoaded(func(a *Account) bool {
+			return !a.disabledOrParked() && a.CanOverage(p.AllowOverage) && usable(a)
+		})
+	}
+	if best == nil {
+		return nil
+	}
+	best.addInFlight(1)
+	p.sticky[session] = best.Name
+	if p.sessionProvider == nil {
+		p.sessionProvider = map[string]string{}
+	}
+	if _, seen := p.sessionProvider[session]; !seen {
+		p.sessionProvider[session] = ProviderOf(best.Type)
+	}
+	return best
+}
+
+// WhyUnavailable explains, for a request nothing could serve, whether the
+// obstacle was capability rather than quota — so the client gets the real
+// reason instead of a generic "all accounts exhausted".
+func (p *Pool) WhyUnavailable(body []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, a := range p.accounts {
+		if !a.eligible() {
+			continue
+		}
+		if err := CanServe(a, body); err != nil {
+			return err // an account was up and willing, but cannot serve this
+		}
+	}
+	return nil
+}
+
+// leastLoaded picks the preferred account among those matching: lowest
+// Priority first, then fewest in-flight. Priority is a preference rather
+// than a queue — a higher-priority account that is exhausted or cannot serve
+// the request never blocks a lower-priority one, because it fails `match`.
+func (p *Pool) leastLoaded(match func(*Account) bool) *Account {
+	var best *Account
+	for _, a := range p.accounts {
+		if !match(a) {
+			continue
+		}
+		if best == nil || better(a, best) {
+			best = a
+		}
+	}
+	return best
+}
+
+func better(a, b *Account) bool {
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	return a.load() < b.load()
+}
+
+// Done releases a request slot previously taken by Select.
+func (p *Pool) Done(a *Account) { a.addInFlight(-1) }
+
+// MarkExhausted marks an account out of quota until the given time (§6.1:
+// quota-429 rotates; the account is skipped until its window resets).
+func (p *Pool) MarkExhausted(a *Account, until time.Time) {
+	a.mu.Lock()
+	a.state = StateExhausted
+	a.exhaustedUntil = until
+	a.mu.Unlock()
+}
+
+// RecordQuota stores the raw rate-limit headers for inspection and fills
+// quota windows via the provider — which knows whether its quota arrives in
+// headers at all (§6.20).
+func (p *Pool) RecordQuota(a *Account, h http.Header, now time.Time) {
+	q := map[string]string{}
+	for k, v := range h {
+		if strings.HasPrefix(strings.ToLower(k), "anthropic-ratelimit-") && len(v) > 0 {
+			q[strings.ToLower(k)] = v[0]
+		}
+	}
+	if len(q) > 0 {
+		a.mu.Lock()
+		a.quota = q
+		a.quotaAt = now
+		a.mu.Unlock()
+	}
+	spec := provider.For(a.Type)
+	// Before the early returns below: overage is reported on every response,
+	// including ones that carry no window data.
+	if spec.OverageFromHeaders != nil {
+		if ov := spec.OverageFromHeaders(h); ov.Known {
+			a.setOverage(ov)
+		}
+	}
+	if spec.WindowsFromHeaders == nil {
+		return
+	}
+	pw := spec.WindowsFromHeaders(h, now)
+	if len(pw) == 0 {
+		return
+	}
+	out := make([]QuotaWindow, 0, len(pw))
+	for _, w := range pw {
+		out = append(out, QuotaWindow{
+			Name: w.Name, Limit: w.Limit, Used: w.Used,
+			ResetAt: w.ResetAt, Source: w.Source, FetchedAt: now,
+		})
+	}
+	a.setWindowsSourced("headers", out)
+}
+
+// setOverage records what the provider last said about extra usage.
+func (a *Account) setOverage(ov provider.Overage) {
+	a.mu.Lock()
+	a.overage = ov
+	a.mu.Unlock()
+}
+
+// Overage reports the last known extra-usage state. Known is false until a
+// response has actually said so — an account that has never been used tells
+// us nothing, and must not be assumed billable.
+func (a *Account) Overage() provider.Overage {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.overage
+}
+
+// CanOverage reports whether this account may be used past its quota, at
+// cost. Default is no — silently billing someone because their quota ran out
+// is not a default any tool gets to choose.
+//
+// The three cases differ in who is asserting what:
+//
+//   - The provider said no. Believe it, whatever the config says: the request
+//     would be rejected anyway, and arguing costs a round trip.
+//   - The account is explicitly opted in. Try it, even with no confirming
+//     header. This is not optional: spillway will not probe a spent account
+//     precisely because that probe would be billed, so for the account that
+//     most needs extra usage the header may never arrive. Requiring it would
+//     leave the feature permanently unreachable on exactly the accounts it
+//     exists for. The user naming one account is an assertion, not just a
+//     permission.
+//   - Only the pool-wide default is set. Then the user has singled nothing
+//     out, so require the provider to have confirmed it.
+func (a *Account) CanOverage(poolAllows bool) bool {
+	a.mu.Lock()
+	ov, allow := a.overage, a.AllowOverage
+	a.mu.Unlock()
+	if ov.Known && !ov.Available {
+		return false
+	}
+	if allow != nil {
+		return *allow
+	}
+	return poolAllows && ov.Known && ov.Available
+}
+
+// Park removes an account from rotation by operator choice. Reversible, and
+// distinct from the credential-death disable.
+func (a *Account) Park() {
+	a.mu.Lock()
+	a.parked = true
+	a.mu.Unlock()
+}
+
+// Unpark reverses Park. It does NOT clear a credential-death disable.
+func (a *Account) Unpark() {
+	a.mu.Lock()
+	a.parked = false
+	a.mu.Unlock()
+}
+
+// Parked reports an operator disable.
+func (a *Account) Parked() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.parked
+}
+
+// SetLastModel records the model this account most recently served.
+func (a *Account) SetLastModel(m string) {
+	a.mu.Lock()
+	a.lastModel = m
+	a.mu.Unlock()
+}
+
+// LastModel returns the model this account most recently served.
+func (a *Account) LastModel() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastModel
+}
+
+// Quota returns the account's last recorded rate-limit headers and when.
+func (a *Account) Quota() (map[string]string, time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.quota, a.quotaAt
+}
+
+// SetQuotaWindows stores provider quota state (§6.5), replacing windows
+// from the same source only.
+func (a *Account) SetQuotaWindows(w []QuotaWindow) {
+	source := "poll"
+	for _, x := range w {
+		if x.Source != "" {
+			source = x.Source
+			break
+		}
+	}
+	a.setWindowsSourced(source, w)
+}
+
+// setWindowsSourced replaces windows from one source, keeping others.
+func (a *Account) setWindowsSourced(source string, w []QuotaWindow) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	kept := a.windows[:0]
+	for _, x := range a.windows {
+		if x.Source != source {
+			kept = append(kept, x)
+		}
+	}
+	a.windows = append(kept, w...)
+}
+
+// QuotaWindows returns the latest provider quota state.
+func (a *Account) QuotaWindows() []QuotaWindow {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]QuotaWindow(nil), a.windows...)
+}
+
+// OverThreshold reports whether ANY quota window is at/above the used
+// fraction (§6.5 predictive rotation: skip this account while another
+// eligible one exists).
+func (a *Account) OverThreshold(frac float64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, w := range a.windows {
+		if w.Limit > 0 && w.Used/w.Limit >= frac {
+			return true
+		}
+	}
+	return false
+}
+
+// EarliestQuotaReset reports the soonest known quota reset, false when no
+// window carries one — used to bound exhaustion when a provider 429/403
+// doesn't say when quota returns.
+func (a *Account) EarliestQuotaReset() (time.Time, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var earliest time.Time
+	ok := false
+	for _, w := range a.windows {
+		if w.ResetAt.IsZero() {
+			continue
+		}
+		if !ok || w.ResetAt.Before(earliest) {
+			earliest = w.ResetAt
+			ok = true
+		}
+	}
+	return earliest, ok
+}
+
+// State reports the account's current state; an exhausted account whose
+// window has passed flips back to StateOK.
+func (a *Account) State() State {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stateLocked()
+}
+
+// ExhaustedUntil reports when an exhausted account becomes eligible again.
+func (a *Account) ExhaustedUntil() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.exhaustedUntil
+}
+
+func (a *Account) stateLocked() State {
+	if a.state == StateExhausted && time.Now().After(a.exhaustedUntil) {
+		a.state = StateOK
+	}
+	return a.state
+}
+
+func (a *Account) eligible() bool { return !a.Parked() && a.State() == StateOK }
+
+// WouldBill reports that using this account now would be charged: its quota
+// is gone (spent or rejected) and extra usage would cover the request.
+//
+// Exported because the proxy has to answer the same question after selection
+// and must get the same answer. Inferring it from StateExhausted instead
+// misses the commonest case by far — an account whose quota headers say it is
+// finished but which has never been 429'd, which is exactly what a spent
+// account looks like when spillway has been rotating away from it correctly.
+func (p *Pool) WouldBill(a *Account) bool { return p.wouldBill(a) }
+
+func (p *Pool) wouldBill(a *Account) bool {
+	if !a.CanOverage(p.AllowOverage) {
+		return false
+	}
+	return a.State() == StateExhausted || a.OverThreshold(p.threshold())
+}
+
+// disabledOrParked is the overage tier's floor. That tier deliberately admits
+// StateExhausted accounts — being out of quota is the precondition for using
+// extra usage at all — but a dead credential or an operator park still means
+// no.
+func (a *Account) disabledOrParked() bool {
+	return a.Parked() || a.State() == StateDisabled
+}
+
+func (a *Account) load() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.inFlight
+}
+
+// InFlight reports the account's current in-flight request count.
+func (a *Account) InFlight() int { return a.load() }
+
+func (a *Account) addInFlight(d int) {
+	a.mu.Lock()
+	a.inFlight += d
+	a.mu.Unlock()
+}
+
+func (p *Pool) find(name string) *Account {
+	for _, a := range p.accounts {
+		if a.Name == name {
+			return a
+		}
+	}
+	return nil
+}
+
+// SetOverageForTest seeds the extra-usage state. Production code learns this
+// only from a provider response; tests need to arrange the state that a
+// response would have produced.
+func (a *Account) SetOverageForTest(ov provider.Overage) { a.setOverage(ov) }

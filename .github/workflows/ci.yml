@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  # paths-ignore rather than a job-level condition: the release PR is authored
+  # by github-actions[bot], and GitHub holds bot-authored PR runs for manual
+  # approval before any job filter is evaluated. Skipping the run entirely is
+  # the only way to avoid a permanently "action required" check on every
+  # release. Nothing is lost — that PR only edits the changelog and manifest,
+  # and the release workflow re-runs the full gate at the released commit.
+  pull_request:
+    paths-ignore:
+      - CHANGELOG.md
+      - .release-please-manifest.json
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # All three, because all three have platform-specific code that nobody
+    # here can run: the keychain backends, launchd, and the Windows Scheduled
+    # Task. Windows in particular is written blind — this job is the only
+    # thing standing between it and silent rot.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # bash everywhere: the windows runner defaults to pwsh, where the gofmt
+    # step's $(...) and [ -n ] are syntax errors. Git Bash ships on the
+    # runner, so one shell covers all three.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # `stable`, not go-version-file: `go mod tidy` normalises the directive
+      # to an exact patch (1.25.0), and pinning CI to it would freeze the
+      # build on a toolchain with known crypto/tls and net/http CVEs. This
+      # binary terminates TLS and holds OAuth tokens, so tracking the patched
+      # toolchain matters more than reproducing an exact one. go.mod still
+      # sets the floor.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      # Node is a test-only convenience: the dashboard's JS is exercised
+      # against a fake DOM. The suite skips those checks without it, so this
+      # is what stops them silently never running in CI.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test -race -count=1 ./...
+
+  # The proxy holds credentials and rewrites auth headers, so a known
+  # vulnerability in a dependency matters more than usual here.
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...

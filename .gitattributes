@@ -1,0 +1,15 @@
+# LF everywhere, including on Windows checkouts.
+#
+# Without this the Windows CI runner checks out with CRLF (git's default
+# there), and gofmt reports every single file in the repo as unformatted —
+# which is what happened the first time windows-latest was added. It also
+# stops CRLF entering the repo from a Windows contributor, where it would
+# show up as a whole-file diff.
+* text=auto eol=lf
+
+# Never touched by line-ending conversion.
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz binary
+*.zip binary

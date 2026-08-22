@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="spillway">
+  <title>spillway</title>
+  <!--
+    Geometry note: the tube is centred in the 64-box and fills it. An earlier
+    version was 30 wide in a 64 box with 10 units of dead space below the
+    base, so it rendered small and sat visibly high wherever it was placed —
+    which no amount of CSS nudging fixes, because the emptiness is inside the
+    artwork. rx 20 / ry 7, rim at y=10, base at y=53: vertical extent 3..60,
+    optically centred.
+  -->
+  <defs>
+    <linearGradient id="sw-water" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"   stop-color="#5cd0ec"/>
+      <stop offset=".4"  stop-color="#35b6d8"/>
+      <stop offset="1"   stop-color="#0f5f80"/>
+    </linearGradient>
+    <!-- Brighter at both edges, near-clear across the middle: that is what
+         reads as curvature. A flat tint reads as a card. -->
+    <linearGradient id="sw-glass" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"   stop-color="#ffffff" stop-opacity=".62"/>
+      <stop offset=".16" stop-color="#cfe4ec" stop-opacity=".22"/>
+      <stop offset=".84" stop-color="#cfe4ec" stop-opacity=".22"/>
+      <stop offset="1"   stop-color="#ffffff" stop-opacity=".58"/>
+    </linearGradient>
+    <clipPath id="sw-tube">
+      <path d="M12 10 v43 a20 7 0 0 0 40 0 v-43 z"/>
+    </clipPath>
+    <!-- The NEAR wall only, bounded on top by the FRONT edge of the rim
+         rather than a flat chord. A reflection lives on the glass facing you;
+         above that edge there is no near wall, just the opening, and a band
+         drawn there floats above the rim. -->
+    <clipPath id="sw-wall">
+      <path d="M12 10 a20 7 0 0 0 40 0 v43 a20 7 0 0 1 -40 0 z"/>
+    </clipPath>
+    <!-- The water. A reflection is brighter crossing liquid than air. -->
+    <clipPath id="sw-wet">
+      <path d="M12 20 v33 a20 7 0 0 0 40 0 v-33 z"/>
+    </clipPath>
+  </defs>
+
+  <path d="M12 10 v43 a20 7 0 0 0 40 0 v-43 a20 7 0 0 0 -40 0 z" fill="url(#sw-glass)"/>
+
+  <g clip-path="url(#sw-tube)">
+    <!-- Inside of the far wall, seen through the empty upper section. -->
+    <path d="M12 10 a20 7 0 0 0 40 0 v4 a20 7 0 0 1 -40 0 z" fill="#0e2b38" fill-opacity=".10"/>
+
+    <path d="M12 27 v26 a20 7 0 0 0 40 0 v-26 z" fill="url(#sw-water)"/>
+    <ellipse cx="32" cy="27" rx="20" ry="7" fill="#61d4ee"/>
+    <ellipse cx="32" cy="27" rx="20" ry="7" fill="none" stroke="#ffffff" stroke-opacity=".5" stroke-width="1.1"/>
+
+    <path d="M16.5 25.4 l11 -4.4 4.2 0 -12.2 5 z" fill="#ffffff" fill-opacity=".6"/>
+    <path d="M34.5 24.2 l8.4 -3.4 2.9 0 -9.5 3.9 z" fill="#ffffff" fill-opacity=".42"/>
+
+    <g fill="#ffffff">
+      <circle cx="21.5" cy="43"   r="2.8" opacity=".40"/>
+      <circle cx="40.5" cy="37.5" r="2.0" opacity=".36"/>
+      <circle cx="29.5" cy="51"   r="2.3" opacity=".32"/>
+      <circle cx="44"   cy="48.5" r="1.4" opacity=".30"/>
+      <circle cx="17.5" cy="53.5" r="1.6" opacity=".26"/>
+      <circle cx="35"   cy="32.5" r="1.6" opacity=".42"/>
+      <circle cx="25.5" cy="31"   r="1.1" opacity=".46"/>
+      <circle cx="47"   cy="34"   r="1.1" opacity=".28"/>
+    </g>
+
+    <g clip-path="url(#sw-wall)">
+      <g fill="#ffffff">
+        <rect x="17.6" y="4" width="4.3" height="60" rx="2.1" fill-opacity=".20"/>
+        <rect x="23.5" y="4" width="2.0" height="60" rx="1"   fill-opacity=".12"/>
+        <rect x="42"   y="4" width="6.1" height="60"          fill-opacity=".07"/>
+      </g>
+      <g fill="#ffffff" clip-path="url(#sw-wet)">
+        <rect x="17.6" y="4" width="4.3" height="60" rx="2.1" fill-opacity=".42"/>
+        <rect x="23.5" y="4" width="2.0" height="60" rx="1"   fill-opacity=".24"/>
+        <rect x="42"   y="4" width="6.1" height="60"          fill-opacity=".11"/>
+      </g>
+    </g>
+
+    <ellipse cx="32" cy="53" rx="20" ry="7" fill="#ffffff" fill-opacity=".13"/>
+  </g>
+
+  <!-- Rim: an opening, so stroke only. A fill here reads as a lid. -->
+  <ellipse cx="32" cy="10" rx="20" ry="7" fill="none" stroke="#8fbdd0" stroke-width="1.9"/>
+  <path d="M12 10 a20 7 0 0 0 40 0" fill="none" stroke="#ffffff" stroke-opacity=".95" stroke-width="1.6"/>
+
+  <path d="M12 10 v43 a20 7 0 0 0 40 0 v-43" fill="none" stroke="#8fbdd0" stroke-width="1.9" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,1331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spillway</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<style>
+  /* Surfaces are water-toned; the SERIES hues are the validated categorical
+     palette (blue/orange/aqua/yellow), checked with the dataviz validator
+     against these exact surfaces in both modes. Light mode returns a contrast
+     WARN on slots 2-4, so the relief rule applies: every series carries a
+     direct label AND the table below repeats the exact values. */
+  :root {
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    /* One broad crest per tile -- a single undulation, not a train of ripples.
+       Rise spans 0-236 and the fall 236-500, so the swell leans slightly the
+       way wind-driven water does. Both ends sit at y=36 with horizontal
+       tangents (the first and last control points share the endpoint's y),
+       keeping the tile seam slope-continuous. Lowest point is y=36, so the
+       bottom 64% of the strip is always solid -- SOLID must stay under that
+       or a gap opens between strip and body. */
+    --swell: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 500 100' preserveAspectRatio='none'><path d='M0 36 C78 36 128 0 236 0 C344 0 410 36 500 36 L500 100 L0 100 Z' fill='%23fff'/></svg>");
+    color-scheme: light;
+    --deep:    #eef4f6;
+    --surface: #ffffff;
+    --wall:    #d3e1e7;
+    --grid:    #e6eef1;
+    --ink:     #08202a;
+    --ink-2:   #567480;
+    --glass:   #dceaef;
+    --water-a: #35b6d8;
+    --water-b: #1a7ea6;
+    --series-1:#2a78d6;
+    --series-2:#eb6834;
+    --series-3:#1baf7a;
+    --series-4:#eda100;
+    --warning: #fab219;
+    --critical:#d03b3b;
+    --shadow:  0 1px 2px rgba(8,32,42,.05), 0 10px 30px -22px rgba(8,32,42,.5);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --deep:    #061219;
+      --surface: #0e212b;
+      --wall:    #1c3a49;
+      --grid:    #16303d;
+      --ink:     #dcebf0;
+      --ink-2:   #7794a1;
+      --glass:   #071820;
+      --water-a: #3fc6e8;
+      --water-b: #12688a;
+      --series-1:#3987e5;
+      --series-2:#d95926;
+      --series-3:#199e70;
+      --series-4:#c98500;
+      --shadow:  none;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: clamp(1rem, 2.5vw, 2rem);
+    background: var(--deep); color: var(--ink);
+    font: 13px/1.5 var(--sans);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -.005em;
+    -webkit-font-smoothing: antialiased;
+  }
+  .eyebrow { font-size: 10px; letter-spacing: .2em; text-transform: uppercase;
+             color: var(--ink-2); margin: 0 0 .7rem; }
+  h2 { all: unset; display: block; }
+  section { margin-bottom: 1.4rem; }
+  :focus-visible { outline: 2px solid var(--water-a); outline-offset: 2px; }
+
+  .top { display: flex; align-items: baseline; gap: 1rem; margin-bottom: 1.4rem;
+         padding-bottom: .75rem; border-bottom: 1px solid var(--wall); }
+  .mark { font-size: 21px; font-weight: 700; letter-spacing: -.045em; margin: 0;
+          display: flex; align-items: center; gap: .5rem; }
+  /* No optical nudge: the artwork is centred inside its own viewBox, so
+     flex centring is correct. A margin hack here was compensating for dead
+     space in the SVG, which broke at every other size. */
+  .mark img { display: block; }
+  .live { margin-left: auto; font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+          color: var(--ink-2); display: flex; align-items: center; gap: .45rem; }
+  .live::before { content: ""; width: 6px; height: 6px; border-radius: 50%;
+                  background: var(--ink-2); transition: background .3s; }
+  .live[data-state="live"]::before { background: var(--water-a);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--water-a) 20%, transparent); }
+  .live[data-state="down"]::before { background: var(--critical); }
+
+  .panel { background: var(--surface); border: 1px solid var(--wall);
+           border-radius: 5px; box-shadow: var(--shadow); }
+
+  /* the tanks */
+  .tanks { display: grid; gap: .7rem;
+           grid-template-columns: repeat(auto-fit, minmax(224px, 1fr)); }
+  .tank { padding: .85rem .95rem 1rem; }
+  .tank-head { display: flex; align-items: baseline; gap: .5rem; }
+  .tank-name { font-weight: 640; letter-spacing: -.015em; font-size: 13.5px;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .flag { margin-left: auto; font-size: 9px; letter-spacing: .14em; text-transform: uppercase;
+          color: var(--ink-2); white-space: nowrap; display: flex; align-items: center; gap: .3rem; }
+  .flag.serving { color: var(--water-a); }
+  .flag.dry, .flag.off { color: var(--critical); }
+  .flag.serving::before { content: "\25B8"; }
+  .flag.dry::before     { content: "\25AA"; }
+  .flag.off::before     { content: "\2715"; }
+  /* Full address in small print: the label is for recognition, this is for
+     knowing exactly which account you are looking at. */
+  /* The hold banner. A parked request is invisible from the client's side --
+     Claude Code just spins -- so when one is active it takes the top of the
+     page and says when it lifts. It is absent, not empty, the rest of the
+     time. */
+  .hold { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+          padding: .7rem .9rem; margin: 0 0 1.1rem; border-radius: 10px;
+          background: color-mix(in srgb, var(--critical) 10%, var(--surface));
+          border: 1px solid color-mix(in srgb, var(--critical) 35%, transparent); }
+  /* `display: flex` on the class beats the UA stylesheet's [hidden] rule, so
+     without this the banner renders as an empty red bar whenever nothing is
+     held -- which is almost always. */
+  .hold[hidden] { display: none; }
+  /* Reads as a value, not a control: no border, no background, so it does not
+     invite a click that would do nothing. */
+  .readonly { font-size: 12px; color: var(--ink-2); padding: .3rem 0; white-space: nowrap; }
+  .readonly.bad { color: var(--critical); font-weight: 600; }
+  .hold strong { color: var(--critical); font-weight: 600; font-size: 13px; }
+  /* The only badge that means money is being spent, so it is the only one
+     that is filled rather than tinted. */
+  /* The one badge that means money. It is a filled pill rather than the bare
+     text the other flags use, so it reads as a state you should act on — but
+     it still has to sit on the same baseline as them, hence the negative
+     margin cancelling its own padding. */
+  .flag.paid { background: var(--critical); color: var(--surface);
+               padding: .2rem .5rem; border-radius: 999px; margin-block: -.2rem;
+               letter-spacing: .1em; font-weight: 600; }
+  .hold span { color: var(--ink-2); font-size: 12px; }
+  .tank-addr { color: var(--ink-2); font-size: 10.5px; margin-top: .15rem;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
+  .tank-sub { color: var(--ink-2); font-size: 10.5px; margin: 0 0 .85rem; opacity: .7; }
+
+  .cyls { display: flex; gap: .75rem; }
+  .cyl { flex: 1; min-width: 0; text-align: center; }
+  .glass { position: relative; width: 100%; max-width: 62px; height: 138px; margin: 0 auto;
+           border-radius: 7px; overflow: hidden; background: var(--glass);
+           border: 1px solid var(--wall);
+           box-shadow: inset 0 2px 6px rgba(0,0,0,.18), inset 0 -1px 0 rgba(255,255,255,.06); }
+  .glass svg { display: block; width: 100%; height: 100%; }
+  /* Reflections. Two kinds, and both are needed: a broad diagonal sheen for
+     the curve of the wall, and hard-edged vertical bands for the fact that
+     it is glass. The gradient alone reads as a tinted cylinder; the bands
+     are what a window reflected in it actually looks like.
+     --refl is shared with .depth::after, which repaints the same bands
+     brighter where they cross water. */
+  :root {
+    --refl: linear-gradient(90deg,
+      transparent 0 13%, rgba(255,255,255,.13) 13% 18.5%,
+      transparent 18.5% 22%, rgba(255,255,255,.07) 22% 24.5%,
+      transparent 24.5% 66%, rgba(255,255,255,.05) 66% 74%, transparent 74%);
+    /* Additive, not a replacement: --refl covers the whole wall and this
+       paints on top of it where there is water. The two opacities SUM, which
+       is why these look too low read on their own — the first attempt used
+       full-strength values in both and the tanks came out striped white. */
+    --refl-wet: linear-gradient(90deg,
+      transparent 0 13%, rgba(255,255,255,.09) 13% 18.5%,
+      transparent 18.5% 22%, rgba(255,255,255,.05) 22% 24.5%,
+      transparent 24.5%);
+  }
+  .glass::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: 7px;
+    background:
+      var(--refl),
+      linear-gradient(100deg,
+        rgba(255,255,255,.20) 0 8%, rgba(255,255,255,0) 26% 82%, rgba(255,255,255,.07) 100%);
+    /* A real rim catches the light along its whole front edge. */
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.32);
+  }
+  /* The same bands again, brighter, over the water only. A reflection is
+     stronger crossing liquid than crossing air, and one flat band over both
+     is what makes a tank read as a painted rectangle. .depth is exactly the
+     water's height, so it needs no separate clip. */
+  .depth::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: var(--refl-wet);
+  }
+  /* Refill countdown, shown over a tank that has actually run dry.
+     Centred in the glass rather than below it: an empty tank is a blank
+     rectangle with nothing to say, and this is the only thing the reader
+     wants from it — how long until it comes back. */
+  .dryring { position: absolute; inset: 0; display: none; place-items: center;
+             pointer-events: none; }
+  .dryring.on { display: grid; }
+  .dryring svg { position: absolute; width: 54px; height: 54px; transform: rotate(-90deg); }
+  .dryring .track { fill: none; stroke: var(--wall); stroke-width: 3; }
+  .dryring .arc   { fill: none; stroke: var(--water-a); stroke-width: 3;
+                    stroke-linecap: round; transition: stroke-dashoffset .6s linear; }
+  .dryring .left  { position: relative; font-size: 11px; font-weight: 600;
+                    letter-spacing: -.03em; color: var(--ink);
+                    font-variant-numeric: tabular-nums; }
+  @media (prefers-reduced-motion: reduce) { .dryring .arc { transition: none; } }
+  .cyl .val { font-size: 19px; font-weight: 560; margin-top: .55rem; letter-spacing: -.03em; }
+  .cyl .val i { font-style: normal; font-size: .55em; opacity: .5; }
+  .cyl .val.nodata { color: var(--ink-2); font-size: 13px; }
+  .cyl .win { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-2); }
+  .cyl .rst { font-size: 10px; color: var(--ink-2); margin-top: .1rem; }
+  .cyl .rst.alarm { color: var(--critical); }
+
+  /* Water body plus a constant-height crest strip riding on its surface. The
+     strip is masked by the tiled swell, so the wave keeps its size and shape
+     whatever the tank's fill -- a wave drawn to fit each tank changes shape
+     with the level, which is what read as fake. Three layers at partial
+     opacity deepen where they cross, and that is what reads as volume.
+     Layering approach learned from coiger/fill-water-animation; the swell
+     path above is our own. */
+  .body {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: var(--water-a);
+    transition: height .9s cubic-bezier(.22,.61,.36,1);
+  }
+  .wave {
+    position: absolute; left: 0; right: 0; height: 18px;
+    background: var(--water-a);   /* identical to .body: no seam is possible */
+    -webkit-mask-image: var(--swell); mask-image: var(--swell);
+    -webkit-mask-repeat: repeat-x;   mask-repeat: repeat-x;
+    /* 64px MUST equal the drift keyframe's end offset below, or the pattern
+       does not land on itself and the loop visibly jumps. A test asserts the
+       two numbers match. */
+    -webkit-mask-size: 64px 100%;    mask-size: 64px 100%;
+    transition: bottom .9s cubic-bezier(.22,.61,.36,1);
+  }
+  /* Phase is set inline per element, NOT here: this shorthand resets
+     animation-delay, and .wave.wN outranks a bare .wave rule, so a delay
+     declared there would be silently discarded. */
+  .wave.w1 { opacity: .40; animation: drift calc(9s   * var(--rate, 1)) linear infinite; }
+  .wave.w2 { opacity: .50; animation: drift calc(6.5s * var(--rate, 1)) linear infinite reverse; }
+  .wave.w3 { opacity: 1;   animation: drift calc(13s  * var(--rate, 1)) linear infinite; }
+  /* Shift the PATTERN inside a static element by exactly one tile, so it
+     lands on itself. Moving the element instead (translateX) also moves its
+     mask, which works in principle but puts the element's own subpixel
+     position in the loop. Literal px, not var(): keyframe values are the one
+     place a variable buys nothing and costs verifiability. */
+  @keyframes drift {
+    from { -webkit-mask-position: 0 0;    mask-position: 0 0; }
+    to   { -webkit-mask-position: 64px 0; mask-position: 64px 0; }
+  }
+
+  .depth {
+    position: absolute; left: 0; right: 0; bottom: 0; pointer-events: none;
+    background: linear-gradient(to bottom,
+      transparent 0%, color-mix(in srgb, var(--water-b) 62%, transparent) 100%);
+    transition: height .9s cubic-bezier(.22,.61,.36,1);
+  }
+  .bubbles { position: absolute; inset: 0; pointer-events: none; }
+  .bub {
+    position: absolute; bottom: 0; border-radius: 50%;
+    background: rgba(255,255,255,.85);
+    animation: rise var(--dur, 4s) ease-in var(--delay, 0s) infinite;
+  }
+  @keyframes rise {
+    0%   { transform: translate(0, 0) scale(.65); opacity: 0; }
+    15%  { opacity: .8; }
+    80%  { opacity: .45; }
+    100% { transform: translate(var(--sway, 3px), calc(-1 * var(--climb, 60%))) scale(1); opacity: 0; }
+  }
+
+  /* charts */
+  .chart { padding: .9rem 1rem 1rem; }
+  .chart-head { display: flex; align-items: baseline; gap: .75rem; margin-bottom: .2rem; }
+  .legend { margin-left: auto; display: flex; gap: .8rem; flex-wrap: wrap;
+            font-size: 10.5px; color: var(--ink-2); }
+  .legend span { display: flex; align-items: center; gap: .35rem; }
+  .legend i { width: 9px; height: 2px; border-radius: 1px; display: inline-block; }
+  svg.plot { display: block; width: 100%; overflow: visible; }
+  .axis  { font-size: 9.5px; fill: var(--ink-2); font-family: var(--sans); }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .spillband { fill: var(--critical); opacity: .09; }
+  .spilledge { stroke: var(--critical); stroke-width: 1; stroke-dasharray: 3 3; opacity: .5; }
+  .lbl { font-size: 10.5px; font-weight: 600; font-family: var(--sans); }
+  .bar { fill: var(--water-b); }
+  .bar.err { fill: var(--critical); }
+  .hint { font-size: 10.5px; color: var(--ink-2); margin-top: .35rem; }
+  .hint.alarm { color: var(--critical); }
+
+  /* settings */
+  .setrow { display: flex; align-items: center; gap: .75rem; padding: .5rem .9rem;
+            border-bottom: 1px solid color-mix(in srgb, var(--wall) 55%, transparent); }
+  .setrow:last-child { border-bottom: none; }
+  .setrow label { font-size: 12px; min-width: 12rem; }
+  /* A section heading inside the settings list, so the account rows are not
+     mistaken for more global fields. */
+  .setrow.subhead { font-size: 10px; letter-spacing: .2em; text-transform: uppercase;
+                    color: var(--ink-2); padding-top: .9rem; }
+  /* Each control carries its own label: three bare fields in a row gave no
+     clue which was the display name and which the on/off. */
+  .setrow .field { display: flex; align-items: center; gap: .4rem; }
+  .setrow .field label { min-width: 0; font-size: 10.5px; color: var(--ink-2); }
+  .setrow .desc { font-size: 10.5px; color: var(--ink-2); flex: 1; }
+  /* Account rows are a table, so they are laid out as one. Flex sized each
+     cell to its own content, which meant no two rows agreed on where a
+     column started. */
+  .setrow.acct { display: grid; align-items: center; gap: .75rem;
+                 /* A trailing 1fr soaks up the slack so the columns pack
+                    left instead of the account name stretching to fill. */
+                 grid-template-columns: minmax(11rem, 20rem) 8rem 4.5rem 11rem 3rem 1fr; }
+  .setrow.acct .who { font-size: 12px; overflow: hidden;
+                      text-overflow: ellipsis; white-space: nowrap; }
+  .setrow.acct input[type=text] { min-width: 0; width: 100%; }
+  .setrow.acct.head { font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+                      color: var(--ink-2); border-bottom: none; padding-bottom: .15rem; }
+  .setrow.acct .parkcell { display: flex; justify-content: center; }
+  /* Said once, under the rows, instead of once per row. */
+  .setrow.acctnote { font-size: 10.5px; color: var(--ink-2); display: block;
+                     border-bottom: none; padding-top: .1rem; }
+  .setrow select, .setrow input[type=text] {
+    font: inherit; font-size: 12px; padding: .2rem .4rem; min-width: 7rem;
+    background: var(--deep); color: var(--ink);
+    border: 1px solid var(--wall); border-radius: 3px;
+  }
+  .setrow input[type=checkbox] { accent-color: var(--water-a); }
+  .settings-foot { display: flex; gap: .6rem; align-items: center; padding: .6rem .9rem; }
+  button {
+    font: inherit; font-size: 12px; padding: .3rem .8rem; cursor: pointer;
+    background: var(--water-b); color: #fff; border: 0; border-radius: 3px;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint.ok { color: var(--water-a); }
+
+  /* tables */
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .42rem .9rem; font-size: 12px; white-space: nowrap;
+           border-bottom: 1px solid color-mix(in srgb, var(--wall) 55%, transparent); }
+  th { font-size: 9px; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-2); font-weight: 400; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; }
+  td.dim { color: var(--ink-2); }
+  td.bad { color: var(--critical); }
+  /* A model the proxy rewrote: the client asked for something else. */
+  td.swap { color: var(--series-2); }
+  .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: .45rem; }
+  .empty { padding: .8rem .9rem; font-size: 11.5px; color: var(--ink-2); }
+  #events { max-height: 6.5rem; overflow-y: auto; }
+  #events div { padding: .3rem .9rem; font-size: 11.5px; color: var(--ink-2);
+                border-bottom: 1px solid color-mix(in srgb, var(--wall) 55%, transparent); }
+  #events div:last-child { border-bottom: none; }
+
+  #token-gate { max-width: 400px; margin: 18vh auto 0; }
+  #token-gate .panel { padding: 1.1rem 1.25rem 1.25rem; }
+  #token-gate p { margin: .5rem 0 .85rem; color: var(--ink-2); font-size: 11.5px; }
+  #token-input { width: 100%; padding: .55rem .65rem; font: inherit; letter-spacing: .1em;
+                 background: var(--deep); color: var(--ink);
+                 border: 1px solid var(--wall); border-radius: 3px; }
+
+  /* Honoured deliberately. If the tanks look frozen, check this first:
+     macOS Settings > Accessibility > Display > Reduce motion (screen sharing
+     can enable it) stops every animation on the page. */
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    .reduced-motion-note { display: block !important; }
+  }
+</style>
+</head>
+<body>
+
+<div id="token-gate" hidden>
+  <div class="panel">
+    <div class="eyebrow">spillway</div>
+    <p>Paste the admin token from <code>~/.config/spillway-admin-token</code>.</p>
+    <input id="token-input" type="password" placeholder="token" autofocus aria-label="Admin token">
+  </div>
+</div>
+
+<main id="app" hidden>
+  <div class="top">
+    <h1 class="mark"><img src="/logo.svg" alt="" width="30" height="30">spillway</h1>
+    <div class="live" id="live" data-state="down">connecting</div>
+  </div>
+
+  <div class="hold" id="hold" hidden></div>
+
+  <section>
+    <h2 class="eyebrow">tanks</h2>
+    <div class="reduced-motion-note" style="display:none;font-size:11px;color:var(--ink-2);margin:-.35rem 0 .6rem">
+      Animation is off because this system requests reduced motion.
+    </div>
+    <div class="tanks" id="accounts"></div>
+  </section>
+
+  <section>
+    <div class="panel chart">
+      <div class="chart-head">
+        <div class="eyebrow" style="margin:0">headroom &middot; last 6h</div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <svg class="plot" id="headroom" viewBox="0 0 760 190"
+           role="img" aria-label="Headroom per account over the last six hours"></svg>
+      <svg class="plot" id="activity" viewBox="0 0 760 64"
+           role="img" aria-label="Requests per bucket over the last six hours"></svg>
+      <div class="hint" id="burn"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="eyebrow">exact figures</h2>
+    <div class="panel scroll">
+      <table>
+        <thead><tr><th>account</th><th>window</th><th class="num">headroom</th><th>source</th>
+                   <th class="num">burn/h</th><th class="num">dry in</th>
+                   <th class="num">refills</th><th>state</th></tr></thead>
+        <tbody id="figures"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="chart-head">
+      <h2 class="eyebrow" style="margin:0">settings</h2>
+      <span class="hint" id="settings-msg" style="margin-left:auto"></span>
+    </div>
+    <div class="panel" id="settings"></div>
+  </section>
+
+  <section>
+    <h2 class="eyebrow">spill events</h2>
+    <div class="panel" id="events"></div>
+  </section>
+
+  <section>
+    <h2 class="eyebrow">requests</h2>
+    <div class="panel scroll">
+      <table>
+        <thead><tr><th>time</th><th>account</th><th>model</th><th>path</th><th class="num">status</th>
+                   <th class="num">ms</th><th class="num">bytes</th><th>event</th></tr></thead>
+        <tbody id="requests"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const q = new URLSearchParams(location.search);
+let token = q.get("token") || sessionStorage.getItem("spillway-token") || "";
+if (q.get("token")) sessionStorage.setItem("spillway-token", token);
+
+const gate = document.getElementById("token-gate");
+const app = document.getElementById("app");
+const input = document.getElementById("token-input");
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && input.value) {
+    token = input.value;
+    sessionStorage.setItem("spillway-token", token);
+    start();
+  }
+});
+
+const SVGNS = "http://www.w3.org/2000/svg";
+const HOURS = 6;
+// Rotation kicks in at this fraction used, so headroom at or below (1 - it)
+// is the spill point.
+// The headroom at which the pool rotates away. Replaced from /api/state at
+// the first poll: the selector's threshold is configurable, and a spill line
+// drawn at a constant would quietly stop matching the pool it describes.
+let CREST = 0.02;
+// Categorical slots in fixed order. Colour follows the account, never its rank
+// in a filtered list, so the map is keyed by name and never reassigned.
+const SLOTS = ["--series-1", "--series-2", "--series-3", "--series-4"];
+const seriesColour = new Map();
+function colourFor(name) {
+  if (!seriesColour.has(name)) {
+    const i = seriesColour.size;
+    seriesColour.set(name, i < SLOTS.length ? "var(" + SLOTS[i] + ")" : "var(--ink-2)");
+  }
+  return seriesColour.get(name);
+}
+
+// The loopback listener needs no token, so only append one when we have it.
+// A 401 still drops to the gate, which covers a non-loopback deployment.
+function auth(url) {
+  if (!token) return url;
+  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+}
+function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+function fmtDur(secs) {
+  const s = Math.max(0, Math.round(secs));
+  if (s >= 86400) return Math.floor(s / 86400) + "d" + Math.floor((s % 86400) / 3600) + "h";
+  if (s >= 3600) return Math.floor(s / 3600) + "h" + Math.floor((s % 3600) / 60) + "m";
+  if (s >= 60) return Math.floor(s / 60) + "m" + (s % 60) + "s";
+  return s + "s";
+}
+function fmtReset(t) { return fmtDur((new Date(t) - Date.now()) / 1000); }
+// Two accounts on the same address differ only by domain, so the domain's
+// first label is what actually identifies them (the org, not the user).
+function clip(s, n) { return s.length > n ? s.slice(0, n - 1) + "\u2026" : s; }
+// Display name: the configured label wins. Falling back to the address's
+// domain rather than its local part is deliberate — two accounts on one
+// address share a local part and would otherwise render identically.
+// Served model, shortened: the version suffix is noise at a glance.
+function modelLabel(e) {
+  const m = e.model_served || e.model_asked || "";
+  return m.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+}
+function short(name) {
+  const lbl = labelFor.get(name);
+  if (lbl) return lbl;
+  const at = name.indexOf("@");
+  if (at < 0) return name;
+  const dom = name.slice(at + 1).split(".")[0];
+  return dom || name.slice(0, at);
+}
+const labelFor = new Map();
+// Full account records from /api/accounts, keyed by name. The settings panel
+// shows extra-usage state read-only, and that state cannot come from
+// /api/settings: anything exposed there is writable, and this is the one
+// setting that spends money.
+const acctBy = new Map();
+function setLive(state, label) {
+  const el = document.getElementById("live");
+  el.dataset.state = state; el.textContent = label;
+}
+function headroom(w) {
+  if (!w || !(w.limit > 0)) return null;
+  return Math.max(0, Math.min(1, 1 - (w.used / w.limit)));
+}
+
+/* The tank. A solid body with a constant-height crest strip riding on its
+   surface, three layers deep -- see the .wave rules for why the strip is
+   masked rather than drawn per tank. Bubbles rise inside the same clip so
+   nothing escapes the glass. */
+const STRIP = 18;      // px, must match .wave height
+const SOLID = 10;      // px: must stay under the swell's guaranteed solid depth (11.5px)
+
+// Stable per-tank pseudo-random: the same tank must look the same across the
+// 5s re-render, but no two tanks should share a phase. FNV-1a rather than a
+// char-code sum, which clusters badly for keys differing in one character.
+function seedOf(key) {
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h);
+}
+
+// Move the water without recreating anything: the wave strips keep their
+// running animations, and the height/bottom transitions finally have an old
+// value to animate from.
+function setLevel(parts, frac) {
+  if (!parts) return;
+  const pct = (Math.max(0, Math.min(1, frac)) * 100).toFixed(2);
+  const above = "calc(" + pct + "% - " + SOLID + "px)";
+  parts.body.style.height = above;
+  for (const w of parts.waves) w.style.bottom = above;
+  if (parts.depth) parts.depth.style.height = "calc(" + pct + "% + " + (STRIP - SOLID) + "px)";
+}
+
+function buildGlass(glass, frac, key) {
+  const seed = seedOf(key);
+  const lvl = Math.max(0, Math.min(1, frac));
+  const pct = (lvl * 100).toFixed(2);
+
+  const parts = { body: null, waves: [], depth: null };
+
+  const body = document.createElement("div");
+  body.className = "body";
+  // Stop short by the strip's solid depth so the two meet instead of stacking.
+  body.style.height = lvl > 0 ? "calc(" + pct + "% - " + SOLID + "px)" : "0";
+  glass.appendChild(body);
+  parts.body = body;
+
+  if (lvl > 0) {
+    ["w1", "w2", "w3"].forEach((cls, i) => {
+      const w = document.createElement("div");
+      w.className = "wave " + cls;
+      // Seat the strip so its solid part fuses with the body top and only the
+      // crest breaks the surface.
+      w.style.bottom = "calc(" + pct + "% - " + SOLID + "px)";
+      // Phase and speed vary per tank AND per layer, so nothing beats in sync.
+      // The delay spans more than the longest period, so starts are spread
+      // across the whole cycle rather than bunched near zero.
+      const h = seedOf(key + cls);
+      w.style.animationDelay = "-" + ((h % 977) / 977 * 26).toFixed(2) + "s";
+      w.style.setProperty("--rate", (0.78 + (h % 61) / 100).toFixed(2));
+      glass.appendChild(w);
+      parts.waves.push(w);
+    });
+  }
+  if (lvl > 0.08) glass.appendChild(bubbleLayer(lvl, key));
+
+  // Depth last: it tints the water darker toward the bottom without ever
+  // meeting an edge, which is what the old per-element gradient could not do.
+  const depth = document.createElement("div");
+  depth.className = "depth";
+  // Only as tall as the water itself (body + the crest riding above it), or
+  // the tint reads as liquid in the empty part of the tank.
+  depth.style.height = lvl > 0 ? "calc(" + pct + "% + " + (STRIP - SOLID) + "px)" : "0";
+  glass.appendChild(depth);
+  parts.depth = depth;
+
+  return parts;
+}
+
+function bubbleLayer(lvl, key) {
+  // Deterministic per gauge: a stable pattern reads as one tank, and the 5s
+  // re-render must not make the bubbles jump.
+  const wrap = document.createElement("div");
+  wrap.className = "bubbles";
+  const seed = seedOf(key);
+  for (let i = 0; i < 6; i++) {
+    const b = document.createElement("div");
+    b.className = "bub";
+    const size = 2.4 + ((seed + i * 7) % 24) / 7;
+    b.style.cssText =
+      "left:" + (10 + ((seed * (i + 3)) % 74)) + "%;" +
+      "width:" + size + "px;height:" + size + "px;" +
+      "--dur:" + (3.4 + ((seed + i * 13) % 30) / 10) + "s;" +
+      "--delay:-" + ((seed + i * 29) % 45) / 10 + "s;" +
+      "--sway:" + (2 + ((seed + i) % 6)) + "px;" +
+      "--climb:" + (lvl * 100).toFixed(1) + "%;";
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
+/* charts */
+function el(tag, attrs, text) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+function drawHeadroom(list) {
+  const svg = document.getElementById("headroom");
+  const legend = document.getElementById("legend");
+  svg.innerHTML = ""; legend.innerHTML = "";
+  const W = 760, H = 190, L = 34, R = 88, T = 10, B = 18;
+  const now = Date.now(), t0 = now - HOURS * 3600e3;
+  const x = t => L + ((t - t0) / (now - t0)) * (W - L - R);
+  const y = v => T + (1 - v) * (H - T - B);
+
+  // Spill zone: below this the pool rotates away from the account.
+  svg.appendChild(el("rect", { x: L, y: y(CREST), width: W - L - R,
+    height: Math.max(0, (H - B) - y(CREST)), class: "spillband" }));
+  svg.appendChild(el("line", { x1: L, x2: W - R, y1: y(CREST), y2: y(CREST), class: "spilledge" }));
+  svg.appendChild(el("text", { x: L + 5, y: y(CREST) - 4, class: "axis" }, "spill point"));
+
+  for (const v of [0, .25, .5, .75, 1]) {
+    svg.appendChild(el("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), class: "gridline" }));
+    svg.appendChild(el("text", { x: L - 6, y: y(v) + 3, class: "axis", "text-anchor": "end" },
+      Math.round(v * 100) + "%"));
+  }
+  for (let h = HOURS; h >= 0; h--) {
+    const t = now - h * 3600e3;
+    svg.appendChild(el("text", { x: x(t), y: H - 3, class: "axis", "text-anchor": "middle" },
+      h === 0 ? "now" : "-" + h + "h"));
+  }
+
+  if (!list.length) {
+    svg.appendChild(el("text", { x: (L + W - R) / 2, y: H / 2, class: "axis", "text-anchor": "middle" },
+      "Collecting. The first points appear within a minute of traffic."));
+    return;
+  }
+  const labels = [];
+  for (const s of list) {
+    if (!s.ts || !s.ts.length) continue;
+    const colour = colourFor(s.account);
+    let d = "";
+    s.ts.forEach((t, i) => { d += (i ? " L " : "M ") + x(t).toFixed(1) + " " + y(s.headroom[i]).toFixed(1); });
+    svg.appendChild(el("path", { d, fill: "none", stroke: colour, "stroke-width": 2,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
+      "stroke-dasharray": s.window === "5h" ? "" : "5 3" }));
+    // Direct label at the live end: light-mode contrast relief, and identity
+    // never rests on colour alone.
+    const lx = x(s.ts[s.ts.length - 1]), ly = y(s.headroom[s.headroom.length - 1]);
+    svg.appendChild(el("circle", { cx: lx, cy: ly, r: 3, fill: colour }));
+    labels.push({ x: Math.min(lx + 7, W - R + 6), y: ly, colour,
+                  text: clip(short(s.account), 11) + " " + s.window });
+  }
+  // Series ends cluster; nudge the labels apart so none is unreadable.
+  labels.sort((a, b) => a.y - b.y);
+  const GAP = 13;
+  for (let i = 1; i < labels.length; i++) {
+    if (labels[i].y - labels[i - 1].y < GAP) labels[i].y = labels[i - 1].y + GAP;
+  }
+  const overflow = labels.length ? labels[labels.length - 1].y - (H - B) : 0;
+  if (overflow > 0) for (const l of labels) l.y -= overflow;
+  for (const l of labels) {
+    svg.appendChild(el("text", { x: l.x, y: l.y + 3, class: "lbl", fill: l.colour }, l.text));
+  }
+  const seen = new Set();
+  for (const s of list) {
+    if (seen.has(s.account)) continue;
+    seen.add(s.account);
+    legend.innerHTML += '<span><i style="background:' + colourFor(s.account) + '"></i>' +
+      esc(short(s.account)) + '</span>';
+  }
+  legend.innerHTML += '<span>solid 5h &middot; dashed longer window</span>';
+}
+
+function drawActivity(buckets) {
+  const svg = document.getElementById("activity");
+  svg.innerHTML = "";
+  const W = 760, H = 64, L = 34, R = 88, T = 12, B = 14;
+  svg.appendChild(el("text", { x: L - 6, y: T + 8, class: "axis", "text-anchor": "end" }, "req"));
+  svg.appendChild(el("line", { x1: L, x2: W - R, y1: H - B, y2: H - B, class: "gridline" }));
+  svg.appendChild(el("text", { x: L - 6, y: H - B + 3, class: "axis", "text-anchor": "end" }, "0"));
+  if (!buckets.length) return;
+  const max = Math.max(1, ...buckets.map(b => b.count));
+  const bw = (W - L - R) / buckets.length;
+  buckets.forEach((b, i) => {
+    if (!b.count) return;
+    const h = (b.count / max) * (H - T - B);
+    // 2px surface gap between adjacent bars.
+    svg.appendChild(el("rect", { x: L + i * bw, y: H - B - h,
+      width: Math.max(1, bw - 2), height: h, rx: 1,
+      class: "bar" + (b.errors ? " err" : "") }));
+  });
+  svg.appendChild(el("text", { x: W - R + 6, y: T + 8, class: "axis" }, "peak " + max));
+}
+
+/* Burn rate from the tail of each curve: the number that turns a level into a
+   deadline. Null when there is not enough history to say so honestly. */
+function burnRate(s) {
+  if (!s || !s.ts || s.ts.length < 3) return null;
+  const n = s.ts.length;
+  const i0 = Math.max(0, n - 12);
+  const dt = (s.ts[n - 1] - s.ts[i0]) / 3600e3;
+  const dh = s.headroom[i0] - s.headroom[n - 1];
+  if (dt < 0.08 || dh <= 0) return null;
+  return dh / dt;
+}
+
+let historyBy = new Map();
+
+// Tanks are built once and then UPDATED in place. Rebuilding them on every
+// poll destroyed the wave elements, which restarted their animations from
+// their delay-derived phase — a smooth drift that jumped back every 5s — and
+// meant the water-level transitions never had an old value to animate from.
+const tankCards = new Map();   // account name -> {card, cyls: Map(window -> parts)}
+
+// Built with explicit element references rather than innerHTML + a query:
+// the refs are what the update path needs, and re-parsing markup to find
+// elements we just wrote is both slower and untestable.
+function div(cls, parent) {
+  const d = document.createElement("div");
+  d.className = cls;
+  if (parent) parent.appendChild(d);
+  return d;
+}
+function span(cls, parent) {
+  const d = document.createElement("span");
+  d.className = cls;
+  if (parent) parent.appendChild(d);
+  return d;
+}
+
+function ensureCard(a) {
+  let entry = tankCards.get(a.name);
+  if (entry) return entry;
+
+  const card = div("panel tank");
+  const head = div("tank-head", card);
+  const swatch = span("swatch", head);
+  const name = span("tank-name", head);
+  const flag = span("flag", head);
+  // Always present, even when empty: an account whose name IS its display
+  // name has nothing to show here, but dropping the line shortens the card
+  // and knocks its tanks out of line with its neighbours'.
+  const addr = div("tank-addr", card);
+  const sub = div("tank-sub", card);
+  const cylWrap = div("cyls", card);
+
+  entry = { card, swatch, name, flag, addr, sub, cylWrap, cyls: new Map() };
+  tankCards.set(a.name, entry);
+  document.getElementById("accounts").appendChild(card);
+  return entry;
+}
+
+// windowSeconds derives a quota window's length from its name ("5h", "7d",
+// "7d-fable"). The API reports when a window resets but never how long it is,
+// and without the length there is no denominator — a countdown can say "2h
+// left" but not how far round the dial that is.
+function windowSeconds(name) {
+  const m = /^(\d+)\s*([hd])/.exec(name || "");
+  if (!m) return null;
+  return Number(m[1]) * (m[2] === "d" ? 86400 : 3600);
+}
+
+// rings holds every live countdown so the one-second tick can update them
+// without touching the DOM structure. Rebuilding these on each poll is the
+// mistake the water animation already taught: it restarts the transition and
+// the arc jumps.
+const rings = new Set();
+
+// coarseDur renders a countdown in one unit, always short enough to sit
+// inside the ring.
+function coarseDur(secs) {
+  if (secs >= 3600) return Math.round(secs / 3600) + "h";
+  if (secs >= 60) return Math.round(secs / 60) + "m";
+  return Math.round(secs) + "s";
+}
+
+function updateRing(cyl) {
+  const total = cyl.ringTotal, at = cyl.ringResetAt;
+  if (!total || !at) return;
+  const left = Math.max(0, (at - Date.now()) / 1000);
+  const progress = Math.min(1, Math.max(0, 1 - left / total));
+  cyl.ringArc.setAttribute("stroke-dashoffset", String(cyl.ringCirc * (1 - progress)));
+  // Coarse inside the ring, exact underneath it. fmtDur gives "12h59m",
+  // which does not fit legibly in a 54px circle and duplicates the "refills"
+  // line directly below — the ring is for reading at a glance.
+  cyl.ringLeft.textContent = left <= 0 ? "due" : coarseDur(left);
+}
+
+// One timer for every tank. A countdown that only moved on the five-second
+// poll would visibly stutter, and a timer per ring is a timer to leak.
+setInterval(() => { for (const c of rings) updateRing(c); }, 1000);
+
+// buildRing creates the countdown overlay once, hidden. Built here rather
+// than on first use so the poll only ever toggles a class and writes two
+// values.
+function buildRing(cyl, glass) {
+  const R = 24, circ = 2 * Math.PI * R;
+  const wrap = div("dryring", glass);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 54 54");
+  const mk = (cls) => {
+    const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("cx", "27"); c.setAttribute("cy", "27"); c.setAttribute("r", String(R));
+    c.setAttribute("class", cls);
+    svg.appendChild(c);
+    return c;
+  };
+  mk("track");
+  const arc = mk("arc");
+  arc.setAttribute("stroke-dasharray", String(circ));
+  arc.setAttribute("stroke-dashoffset", String(circ));
+  wrap.appendChild(svg);
+
+  cyl.ringWrap = wrap;
+  cyl.ringArc = arc;
+  cyl.ringCirc = circ;
+  cyl.ringLeft = div("left", wrap);
+}
+
+function ensureCyl(entry, w) {
+  let cyl = entry.cyls.get(w.name);
+  if (cyl) return cyl;
+
+  const c = div("cyl");
+  const glass = div("glass", c);
+  const info = div("", c);
+  cyl = {
+    glass,
+    val: div("val", info),
+    win: div("win", info),
+    rst: div("rst", info),
+    parts: null,          // set by buildGlass on first fill
+  };
+  buildRing(cyl, glass);
+  entry.cyls.set(w.name, cyl);
+  entry.cylWrap.appendChild(c);
+  return cyl;
+}
+
+function renderTanks(list) {
+  const figures = document.getElementById("figures");
+  figures.innerHTML = "";
+  const alarms = [];
+  const seen = new Set();
+
+  for (const a of list) {
+    seen.add(a.name);
+    const wins = a.quotaWindows || [];
+    const entry = ensureCard(a);
+
+    // An account whose 5h window is fresh but whose weekly one is spent is
+    // NOT on standby — the pool will skip it. Say so rather than implying it
+    // is ready to serve.
+    // Server-computed, by the same call the selector makes. Deriving it here
+    // from the tank levels worked until the threshold became configurable.
+    const spent = a.overThreshold === true;
+
+    let flag = "standby", cls = "";
+    // "paid" outranks "dry": an exhausted account that will bill is not out
+    // of action, it is out of free action, and that is the more important
+    // fact about it.
+    if (a.paid) { flag = "on extra usage"; cls = "paid"; }
+    else if (a.state === "exhausted") { flag = "dry"; cls = "dry"; }
+    else if (a.state === "disabled") { flag = "disabled"; cls = "off"; }
+    else if (a.inFlight > 0) { flag = "serving"; cls = "serving"; }
+    else if (spent) { flag = "spent"; cls = "dry"; }
+
+    entry.card.className = "panel tank";
+    entry.swatch.style.background = colourFor(a.name);
+    entry.name.textContent = short(a.name);
+    entry.name.title = a.name;
+    entry.flag.className = "flag " + cls;
+    entry.flag.textContent = flag;
+    // Blank rather than a duplicate when the name is already the label.
+    entry.addr.innerHTML = short(a.name) !== a.name ? esc(a.name) : "&nbsp;";
+    // Extra usage refills on a billing period, not a quota window, so it can
+    // be months away — the number is worth seeing long before it bites.
+    const overageNote = a.overage && a.overageUsed > 0
+      ? "extra usage " + Math.round(a.overageUsed * 100) + "% used"
+      : (a.overageReason ? "no extra usage: " + a.overageReason : null);
+    entry.sub.textContent = [a.type, a.lastModel, a.inFlight + " in flight", overageNote]
+      .filter(Boolean).join(" \u00b7 ");
+
+    for (const w of wins) {
+      const f = headroom(w);
+      const pct = f === null ? null : Math.round(f * 100);
+      const key = (a.name + "-" + w.name).replace(/[^a-z0-9]/gi, "");
+      const cyl = ensureCyl(entry, w);
+
+      // The glass is built ONCE; later polls only move the water, so the wave
+      // animations keep running.
+      if (f !== null && !cyl.parts) cyl.parts = buildGlass(cyl.glass, f, key);
+      else if (f !== null) setLevel(cyl.parts, f);
+
+      const hist = historyBy.get(a.name + " " + w.name);
+      const rate = burnRate(hist);
+      const dry = (rate && f !== null) ? (f / rate) * 3600 : null;
+      const resetIn = w.resetAt ? (new Date(w.resetAt) - Date.now()) / 1000 : null;
+      const beatsReset = dry !== null && resetIn !== null && dry < resetIn;
+      if (beatsReset) {
+        alarms.push({ secs: dry, text: short(a.name) + " " + w.name + " runs dry in " +
+          fmtDur(dry) + ", " + fmtDur(resetIn) + " before it refills" });
+      }
+
+      // The ring appears only once the tank is actually dry. Above the spill
+      // point the percentage is the answer; at zero it is not, and "0%" over
+      // and over tells the reader nothing they can act on.
+      const total = windowSeconds(w.name);
+      if (f !== null && f <= CREST && w.resetAt && total) {
+        cyl.ringTotal = total;
+        cyl.ringResetAt = new Date(w.resetAt).getTime();
+        cyl.ringWrap.classList.add("on");
+        cyl.ringWrap.title = w.name + " refills " + fmtReset(w.resetAt);
+        rings.add(cyl);
+        updateRing(cyl);
+      } else {
+        cyl.ringWrap.classList.remove("on");
+        rings.delete(cyl);
+      }
+
+      cyl.val.innerHTML = f === null ? "&mdash;" : pct + "<i>%</i>";
+      cyl.val.className = "val" + (f === null ? " nodata" : "");
+      cyl.win.textContent = w.name;
+      cyl.rst.className = "rst" + (beatsReset ? " alarm" : "");
+      cyl.rst.innerHTML = beatsReset ? "dry " + fmtDur(dry)
+        : (w.resetAt ? "refills " + fmtReset(w.resetAt) : "&nbsp;");
+
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        '<td><span class="swatch" style="background:' + colourFor(a.name) + '"></span>' +
+          esc(short(a.name)) + '</td>' +
+        '<td class="dim">' + esc(w.name) + '</td>' +
+        '<td class="num">' + (f === null ? "&mdash;" : pct + "%") + '</td>' +
+        '<td class="dim">' + esc(w.source === "headers" ? "measured"
+          : w.source === "poll" ? "polled" : "unknown") + '</td>' +
+        '<td class="num dim">' + (rate ? (rate * 100).toFixed(1) + "%" : "&mdash;") + '</td>' +
+        '<td class="num ' + (beatsReset ? "bad" : "dim") + '">' +
+          (dry === null ? "&mdash;" : fmtDur(dry)) + '</td>' +
+        '<td class="num dim">' + (w.resetAt ? fmtReset(w.resetAt) : "&mdash;") + '</td>' +
+        '<td class="' + (a.state === "ok" ? "dim" : "bad") + '">' + esc(a.state) + '</td>';
+      figures.appendChild(tr);
+    }
+
+    if (!wins.length && !entry.cyls.has("__none")) {
+      const c = document.createElement("div");
+      c.className = "cyl";
+      c.innerHTML = '<div class="glass"></div><div class="val nodata">&mdash;</div>' +
+                    '<div class="win">no requests yet</div>';
+      entry.cyls.set("__none", { placeholder: true });
+      entry.cylWrap.appendChild(c);
+    }
+  }
+
+  // Drop cards for accounts that are gone.
+  for (const [name, entry] of tankCards) {
+    if (!seen.has(name)) { entry.card.remove(); tankCards.delete(name); }
+  }
+
+  if (!figures.children.length) {
+    figures.innerHTML = '<tr><td colspan="8" class="empty">' +
+      'No quota signal yet. Figures appear after the first request.</td></tr>';
+  }
+  alarms.sort((x, y) => x.secs - y.secs);
+  const burn = document.getElementById("burn");
+  burn.className = alarms.length ? "hint alarm" : "hint";
+  burn.textContent = alarms.length
+    ? "Warning: " + alarms[0].text +
+      (alarms.length > 1 ? "  (+" + (alarms.length - 1) + " more below)" : "")
+    : "No window is projected to run dry before it refills.";
+}
+
+async function start() {
+  try {
+    const r = await fetch(auth("/api/accounts"));
+    if (r.status === 401) { gate.hidden = false; app.hidden = true; input.focus(); return; }
+    gate.hidden = true; app.hidden = false;
+    await refresh();
+    emptyEvents();
+
+    // Successful requests are not "events" (the stream carries rotations,
+    // holds and exhaustion only), but they DO consume quota and fill the
+    // charts, so poll as well or the dashboard sits frozen during exactly the
+    // traffic worth watching.
+    if (!start.polling) start.polling = setInterval(refresh, 5000);
+
+    const es = new EventSource(auth("/api/events"));
+    es.onopen = () => setLive("live", "live");
+    es.onerror = () => setLive("down", "reconnecting");
+    es.onmessage = e => {
+      const ev = JSON.parse(e.data);
+      const feed = document.getElementById("events");
+      const blank = feed.querySelector(".empty");
+      if (blank) blank.remove();
+      const d = document.createElement("div");
+      d.textContent = new Date(ev.ts).toLocaleTimeString() + "  " + ev.type +
+        (ev.account ? "  " + ev.account : "") + (ev.detail ? " - " + ev.detail : "");
+      feed.prepend(d);
+      refresh();
+    };
+  } catch (err) { setLive("down", "reconnecting"); setTimeout(start, 3000); }
+}
+
+// The feed only fills when the pool rotates, holds or recovers. On a healthy
+// pool it stays empty, so say so rather than showing a void.
+function emptyEvents() {
+  const feed = document.getElementById("events");
+  if (!feed.children.length) {
+    feed.innerHTML = '<div class="empty">No spills yet. Rotations, holds and recoveries ' +
+      'appear here as they happen.</div>';
+  }
+}
+
+// until renders a deadline as both a clock time and a countdown: the clock
+// answers "can I go and do something else", the countdown "is it nearly over".
+function until(iso) {
+  const t = new Date(iso), mins = Math.max(0, Math.round((t - Date.now()) / 60000));
+  const left = mins >= 60 ? Math.floor(mins / 60) + "h" + (mins % 60 ? (mins % 60) + "m" : "")
+                          : mins + "m";
+  // hour12 false explicitly: the status line and the logs are 24h, and a
+  // locale-dependent "08:29 AM" next to them reads as a different clock.
+  return t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) +
+    " \u00b7 " + left + " away";
+}
+
+function renderHold(st) {
+  const el = document.getElementById("hold");
+  if (!st || !st.holding || !st.holding.count) { el.hidden = true; return; }
+  const n = st.holding.count;
+  el.innerHTML = "";
+  const head = document.createElement("strong");
+  head.textContent = n === 1 ? "1 request held" : n + " requests held";
+  const sub = document.createElement("span");
+  sub.textContent = "every account is spent \u2014 resuming at " + until(st.holding.until);
+  el.append(head, sub);
+  el.hidden = false;
+}
+
+async function refresh() {
+  try {
+    const [accts, hist, act, st] = await Promise.all([
+      fetch(auth("/api/accounts")).then(r => r.ok ? r.json() : []),
+      fetch(auth("/api/quota-history?hours=" + HOURS)).then(r => r.ok ? r.json() : []),
+      fetch(auth("/api/activity?hours=" + HOURS)).then(r => r.ok ? r.json() : []),
+      fetch(auth("/api/state")).then(r => r.ok ? r.json() : null),
+    ]);
+    renderHold(st);
+    if (st && typeof st.threshold === "number" && st.threshold > 0) {
+      CREST = 1 - st.threshold;
+    }
+    // Colour is assigned in account order and never reassigned, so a series
+    // keeps its hue when another account drops out of the list.
+    for (const a of accts) {
+      colourFor(a.name);
+      if (a.label) labelFor.set(a.name, a.label);
+      acctBy.set(a.name, a);
+    }
+    historyBy = new Map((hist || []).map(s => [s.account + " " + s.window, s]));
+    renderTanks(accts || []);
+    loadSettings();
+    drawHeadroom(hist || []);
+    drawActivity(act || []);
+    await refreshRequests();
+  } catch (err) { /* transient; the next tick retries */ }
+}
+
+// ── settings ─────────────────────────────────────────────────────────────
+// Rendered once, then left alone: rebuilding it under the poll would fight
+// whatever the user is typing.
+let settingsBuilt = false;
+
+// addOverageState shows whether an account can be billed. Read-only on
+// purpose: every other control in this panel changes how long a request
+// waits, and this one decides whether it is charged, so it takes a command
+// rather than a click. The text says which command.
+function addOverageState(row, name) {
+  const live = acctBy.get(name) || {};
+  const v = div("readonly", row);
+  let text, tone = "";
+  if (live.paid) {
+    text = "ON \u2014 can be billed";
+    tone = "bad";
+  } else if (live.overage) {
+    text = "available, not enabled";
+  } else if (live.overageReason) {
+    text = "unavailable";
+  } else {
+    text = "unknown";
+  }
+  if (typeof live.overageUsed === "number" && live.overageUsed > 0) {
+    text += " \u00b7 " + Math.round(live.overageUsed * 100) + "% used";
+  }
+  v.textContent = text;
+  if (tone) v.classList.add(tone);
+  v.title = (live.overageReason ? "provider says: " + live.overageReason + "\n" : "") +
+    "set with:  spillway accounts overage " + name + " on|off|default";
+}
+
+const SETTINGS_FIELDS = [
+  { key: "exhaustedMode", label: "When every account is spent",
+    options: ["notify", "hold", "fail"],
+    desc: "notify and hold park the request until a reset; fail returns the 429" },
+  { key: "holdMax", label: "Longest hold", type: "text",
+    desc: "e.g. 4h. \u201c0\u201d never holds" },
+  { key: "switchThreshold", label: "Rotate away at", type: "text",
+    desc: "fraction of a window used, 0-1. 0.98 = skip an account at 98%" },
+  { key: "probeInterval", label: "Re-probe idle accounts", type: "text",
+    desc: "e.g. 30m. \u201c0\u201d probes at startup only" },
+  { key: "probeOnStart", label: "Probe at startup", type: "checkbox",
+    desc: "one small request per account with no quota reading" },
+  { key: "crossProvider", label: "Allow cross-provider rotation", type: "checkbox",
+    desc: "off by default: the client fixed its capabilities from the first model it saw" },
+];
+
+function buildSettings(cur) {
+  const wrap = document.getElementById("settings");
+  wrap.innerHTML = "";
+  for (const f of SETTINGS_FIELDS) {
+    const row = div("setrow", wrap);
+    const lab = document.createElement("label");
+    lab.textContent = f.label;
+    lab.setAttribute("for", "set-" + f.key);
+    row.appendChild(lab);
+
+    let input;
+    if (f.options) {
+      input = document.createElement("select");
+      for (const o of f.options) {
+        const opt = document.createElement("option");
+        opt.value = o; opt.textContent = o;
+        input.appendChild(opt);
+      }
+    } else {
+      input = document.createElement("input");
+      input.type = f.type === "checkbox" ? "checkbox" : "text";
+    }
+    input.id = "set-" + f.key;
+    input.dataset.key = f.key;
+    if (f.type === "checkbox") input.checked = !!cur[f.key];
+    else input.value = cur[f.key] == null ? "" : String(cur[f.key]);
+    row.appendChild(input);
+
+    const d = div("desc", row);
+    d.textContent = f.desc;
+  }
+
+  const names = Object.keys(cur.accounts || {});
+  if (names.length) {
+    // Without a heading and per-control labels this row read as
+    // "work [work] [ ]" — three unexplained fields in a line.
+    const head = div("setrow subhead", wrap);
+    head.textContent = "Accounts";
+  }
+  if (names.length) {
+    // One header row instead of a label beside every control. The old layout
+    // was a flex row per account with each field carrying its own caption and
+    // the same explanatory sentence repeated on every line, so no two rows
+    // lined up and the note was read once and then five times more.
+    const hdr = div("setrow acct head", wrap);
+    for (const c of ["account", "shown as", "priority", "extra usage", "park"]) {
+      div("", hdr).textContent = c;
+    }
+  }
+  for (const name of names) {
+    const a = cur.accounts[name];
+    const row = div("setrow acct", wrap);
+
+    const who = div("who", row);
+    who.textContent = name;
+    who.title = name;
+
+    const label = document.createElement("input");
+    label.type = "text";
+    label.setAttribute("aria-label", "display name for " + name);
+    label.dataset.account = name; label.dataset.field = "label";
+    label.value = a.label || "";
+    label.placeholder = short(name);
+    row.appendChild(label);
+
+    const prio = document.createElement("input");
+    prio.type = "text";
+    prio.setAttribute("aria-label", "priority for " + name);
+    prio.dataset.account = name; prio.dataset.field = "priority";
+    prio.value = a.priority == null ? "0" : String(a.priority);
+    row.appendChild(prio);
+
+    addOverageState(row, name);
+
+    const parkWrap = div("parkcell", row);
+    const park = document.createElement("input");
+    park.type = "checkbox"; park.id = "park-" + name;
+    park.setAttribute("aria-label", "park " + name);
+    park.dataset.account = name; park.dataset.field = "disabled";
+    park.checked = !!a.disabled;
+    parkWrap.appendChild(park);
+  }
+  if (names.length) {
+    const note = div("setrow acctnote", wrap);
+    note.textContent = "Lower priority is preferred. Parking keeps the account " +
+      "and its credential but takes it out of rotation. Extra usage is read-only " +
+      "here — set it with `spillway accounts overage <name> on|off|default`.";
+  }
+
+  const foot = div("settings-foot", wrap);
+  const save = document.createElement("button");
+  save.textContent = "Save";
+  save.addEventListener("click", () => saveSettings(save));
+  foot.appendChild(save);
+  const note = div("desc", foot);
+  note.textContent = "Applied to the running pool immediately — no restart.";
+}
+
+function collectSettings() {
+  const out = { accounts: {} };
+  for (const f of SETTINGS_FIELDS) {
+    const el = document.getElementById("set-" + f.key);
+    if (!el) continue;
+    out[f.key] = f.type === "checkbox" ? el.checked : el.value;
+  }
+  for (const el of document.querySelectorAll("[data-account]")) {
+    const name = el.dataset.account;
+    out.accounts[name] = out.accounts[name] || {};
+    // priority is numeric; the rest are strings or booleans.
+    out.accounts[name][el.dataset.field] =
+      el.type === "checkbox" ? el.checked
+        : el.dataset.field === "priority" ? (parseInt(el.value, 10) || 0)
+        : el.value;
+  }
+  return out;
+}
+
+async function saveSettings(button) {
+  const msg = document.getElementById("settings-msg");
+  button.disabled = true;
+  msg.className = "hint";
+  msg.textContent = "saving\u2026";
+  try {
+    const r = await fetch(auth("/api/settings"), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectSettings()),
+    });
+    const text = await r.text();
+    if (!r.ok) {
+      // The server names the offending field; show that rather than "failed".
+      msg.className = "hint alarm";
+      msg.textContent = text.trim() || ("save failed (" + r.status + ")");
+      return;
+    }
+    msg.className = "hint ok";
+    msg.textContent = "saved";
+    setTimeout(() => { msg.textContent = ""; msg.className = "hint"; }, 4000);
+    refresh();
+  } catch (err) {
+    msg.className = "hint alarm";
+    msg.textContent = "save failed: " + err.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function loadSettings() {
+  if (settingsBuilt) return;
+  const r = await fetch(auth("/api/settings"));
+  if (!r.ok) return;               // endpoint disabled: leave the panel empty
+  buildSettings(await r.json());
+  settingsBuilt = true;
+}
+
+async function refreshRequests() {
+  const r = await fetch(auth("/api/requests?limit=50"));
+  if (!r.ok) return;
+  const rows = await r.json();
+  const tb = document.getElementById("requests");
+  tb.innerHTML = "";
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="8" class="empty">Nothing through the pool yet. ' +
+      'Point a client at 127.0.0.1:7654, or run <code>spillway run</code>.</td></tr>';
+    return;
+  }
+  for (const e of rows) {
+    const swapped = !!(e.model_asked && e.model_served && e.model_asked !== e.model_served);
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td class="dim">' + new Date(e.ts).toLocaleTimeString() + '</td>' +
+      '<td>' + esc(short(e.account)) + '</td>' +
+      // A rewritten model is the one thing the client cannot see, so show the
+      // served name and mark the swap rather than just echoing the request.
+      '<td class="' + (swapped ? "swap" : "dim") + '"' +
+        (swapped ? ' title="' + esc("client asked for " + e.model_asked) + '"' : '') + '>' +
+        esc(modelLabel(e)) + '</td>' +
+      '<td class="dim">' + esc(e.path) + '</td>' +
+      '<td class="num ' + (e.status >= 400 ? "bad" : "") + '">' + e.status + '</td>' +
+      '<td class="num dim">' + e.duration_ms + '</td>' +
+      '<td class="num dim">' + e.bytes + '</td>' +
+      '<td class="' + ((e.event || "").startsWith("rotated") ? "bad" : "dim") + '">' +
+        esc(e.event) + '</td>';
+    tb.appendChild(tr);
+  }
+}
+
+document.addEventListener("DOMContentLoaded", start);
+</script>
+</body>
+</html>

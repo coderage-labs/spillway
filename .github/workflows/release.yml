@@ -1,0 +1,164 @@
+name: Release
+
+# release-please owns versioning: it accumulates a release PR from commit
+# messages, and merging that PR is the decision to ship. See RELEASING.md.
+#
+# The build is gated on release-please's OUTPUT rather than on the tag it
+# pushes. That is not a style choice: a tag created with GITHUB_TOKEN does not
+# trigger `on: push: tags`, so the tag-driven version of this workflow
+# produces a Release with notes and no binaries.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rebuild and re-upload assets for"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      # ship is the single signal the rest of the workflow keys off, so the
+      # release-please path and the manual path stay identical downstream.
+      ship: ${{ steps.decide.outputs.ship }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        if: github.event_name == 'push'
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - id: decide
+        env:
+          CREATED: ${{ steps.rp.outputs.release_created }}
+          RP_TAG: ${{ steps.rp.outputs.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${CREATED:-}" = "true" ]; then
+            echo "ship=true"        >> "$GITHUB_OUTPUT"
+            echo "tag=${RP_TAG}"    >> "$GITHUB_OUTPUT"
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            echo "ship=true"        >> "$GITHUB_OUTPUT"
+            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          else
+            # The common case: a push that only updated the release PR.
+            echo "ship=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Re-run the gate at the released commit rather than trusting that CI passed
+  # on main. Cheap, and the one place where "the thing we shipped" and "the
+  # thing we tested" are provably the same.
+  verify:
+    needs: plan
+    if: needs.plan.outputs.ship == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  build:
+    needs: [plan, verify]
+    if: needs.plan.outputs.ship == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: darwin, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      # Cross-compiles cleanly because the whole binary is pure Go: the SQLite
+      # driver is modernc and the dashboard is embedded rather than built.
+      # CGO_ENABLED=0 is asserted rather than assumed — a cgo dependency
+      # creeping in should fail here loudly instead of silently producing a
+      # host-linked binary.
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          date="$(git -c log.showSignature=false log -1 --format=%cI)"
+          bin=spillway
+          [ "$GOOS" = windows ] && bin=spillway.exe
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=${date}" \
+            -o "$bin" ./cmd/spillway
+          name="spillway_${VERSION}_${GOOS}_${GOARCH}"
+          # zip on Windows: a .tar.gz needs a third-party tool to open there,
+          # and Explorer handles .zip natively.
+          if [ "$GOOS" = windows ]; then
+            zip -q "${name}.zip" "$bin" LICENSE README.md
+            archive="${name}.zip"
+          else
+            tar czf "${name}.tar.gz" "$bin" LICENSE README.md
+            archive="${name}.tar.gz"
+          fi
+          shasum -a 256 "$archive" > "${archive}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spillway_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            spillway_*.tar.gz*
+            spillway_*.zip*
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build]
+    if: needs.plan.outputs.ship == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Collect checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          cat *.sha256 > checksums.txt
+          rm -f *.sha256
+          ls -la
+
+      # `gh release upload` rather than an action that creates the release:
+      # release-please already made it and owns the notes. Anything that
+      # writes the release body would overwrite the changelog with something
+      # worse.
+      - name: Attach assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber

@@ -1,0 +1,314 @@
+package accounts
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/coderage-labs/spillway/internal/pool"
+)
+
+// deviceFlowServer mocks the kimi auth host: one device_authorization, then
+// token polls that stay pending until `approveAfter` polls have happened.
+type deviceFlowServer struct {
+	*httptest.Server
+	polls      atomic.Int32
+	deviceCode string
+}
+
+func newDeviceFlowServer(t *testing.T, approveAfter int32) *deviceFlowServer {
+	t.Helper()
+	d := &deviceFlowServer{deviceCode: "dev-code-123"}
+	d.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/oauth/device_authorization":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("device_authorization not form: %v", err)
+			}
+			if got := r.Form.Get("client_id"); got != KimiClientID {
+				t.Errorf("client_id = %q", got)
+			}
+			if r.Form.Get("scope") != "" {
+				t.Error("scope must not be sent (server returns it)")
+			}
+			fmt.Fprint(w, `{"user_code":"ABCD-EFGH","device_code":"dev-code-123","verification_uri_complete":"https://auth.kimi.com/device?code=ABCD-EFGH","expires_in":600,"interval":1}`)
+		case "/api/oauth/token":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("token not form: %v", err)
+			}
+			if r.Form.Get("grant_type") != deviceCodeGrant {
+				t.Errorf("grant_type = %q", r.Form.Get("grant_type"))
+			}
+			if r.Form.Get("device_code") != d.deviceCode {
+				t.Errorf("device_code = %q", r.Form.Get("device_code"))
+			}
+			if r.Form.Get("client_id") != KimiClientID {
+				t.Errorf("client_id = %q", r.Form.Get("client_id"))
+			}
+			if d.polls.Add(1) <= approveAfter {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, `{"error":"authorization_pending"}`)
+				return
+			}
+			fmt.Fprint(w, `{"access_token":"kimi-access","refresh_token":"kimi-refresh","expires_in":3600,"scope":"openid","token_type":"Bearer"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(d.Server.Close)
+	return d
+}
+
+func TestDeviceFlowPendingThenApprove(t *testing.T) {
+	d := newDeviceFlowServer(t, 2)
+	da, err := KimiDeviceAuthorize(context.Background(), nil, d.URL)
+	if err != nil {
+		t.Fatalf("KimiDeviceAuthorize: %v", err)
+	}
+	if da.UserCode != "ABCD-EFGH" || da.DeviceCode != "dev-code-123" || da.VerificationURIComplete == "" {
+		t.Errorf("device auth = %+v", da)
+	}
+
+	toks, err := KimiPollDevice(context.Background(), nil, d.URL, da)
+	if err != nil {
+		t.Fatalf("KimiPollDevice: %v", err)
+	}
+	if toks.AccessToken != "kimi-access" || toks.RefreshToken != "kimi-refresh" {
+		t.Errorf("tokens = %+v", toks)
+	}
+	if d.polls.Load() != 3 {
+		t.Errorf("polls = %d, want 3 (2 pending + success)", d.polls.Load())
+	}
+	if exp := toks.ExpiresAtMs(time.Now()); exp < time.Now().UnixMilli() {
+		t.Errorf("expiresAtMs in the past: %d", exp)
+	}
+}
+
+func TestDevicePollExpiredToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"expired_token"}`)
+	}))
+	defer srv.Close()
+	da := &KimiDeviceAuth{DeviceCode: "x", Interval: 1}
+	_, err := KimiPollDevice(context.Background(), nil, srv.URL, da)
+	if err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Errorf("err = %v, want expired", err)
+	}
+}
+
+func TestKimiRefreshRotation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "old-refresh" {
+			t.Errorf("form = %v", r.Form)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":7200}`)
+	}))
+	defer srv.Close()
+
+	toks, err := KimiRefresh(context.Background(), nil, srv.URL, "old-refresh")
+	if err != nil {
+		t.Fatalf("KimiRefresh: %v", err)
+	}
+	if toks.AccessToken != "rotated-access" || toks.RefreshToken != "rotated-refresh" {
+		t.Errorf("tokens = %+v — rotated refresh token must be kept", toks)
+	}
+}
+
+func TestKimiRefreshDeadGrant(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"invalid_grant"}`)
+	}))
+	defer srv.Close()
+	_, err := KimiRefresh(context.Background(), nil, srv.URL, "dead")
+	if !errors.Is(err, ErrRefreshDead) {
+		t.Errorf("err = %v, want ErrRefreshDead", err)
+	}
+}
+
+// Kimi refresh through the Manager: rotation persisted, dead grant disables.
+func TestManagerKimiRefresh(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Form.Get("refresh_token") {
+		case "good-refresh":
+			fmt.Fprint(w, `{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":7200}`)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"invalid_grant"}`)
+		}
+	}))
+	defer srv.Close()
+	m := testManager(t, "http://unused", "", nil)
+	m.KimiAuthBase = srv.URL
+
+	// Rotation: new access + new refresh persisted.
+	a := pool.NewAccount("kimi-1", pool.SourceYAML, "old", "good-refresh", expiringSoon(), "")
+	a.Type = "kimi-oauth"
+	if err := m.EnsureFresh(context.Background(), a); err != nil {
+		t.Fatalf("EnsureFresh: %v", err)
+	}
+	access, refresh, _ := a.Credentials()
+	if access != "rotated-access" || refresh != "rotated-refresh" {
+		t.Errorf("credentials = (%q, %q)", access, refresh)
+	}
+	s, err := m.Secrets.Get("kimi-1")
+	if err != nil || s.AccessToken != "rotated-access" || s.RefreshToken != "rotated-refresh" {
+		t.Errorf("stored = %+v, %v", s, err)
+	}
+
+	// Dead grant: disabled, loudly.
+	b := pool.NewAccount("kimi-2", pool.SourceYAML, "old", "dead", expiringSoon(), "")
+	b.Type = "kimi-oauth"
+	if err := m.EnsureFresh(context.Background(), b); !errors.Is(err, ErrRefreshDead) {
+		t.Fatalf("err = %v, want ErrRefreshDead", err)
+	}
+	if b.State() != pool.StateDisabled {
+		t.Errorf("state = %v, want disabled", b.State())
+	}
+}
+
+func TestParseUsagesShapes(t *testing.T) {
+	reset := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"single object", fmt.Sprintf(`{"window":"5h","limit":100,"used":42,"reset_at":"%s"}`, reset.Format(time.RFC3339))},
+		{"array", fmt.Sprintf(`[{"name":"5h","limit":100,"used":42,"reset_at":%d}]`, reset.Unix())},
+		{"wrapped", fmt.Sprintf(`{"windows":[{"period":"weekly","total":1000,"spent":250,"resets_at":%d000}]}`, reset.Unix())},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			usages, err := parseUsages([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("parseUsages: %v", err)
+			}
+			if len(usages) != 1 {
+				t.Fatalf("usages = %v", usages)
+			}
+			u := usages[0]
+			if u.Limit == 0 || u.Used == 0 {
+				t.Errorf("limit/used not parsed: %+v", u)
+			}
+			if u.ResetAt.IsZero() {
+				t.Errorf("reset not parsed: %+v", u)
+			} else if u.ResetAt.Sub(reset) > time.Second || reset.Sub(u.ResetAt) > time.Second {
+				t.Errorf("reset = %v, want ~%v", u.ResetAt, reset)
+			}
+		})
+	}
+}
+
+func TestPollKimiUsagesStoresWindows(t *testing.T) {
+	reset := time.Now().Add(time.Hour).Unix()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/usages" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if a := r.Header.Get("Authorization"); a != "Bearer kimi-tok" {
+			t.Errorf("Authorization = %q", a)
+		}
+		fmt.Fprintf(w, `[{"name":"5h","limit":100,"used":10,"reset_at":%d}]`, reset)
+	}))
+	defer srv.Close()
+
+	a := pool.NewAccount("kimi-1", pool.SourceYAML, "kimi-tok", "", 0, srv.URL)
+	a.Type = "kimi-oauth"
+	p := pool.New([]*pool.Account{a}, time.Now())
+	PollKimiUsages(context.Background(), p, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	windows := a.QuotaWindows()
+	if len(windows) != 1 || windows[0].Name != "5h" || windows[0].Used != 10 {
+		t.Fatalf("windows = %+v", windows)
+	}
+	got, ok := a.EarliestQuotaReset()
+	if !ok || got.Unix() != reset {
+		t.Errorf("EarliestQuotaReset = %v, %v", got, ok)
+	}
+}
+
+// sanity: url.Values encoding used by the auth calls is real form encoding.
+func TestFormEncoding(t *testing.T) {
+	v := url.Values{"client_id": {KimiClientID}}
+	if !strings.Contains(v.Encode(), "client_id="+KimiClientID) {
+		t.Errorf("encode = %s", v.Encode())
+	}
+}
+
+// Real /usages shape captured live 2026-08-21: string values, resetTime
+// RFC3339Nano, limits[] with {window:{duration,timeUnit}, detail}.
+func TestParseUsagesRealShape(t *testing.T) {
+	body := `{
+	  "usage": {"limit":"100","used":"42","remaining":"58","resetTime":"2026-08-23T04:45:32.121871Z"},
+	  "limits": [{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},
+	              "detail":{"limit":"100","used":"65","remaining":"35","resetTime":"2026-08-21T23:00:00Z"}}],
+	  "parallel": {"limit":"30"}
+	}`
+	usages, err := parseUsages([]byte(body))
+	if err != nil {
+		t.Fatalf("parseUsages: %v", err)
+	}
+	byName := map[string]KimiUsage{}
+	for _, u := range usages {
+		byName[u.Name] = u
+	}
+	weekly, ok := byName["weekly"]
+	if !ok || weekly.Limit != 100 || weekly.Used != 42 {
+		t.Errorf("weekly = %+v (parsed %v)", weekly, usages)
+	}
+	if weekly.ResetAt.IsZero() {
+		t.Error("weekly resetTime not parsed")
+	} else if weekly.ResetAt.UTC().Format("2006-01-02 15:04") != "2026-08-23 04:45" {
+		t.Errorf("weekly reset = %v", weekly.ResetAt)
+	}
+	fiveH, ok := byName["5h"]
+	if !ok || fiveH.Limit != 100 || fiveH.Used != 65 || fiveH.ResetAt.IsZero() {
+		t.Errorf("5h = %+v", fiveH)
+	}
+	par, ok := byName["parallel"]
+	if !ok || par.Limit != 30 {
+		t.Errorf("parallel = %+v", par)
+	}
+}
+
+func TestKimiWindowName(t *testing.T) {
+	cases := []struct {
+		dur  float64
+		unit string
+		want string
+	}{
+		{300, "TIME_UNIT_MINUTE", "5h"},
+		{30, "TIME_UNIT_MINUTE", "30m"},
+		{2, "TIME_UNIT_HOUR", "2h"},
+		{7, "TIME_UNIT_DAY", "7d"},
+	}
+	for _, tc := range cases {
+		w := map[string]any{"duration": tc.dur, "timeUnit": tc.unit}
+		if got := kimiWindowName(w); got != tc.want {
+			t.Errorf("(%v, %s) = %q, want %q", tc.dur, tc.unit, got, tc.want)
+		}
+	}
+}

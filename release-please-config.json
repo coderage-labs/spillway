@@ -1,0 +1,59 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "package-name": "spillway",
+      "include-component-in-tag": false,
+      "initial-version": "0.1.0",
+      "bump-minor-pre-major": true,
+      "changelog-sections": [
+        {
+          "type": "feat",
+          "section": "Features"
+        },
+        {
+          "type": "fix",
+          "section": "Fixes"
+        },
+        {
+          "type": "perf",
+          "section": "Performance"
+        },
+        {
+          "type": "refactor",
+          "section": "Internal"
+        },
+        {
+          "type": "test",
+          "section": "Internal"
+        },
+        {
+          "type": "build",
+          "section": "Internal"
+        },
+        {
+          "type": "ci",
+          "section": "Internal"
+        },
+        {
+          "type": "docs",
+          "section": "Documentation"
+        },
+        {
+          "type": "chore",
+          "section": "Internal",
+          "hidden": true
+        },
+        {
+          "type": "pool",
+          "section": "Features"
+        },
+        {
+          "type": "statusline",
+          "section": "Features"
+        }
+      ]
+    }
+  }
+}

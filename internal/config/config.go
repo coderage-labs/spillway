@@ -1,0 +1,350 @@
+// Package config loads and validates spillway's YAML configuration.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/coderage-labs/spillway/internal/provider"
+	"gopkg.in/yaml.v3"
+)
+
+// AccountConfig is one pooled account. Credentials are either inline
+// (imported) or resolved at startup from the local keychain.
+type AccountConfig struct {
+	Name   string `yaml:"name"`
+	Type   string `yaml:"type"`             // "claude-oauth" / "kimi-oauth"
+	Source string `yaml:"source,omitempty"` // "keychain" for the local claude login
+	// Label is what the dashboard shows instead of the account name. Two
+	// accounts on the same address differ only by domain, which makes for
+	// poor display names; this lets them be called what the user calls them.
+	Label string `yaml:"label,omitempty"`
+	// Disabled removes an account from rotation without deleting it or its
+	// credential — the reversible way to park one.
+	Disabled bool `yaml:"disabled,omitempty"`
+	// Priority orders selection: lower is preferred. Accounts of equal
+	// priority are chosen by load, as before. Use it to spend a cheaper or
+	// more expendable account first, or to keep one in reserve.
+	Priority int `yaml:"priority,omitempty"`
+	// AllowOverage overrides pool.allowOverage for this account. Unset means
+	// follow the pool. Set it false on an account billed to someone else.
+	AllowOverage *bool             `yaml:"allowOverage,omitempty"`
+	AccessToken  string            `yaml:"accessToken,omitempty"`
+	RefreshToken string            `yaml:"refreshToken,omitempty"`
+	ExpiresAt    int64             `yaml:"expiresAt,omitempty"` // epoch milliseconds
+	AccountUUID  string            `yaml:"accountUuid,omitempty"`
+	Upstream     string            `yaml:"upstream,omitempty"` // defaults per provider
+	ModelMap     map[string]string `yaml:"modelMap,omitempty"` // incoming model id → provider model id
+}
+
+// Config is the root of ~/.config/spillway.yaml.
+type Config struct {
+	Proxy struct {
+		Port int    `yaml:"port"`
+		Host string `yaml:"host"`
+	} `yaml:"proxy"`
+	Upstream string          `yaml:"upstream"`
+	Accounts []AccountConfig `yaml:"accounts,omitempty"`
+	// Admin is the dashboard listener. On loopback it needs no token (the
+	// token would only defend against other users of this machine, while
+	// putting a secret in the URL); binding anywhere else makes one
+	// mandatory, generated if not supplied.
+	// Egress is how spillway reaches upstreams (§6.13). Both the pooled
+	// request path and the MITM tunnel honour it — proxying only one would
+	// silently leak the other.
+	Egress struct {
+		Mode  string `yaml:"mode,omitempty"`  // direct | http-connect | environment
+		Proxy string `yaml:"proxy,omitempty"` // required for http-connect
+	} `yaml:"egress,omitempty"`
+
+	Admin struct {
+		Addr  string `yaml:"addr"`
+		Token string `yaml:"token,omitempty"`
+	} `yaml:"admin"`
+	Pool struct {
+		// ExhaustedMode: "fail" (429 straight through), "hold" (park until
+		// reset), "notify" (hold + loud log). Default notify (§6.11).
+		ExhaustedMode string `yaml:"exhaustedMode"`
+		// HoldMax caps how long a request may be parked waiting for a quota
+		// reset, e.g. "4h". "0" = never hold.
+		HoldMax string `yaml:"holdMax"`
+		// SwitchThreshold is the used-fraction (0-1] of any quota window at
+		// or above which an account is skipped while another eligible
+		// account exists (predictive rotation, §6.5). Default 0.98.
+		SwitchThreshold float64 `yaml:"switchThreshold"`
+		// AllowOverage permits serving from an account whose subscription
+		// quota is exhausted but which has extra usage (pay-as-you-go)
+		// available, as a last resort after every free account is spent.
+		// Default false: this is the only setting that makes spillway spend
+		// money, so it is opt-in rather than opt-out.
+		AllowOverage bool `yaml:"allowOverage,omitempty"`
+		// ProbeOnStart sends ONE minimal request per account that has no
+		// quota data, so a standby account shows a level instead of sitting
+		// blank. Costs a token per account per daemon start; set false to
+		// keep spillway strictly a proxy that never originates traffic.
+		ProbeOnStart *bool `yaml:"probeOnStart,omitempty"`
+		// ProbeInterval re-probes accounts whose quota reading has gone
+		// stale, so a standby tank does not show hours-old data. "0" probes
+		// at startup only. One request per stale account per interval.
+		ProbeInterval string `yaml:"probeInterval,omitempty"`
+		// CrossProvider allows a session to rotate between providers (Claude
+		// -> Kimi) mid-flight. Off by default: the client fixed its
+		// capabilities from the first model it saw, so switching families
+		// underneath it can change the context ceiling and break forced tool
+		// calls (§6.18, §6.19). Same-provider rotation is unaffected.
+		CrossProvider bool `yaml:"crossProvider,omitempty"`
+		// MaxBufferBytes caps the request body held for cross-account retry.
+		// Larger bodies stream straight through with no failover, so this
+		// trades memory for how big a request can still be retried.
+		MaxBufferBytes int `yaml:"maxBufferBytes,omitempty"`
+		// CanaryInterval checks idle accounts for credentials that have died
+		// without any request failing. "0" disables it.
+		CanaryInterval string `yaml:"canaryInterval,omitempty"`
+	} `yaml:"pool"`
+	Log struct {
+		Level string `yaml:"level"`
+	} `yaml:"log"`
+}
+
+// Defaults returns the configuration written on first run.
+func Defaults() Config {
+	var c Config
+	c.Proxy.Port = 7654
+	c.Proxy.Host = "127.0.0.1"
+	c.Upstream = "https://api.anthropic.com"
+	c.Admin.Addr = "127.0.0.1:7657"
+	c.Pool.ExhaustedMode = "notify"
+	c.Pool.HoldMax = "4h"
+	c.Pool.SwitchThreshold = 0.98
+	probe := true
+	c.Pool.ProbeOnStart = &probe
+	c.Pool.ProbeInterval = "30m"
+	c.Pool.MaxBufferBytes = 8 << 20
+	c.Pool.CanaryInterval = "2h"
+	c.Log.Level = "info"
+	return c
+}
+
+// PoolProbeInterval parses Pool.ProbeInterval; 0 means startup-only.
+func (c *Config) PoolProbeInterval() time.Duration {
+	if c.Pool.ProbeInterval == "" {
+		return 30 * time.Minute
+	}
+	if c.Pool.ProbeInterval == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.Pool.ProbeInterval)
+	if err != nil || d < 0 {
+		return 30 * time.Minute
+	}
+	return d
+}
+
+// PoolCanaryInterval parses Pool.CanaryInterval.
+func (c *Config) PoolCanaryInterval() time.Duration {
+	d, err := time.ParseDuration(c.Pool.CanaryInterval)
+	if err != nil || d <= 0 {
+		return 2 * time.Hour
+	}
+	return d
+}
+
+// PoolHoldMax parses Pool.HoldMax ("4h", "30m", "0") into a duration.
+func (c *Config) PoolHoldMax() time.Duration {
+	if c.Pool.HoldMax == "" || c.Pool.HoldMax == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.Pool.HoldMax)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// Path resolves the config file location: $SPILLWAY_CONFIG if set, else
+// ~/.config/spillway.yaml.
+func Path() (string, error) {
+	if p := os.Getenv("SPILLWAY_CONFIG"); p != "" {
+		return p, nil
+	}
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "spillway.yaml"), nil
+}
+
+// Load reads the config file, creating it with defaults (mode 0600) when it
+// does not exist, then validates it.
+func Load() (*Config, error) {
+	path, err := Path()
+	if err != nil {
+		return nil, err
+	}
+	return LoadFrom(path)
+}
+
+// LoadFrom is Load for an explicit path.
+func LoadFrom(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return createDefaults(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg, err := parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func parse(data []byte) (*Config, error) {
+	cfg := Defaults()
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func createDefaults(path string) (*Config, error) {
+	cfg := Defaults()
+	if err := writeFile(path, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// writeFile marshals cfg and writes it atomically at 0600 (tightening
+// existing perms).
+func writeFile(path string, cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write config %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename config %s: %w", path, err)
+	}
+	// WriteFile's perm only applies on creation; enforce on existing files.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod config %s: %w", path, err)
+	}
+	return nil
+}
+
+// UpdateAccountExpiry persists a refreshed token's expiry for one account
+// back into the config file, atomically and at 0600. Token material itself
+// lives in the secret store, never here.
+func UpdateAccountExpiry(path, name string, expiresAt int64) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg, err := parse(data)
+	if err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].Name == name {
+			cfg.Accounts[i].ExpiresAt = expiresAt
+			return writeFile(path, cfg)
+		}
+	}
+	return fmt.Errorf("account %q not found in %s", name, path)
+}
+
+// Validate checks every field, returning a descriptive error.
+func (c *Config) Validate() error {
+	if c.Proxy.Port < 1 || c.Proxy.Port > 65535 {
+		return fmt.Errorf("proxy.port: %d out of range 1-65535", c.Proxy.Port)
+	}
+	if c.Proxy.Host == "" {
+		return errors.New("proxy.host: must not be empty")
+	}
+	if err := validateUpstream("upstream", c.Upstream); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	// Two entries for one provider account are not two accounts. The pool
+	// would rotate between tanks backed by the same quota, and — the reason
+	// this is an error rather than a warning — refresh the same credential
+	// from two places, which is how a live token was lost early on.
+	byUUID := map[string]string{}
+	for i, a := range c.Accounts {
+		where := fmt.Sprintf("accounts[%d] (%q)", i, a.Name)
+		if a.Name == "" {
+			return fmt.Errorf("%s: name must not be empty", where)
+		}
+		if seen[a.Name] {
+			return fmt.Errorf("%s: duplicate account name", where)
+		}
+		seen[a.Name] = true
+		if a.AccountUUID != "" {
+			if prev, ok := byUUID[a.AccountUUID]; ok {
+				return fmt.Errorf("%s: same provider account as %q (accountUuid %s) — "+
+					"remove one with `spillway accounts remove %s`",
+					where, prev, a.AccountUUID, a.Name)
+			}
+			byUUID[a.AccountUUID] = a.Name
+		}
+		if !provider.Known(a.Type) {
+			return fmt.Errorf("%s: type %q must be one of %s", where, a.Type,
+				strings.Join(provider.Types(), ", "))
+		}
+		if a.Source == "keychain" && a.AccessToken != "" {
+			return fmt.Errorf("%s: source=keychain and inline accessToken are mutually exclusive", where)
+		}
+		if a.Upstream != "" {
+			if err := validateUpstream(where+" upstream", a.Upstream); err != nil {
+				return err
+			}
+		}
+	}
+	switch c.Pool.ExhaustedMode {
+	case "hold", "fail", "notify":
+	default:
+		return fmt.Errorf("pool.exhaustedMode: %q must be hold, fail or notify", c.Pool.ExhaustedMode)
+	}
+	if c.Pool.HoldMax != "" && c.Pool.HoldMax != "0" {
+		if _, err := time.ParseDuration(c.Pool.HoldMax); err != nil {
+			return fmt.Errorf("pool.holdMax: %q is not a valid duration: %v", c.Pool.HoldMax, err)
+		}
+	}
+	if c.Pool.SwitchThreshold <= 0 || c.Pool.SwitchThreshold > 1 {
+		return fmt.Errorf("pool.switchThreshold: %v must be in (0, 1]", c.Pool.SwitchThreshold)
+	}
+	switch c.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log.level: %q must be debug, info, warn or error", c.Log.Level)
+	}
+	return nil
+}
+
+func validateUpstream(field, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("%s: %q is not a valid absolute URL", field, raw)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%s: scheme %q must be http or https", field, u.Scheme)
+	}
+	return nil
+}
