@@ -97,15 +97,17 @@ func TestModelServedRecordsMappedModelOnEarlyReturn(t *testing.T) {
 	acctB.ModelMap = map[string]string{"claude-sonnet-4-6": "k3[1m]"}
 	// Priority forces selection order: A must be tried (and rotated off of)
 	// before B, or this never exercises the rotate-then-early-return path.
-	acctA.Priority = 0
-	acctB.Priority = 1
+	acctA.SetPriority(0)
+	acctB.SetPriority(1)
 	p := pool.New([]*pool.Account{acctA, acctB}, time.Now())
 	// A and B are different providers (default vs kimi-oauth) — this is
 	// exactly the cross-provider rotation §6.18 has in mind, so it must be
 	// allowed or SelectExcept keeps the session pinned to A's provider and
 	// B is never reached. NewHandler doesn't read this off cfg — only
 	// cmd/spillway wires it — so it must be set on the pool directly.
-	p.CrossProvider = true
+	// Through Apply, not a field write: #13 unexported these so the selector
+	// and the dashboard cannot race over them.
+	p.Apply(pool.Settings{CrossProvider: true})
 
 	rl, err := reqlog.Open(filepath.Join(t.TempDir(), "r.db"))
 	if err != nil {
