@@ -206,6 +206,7 @@ that works over SSH.
 | `spillway accounts [remove <name>]` | List or remove accounts |
 | `spillway accounts overage <name> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — see [Extra usage](#extra-usage) |
 | `spillway accounts priority <name> <n>` | Order selection; lower is preferred |
+| `spillway switch <account>\|--auto [--force]` | Point the pool at one account until told otherwise |
 | `spillway login claude <name>` | Add a Claude account (OAuth PKCE) |
 | `spillway login kimi <name>` | Add a Kimi account (OAuth device flow) |
 | `spillway statusline` | Print the Claude Code status line |
@@ -264,9 +265,13 @@ Adds `/spillway:status`, which reports the pool from inside a session: headroom,
 what is serving, whether anything is parked waiting for a reset, and whether
 any request is being billed.
 
-It exists for Remote Control. The status line and the desktop notification
-both live on the machine, so a session driven from a phone has no way to see
-any of this; a slash command is the one channel that travels.
+`/spillway:switch <account>` pins the pool from the same place — it resolves a
+label or a unique prefix to the account name, and reports what would happen
+rather than forcing past a refusal that costs money.
+
+Both exist for Remote Control. The status line and the desktop notification
+live on the machine, so a session driven from a phone has no way to see or
+change any of this; a slash command is the one channel that travels.
 
 ## MITM mode
 
@@ -431,6 +436,25 @@ spillway accounts priority you@side.example 1    # next
 spillway accounts priority kimi 2                # last resort
 ```
 
+**Pinning overrides all of it.** `spillway switch <account>` directs selection
+at one account until `spillway switch --auto`, or until the daemon restarts —
+it is a live instruction, not a setting, which is the difference between it and
+`priority`. Useful for keeping a piece of work on one subscription, steering off
+an account you are about to need elsewhere, or watching rotation without having
+to spend a quota to see it.
+
+A pin survives the rotate-away threshold — naming an account is a statement
+that you want it — but not exhaustion: holding every request while healthy
+accounts sit idle would be a way to take yourself offline by accident. It is
+refused, needing `--force`, if the account would serve from paid extra usage,
+or if it would move a live session to another provider (§6.18: the client
+configured its capabilities from the first model it saw). Switching costs the
+prompt cache, which is per account.
+
+The pin is pool-wide, not per session, because sticky selection already is: the
+session key hashes `metadata.user_id`, which every Claude Code session on the
+machine shares.
+
 A quota-429 marks the account exhausted until its reset and re-sends the
 buffered request on the next account, invisibly to the client. A transient
 rate-limit-429 retries the same account with backoff (max 3), never rotates.
@@ -567,7 +591,8 @@ the response), `X-Frame-Options: DENY`, and 405 on any non-GET. Binding
 `admin.addr` anywhere but loopback makes a token mandatory, generated if you do
 not supply one, and fails closed if it is required but missing.
 
-- `/` — dashboard: liquid tanks per quota window, headroom-over-time chart with
+- `/` — dashboard: liquid tanks per quota window, a pin control per account,
+  headroom-over-time chart with
   burn-rate projection, activity histogram, exact-figures table, spill events,
   request log
 - `GET /api/accounts` — state, quota windows, in-flight, last model served
@@ -575,6 +600,10 @@ not supply one, and fails closed if it is required but missing.
 - `GET /api/quota-history?hours=N` — headroom curves per account/window
 - `GET /api/activity?hours=N` — bucketed request counts
 - `GET /api/events` — SSE stream of rotation/quota events
+- `POST /api/pin` `{"account":"…","force":false}` / `DELETE /api/pin` — pin
+  selection to one account, or release it. `409` is a refusal `force` can
+  override (would bill, or crosses provider); `400` is not. `GET /api/state`
+  reports the current pin.
 
 The request log is SQLite at `~/.config/spillway-requests.db` (0600) and stores
 **metadata only** — never headers or bodies. A schema test asserts the exact
