@@ -32,20 +32,34 @@ anything else.
 
 ## Report
 
-Lead with the single fact that matters, then the detail. Keep it to a few
-lines; this is a status check, not a report.
+Prose and short lines only — **no tables**. This is read on a phone as often
+as not, and a table wider than the screen silently clips its last column,
+which is where the warnings end up.
 
-- **Can I work right now?** `usable` accounts, and the headroom of the one
+Lead with the single fact that matters, then the detail. A few lines; this is
+a status check, not a report.
+
+- **Can I work right now?** `state.usable`, and the headroom of the account
   that will serve next. `quotaWindows` carries `used`/`limit` per window —
   report what is LEFT, matching the status line and dashboard.
 - **Is anything wrong?** In descending order of importance:
-  - `holding` — requests parked; say until when. This is why a session looks
-    hung.
-  - `overage` / an account with `paid: true` — requests are being **billed**.
-    Say so plainly and give `overageUsed` if present.
+  - `state.holding` — requests parked; say until when. This is why a session
+    looks hung.
+  - **Billing.** `state.overage` counts accounts that will cost money, and
+    per-account `paid: true` marks them. Nothing else does:
+    - `overage: true` means the provider *offers* extra usage on that
+      account. It is a capability, not a charge, and on its own means
+      nothing is being spent.
+    - `overageUsed` is the fraction of that allowance already consumed, 0–1,
+      or `-1` when the provider does not report it — never print `-1`. It
+      refills on a billing period, so `overageResetAt` can be weeks away. At
+      `1` the next billed request is refused.
+    - Do not confuse it with `state.threshold`, which is the unrelated
+      used-fraction the selector rotates away at. Both are commonly 0.98.
   - `disabled` — a dead credential; needs `spillway login claude <name>`.
   - `parked` — deliberately out of rotation.
-  - `reserve` / `exhausted` — spent, with the soonest `resetAt`.
+  - `reserve` / `exhausted` — spent, with the soonest `resetAt`. A reserve
+    account still serves, for free, when nothing better is left.
 - **What has been happening?** Only if it adds something: rotations or
   `overage` events in the recent requests, and which account is serving.
 
