@@ -32,7 +32,7 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req pinRequest
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-			http.Error(w, "spillway: malformed body", http.StatusBadRequest)
+			http.Error(w, "malformed body", http.StatusBadRequest)
 			return
 		}
 		if req.Account == "" {
@@ -49,7 +49,10 @@ func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, pool.ErrPinWouldBill) || errors.Is(err, pool.ErrPinCrossProvider) {
 				code = http.StatusConflict
 			}
-			http.Error(w, "spillway: "+err.Error(), code)
+			// No "spillway: " prefix: this text is relayed verbatim by the
+			// CLI, which is itself printed by main under that prefix, and
+			// two of them read as a stutter.
+			http.Error(w, err.Error(), code)
 			return
 		}
 		s.writeJSON(w, pinResponse{
