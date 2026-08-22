@@ -340,7 +340,7 @@ func (s *Server) accounts() []accountJSON {
 	for _, a := range s.pool.Accounts() {
 		j := accountJSON{
 			Name:          a.Name,
-			Label:         a.Label,
+			Label:         a.Label(),
 			Type:          a.Type,
 			Source:        a.Source,
 			InFlight:      a.InFlight(),
@@ -348,8 +348,8 @@ func (s *Server) accounts() []accountJSON {
 			Overage:       a.Overage().Available,
 			OverageReason: a.Overage().Reason,
 			OverageUsed:   a.Overage().Utilization,
-			Paid:          a.CanOverage(s.pool.AllowOverage),
-			Priority:      a.Priority,
+			Paid:          a.CanOverage(s.pool.AllowOverage()),
+			Priority:      a.Priority(),
 			LastModel:     a.LastModel(),
 			Upstream:      a.Upstream,
 			Windows:       a.QuotaWindows(),

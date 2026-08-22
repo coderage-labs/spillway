@@ -33,7 +33,7 @@ func liveSnapshot(t *testing.T) (p *Pool, spent, healthy *Account) {
 		{Name: "7d", Limit: 1, Used: 0.08, ResetAt: now.Add(26 * time.Hour), FetchedAt: now},
 	})
 	p = New([]*Account{spent, healthy}, now)
-	p.SwitchThreshold = 0.98
+	p.switchThreshold = 0.98
 	return p, spent, healthy
 }
 

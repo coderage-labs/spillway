@@ -396,7 +396,7 @@ func TestQuotaRotationCrossesProviderWhenEnabled(t *testing.T) {
 	})
 	rig.pool.Accounts()[0].Type = "kimi-oauth"
 	rig.pool.Accounts()[1].Type = "claude-oauth"
-	rig.pool.CrossProvider = true
+	rig.pool.Apply(pool.Settings{CrossProvider: true})
 
 	resp := postMessages(t, rig.front.URL, testBody)
 	defer resp.Body.Close()

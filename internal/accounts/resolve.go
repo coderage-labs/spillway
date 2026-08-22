@@ -28,9 +28,9 @@ func ResolveYAML(a config.AccountConfig, store secrets.Store) (*pool.Account, er
 	acct := pool.NewAccount(a.Name, pool.SourceYAML,
 		s.AccessToken, s.RefreshToken, a.ExpiresAt, upstream)
 	acct.Type = a.Type
-	acct.Label = a.Label
-	acct.Priority = a.Priority
-	acct.AllowOverage = a.AllowOverage
+	acct.SetLabel(a.Label)
+	acct.SetPriority(a.Priority)
+	acct.SetAllowOverage(a.AllowOverage)
 	acct.AccountUUID = a.AccountUUID
 	acct.ModelMap = a.ModelMap
 	return acct, nil

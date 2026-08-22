@@ -305,29 +305,7 @@ func runServer(args []string) error {
 	// Live-apply the settings a dashboard write changes, so an edit does not
 	// need a restart (which would drop the SSE stream and re-probe).
 	adminHandler.EnableSettings(cfgPath, func(nc *config.Config) {
-		p.SwitchThreshold = nc.Pool.SwitchThreshold
-		p.CrossProvider = nc.Pool.CrossProvider
-		p.AllowOverage = nc.Pool.AllowOverage
-		disabled := map[string]bool{}
-		for _, a := range nc.Accounts {
-			disabled[a.Name] = a.Disabled
-		}
-		for _, a := range p.Accounts() {
-			// Park/Unpark, not Disable/Enable: un-parking must never revive
-			// an account whose credential died.
-			if disabled[a.Name] {
-				a.Park()
-			} else {
-				a.Unpark()
-			}
-			for _, ca := range nc.Accounts {
-				if ca.Name == a.Name {
-					a.Label = ca.Label
-					a.Priority = ca.Priority
-					a.AllowOverage = ca.AllowOverage
-				}
-			}
-		}
+		p.Apply(poolSettings(nc))
 		logger.Info("settings updated from dashboard",
 			"switchThreshold", nc.Pool.SwitchThreshold, "crossProvider", nc.Pool.CrossProvider)
 	})
@@ -415,9 +393,9 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 			acct = pool.NewAccount(a.Name, pool.SourceKeychain,
 				oauth.AccessToken, oauth.RefreshToken, oauth.ExpiresAt, a.Upstream)
 			acct.Type = "claude-oauth"
-			acct.Label = a.Label
-			acct.Priority = a.Priority
-			acct.AllowOverage = a.AllowOverage
+			acct.SetLabel(a.Label)
+			acct.SetPriority(a.Priority)
+			acct.SetAllowOverage(a.AllowOverage)
 			// Never log token material — subscription and scopes only.
 			logger.Info("claude account loaded",
 				"name", a.Name,
@@ -467,10 +445,15 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 	}
 
 	p := pool.New(accts, now)
-	p.SwitchThreshold = cfg.Pool.SwitchThreshold
-	p.AllowOverage = cfg.Pool.AllowOverage
+	// Pool-wide settings only: per-account label/priority/overage and park
+	// state are already applied above, at construction, before this pool is
+	// reachable from any other goroutine.
+	p.Apply(pool.Settings{
+		SwitchThreshold: cfg.Pool.SwitchThreshold,
+		CrossProvider:   cfg.Pool.CrossProvider,
+		AllowOverage:    cfg.Pool.AllowOverage,
+	})
 	p.SetTokenManager(mgr)
-	p.CrossProvider = cfg.Pool.CrossProvider
 	usable := 0
 	for _, a := range accts {
 		if a.State() != pool.StateDisabled {
@@ -483,6 +466,29 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 		return nil, errors.New("no usable accounts: every token is expired and unrecoverable — run `spillway login claude <name>`")
 	}
 	return p, nil
+}
+
+// poolSettings maps the dashboard-editable subset of a loaded config to
+// pool.Settings, so the settings handler never touches Pool/Account fields
+// directly (issue #13) — it hands the pool a plain DTO and pool.Apply does
+// the locking.
+func poolSettings(nc *config.Config) pool.Settings {
+	accts := make([]pool.AccountSettings, len(nc.Accounts))
+	for i, a := range nc.Accounts {
+		accts[i] = pool.AccountSettings{
+			Name:         a.Name,
+			Disabled:     a.Disabled,
+			Label:        a.Label,
+			Priority:     a.Priority,
+			AllowOverage: a.AllowOverage,
+		}
+	}
+	return pool.Settings{
+		SwitchThreshold: nc.Pool.SwitchThreshold,
+		CrossProvider:   nc.Pool.CrossProvider,
+		AllowOverage:    nc.Pool.AllowOverage,
+		Accounts:        accts,
+	}
 }
 
 func parseLevel(s string) slog.Level {

@@ -126,7 +126,7 @@ func TestStateSeparatesReserveFromUsable(t *testing.T) {
 		{Name: "7d", Limit: 1, Used: 0.08, ResetAt: time.Now().Add(26 * time.Hour), FetchedAt: time.Now()},
 	})
 	p := pool.New([]*pool.Account{spent, healthy}, time.Now())
-	p.SwitchThreshold = 0.98
+	p.Apply(pool.Settings{SwitchThreshold: 0.98})
 
 	st := fetchState(t, New(p, nil, events.New(), testToken))
 	if st.Usable != 1 || st.Reserve != 1 {

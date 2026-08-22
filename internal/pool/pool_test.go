@@ -348,7 +348,7 @@ func TestPriorityOutranksLoad(t *testing.T) {
 	primary.Type = "claude-oauth"
 	fallback := NewAccount("fallback", SourceYAML, "t", "", 0, "")
 	fallback.Type = "claude-oauth"
-	fallback.Priority = 2
+	fallback.priority = 2
 
 	p := New([]*Account{primary, fallback}, now)
 	// Make the preferred account the busy one: without priority, load alone
