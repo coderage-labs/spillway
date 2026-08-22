@@ -18,7 +18,6 @@ import (
 
 	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/mitm"
-	"github.com/coderage-labs/spillway/internal/secrets"
 )
 
 // caPEMPath is where EnsureCA writes the CA cert clients must trust.
@@ -94,7 +93,7 @@ func runClaude(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := mitm.EnsureCA(secrets.NewKeyring(), pemPath); err != nil {
+	if _, err := mitm.EnsureCA(openSecrets(), pemPath); err != nil {
 		return fmt.Errorf("ensure MITM CA: %w", err)
 	}
 

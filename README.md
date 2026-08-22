@@ -328,6 +328,22 @@ processes refreshing the same account will invalidate each other.
 - A background sweep refreshes any token within 5 minutes of expiry,
   regardless of traffic — an idle account has nothing else to trigger one.
 
+### Where they are kept
+
+The OS keychain: Keychain Services, Credential Manager, or Secret Service.
+
+**Linux without a desktop keyring is the exception.** Secret Service is a
+D-Bus service that a desktop provides and a server, a container or an SSH
+session does not, and spillway used to exit rather than start without it. It
+now falls back to `spillway-secrets.json` beside the config, 0600 in a 0700
+directory — the same way the `claude` CLI stores the same class of token on
+Linux. It says so, loudly, every time it does it.
+
+It is a fallback, not a choice: it happens only where no keychain service is
+running at all. A locked macOS keychain or a dismissed Windows prompt is you
+declining, and spillway will fail rather than answer that by writing your
+tokens to a file.
+
 ## Model mapping
 
 Providers that speak different model ids get the request's `model` rewritten

@@ -107,7 +107,7 @@ func runServer() error {
 		Level: parseLevel(cfg.Log.Level),
 	}))
 
-	store := secrets.NewKeyring()
+	store := openSecrets()
 	// Scrub any inline tokens from an older config into the keychain (§5).
 	cfgPath, err := config.Path()
 	if err != nil {
@@ -314,7 +314,7 @@ func runServer() error {
 	if err != nil {
 		return err
 	}
-	if ca, err := mitm.EnsureCA(secrets.NewKeyring(), pemPath); err != nil {
+	if ca, err := mitm.EnsureCA(openSecrets(), pemPath); err != nil {
 		logger.Error("MITM CA unavailable — CONNECT termination disabled, base-URL mode still works", "err", err)
 	} else {
 		handler.SetMITM(ca)

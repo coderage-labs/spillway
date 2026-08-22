@@ -73,7 +73,7 @@ func runLoginClaude(args []string) error {
 			dup, profile.AccountUUID, dup, dup)
 	}
 
-	store := secrets.NewKeyring()
+	store := openSecrets()
 	if err := store.Set(name, secrets.Secrets{
 		AccessToken:  tokens.AccessToken,
 		RefreshToken: tokens.RefreshToken,
@@ -118,7 +118,7 @@ func runLoginKimi(args []string) error {
 		return err
 	}
 
-	store := secrets.NewKeyring()
+	store := openSecrets()
 	if err := store.Set(name, secrets.Secrets{
 		AccessToken:  tokens.AccessToken,
 		RefreshToken: tokens.RefreshToken,
@@ -218,7 +218,7 @@ func runAccounts(args []string) error {
 	if err != nil {
 		return err
 	}
-	store := secrets.NewKeyring()
+	store := openSecrets()
 
 	if len(args) >= 2 && args[0] == "remove" {
 		name := args[1]
