@@ -53,7 +53,10 @@ func (p *Pool) Pin(name string, force bool) error {
 	if !force && p.wouldBill(a) {
 		return fmt.Errorf("%w: %q is out of quota and would serve from paid extra usage", ErrPinWouldBill, name)
 	}
-	if !force && !p.CrossProvider {
+	// p.crossProvider, not the CrossProvider() accessor: Pin already holds
+	// p.mu and the accessor takes it again. SelectExcept reads the field the
+	// same way for the same reason (#13 unexported these).
+	if !force && !p.crossProvider {
 		want := ProviderOf(a.Type)
 		for _, started := range p.sessionProvider {
 			if started != want {

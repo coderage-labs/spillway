@@ -75,7 +75,7 @@ func TestPinEndpointSetsAndClears(t *testing.T) {
 // a dashboard to give up rather than offer the choice.
 func TestPinEndpointConflictsAreDistinguishable(t *testing.T) {
 	front, p := pinServer(t)
-	p.AllowOverage = true
+	p.Apply(pool.Settings{AllowOverage: true})
 	spent := p.Accounts()[1]
 	spent.SetOverageForTest(provider.Overage{Known: true, Available: true})
 	p.MarkExhausted(spent, time.Now().Add(time.Hour))

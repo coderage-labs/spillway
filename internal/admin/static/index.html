@@ -934,11 +934,15 @@ function ensureCyl(entry, w) {
 // offered as a choice. 400 means don't retry -- unknown account or a
 // malformed request, which force cannot fix.
 async function pinRequest(name, force) {
-  const r = await fetch(auth("/api/pin"), {
+  // auth() wraps the init, not the URL — it moved to header auth when the
+  // query-string token was gated to /api/events. Passing it as the URL left
+  // the request unauthenticated and, with a token set, put an object where
+  // the URL belongs. Invisible on a loopback dashboard, which has no token.
+  const r = await fetch("/api/pin", auth({
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ account: name, force: !!force }),
-  });
+  }));
   const text = await r.text();
   let json = null;
   try { json = JSON.parse(text); } catch (e) { /* error bodies are plain text */ }
@@ -1003,7 +1007,7 @@ async function doPin(entry, name, force) {
 }
 
 async function doUnpin(entry) {
-  const r = await fetch(auth("/api/pin"), { method: "DELETE" });
+  const r = await fetch("/api/pin", auth({ method: "DELETE" }));
   if (r.ok) {
     clearPinMsg(entry);
     refresh();

@@ -83,7 +83,7 @@ func TestPinFallsBackWhenTheAccountIsSpent(t *testing.T) {
 // the cheap way around the tier that exists to ask permission.
 func TestPinRefusesToSpendMoney(t *testing.T) {
 	p, a, _ := pinPool(t)
-	p.AllowOverage = true
+	p.Apply(Settings{AllowOverage: true})
 	a.SetOverageForTest(provider.Overage{Known: true, Available: true})
 	p.MarkExhausted(a, time.Now().Add(time.Hour))
 	if !p.WouldBill(a) {
