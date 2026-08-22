@@ -254,10 +254,14 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 	}
 	modelServed := modelAsked
 	modelFor := func(a *pool.Account) string {
-		if a != nil && a.ModelMap != nil {
-			if m, ok := a.ModelMap[modelAsked]; ok {
-				return m
-			}
+		if a == nil {
+			return modelAsked
+		}
+		// The same resolution the rewrite uses, globs included — reporting
+		// the asked-for id while sending a mapped one is how a request log
+		// comes to disagree with what actually happened.
+		if m, ok := lookupModel(a.EffectiveModelMap(), modelAsked); ok {
+			return m
 		}
 		return modelAsked
 	}
@@ -568,11 +572,11 @@ func (h *Handler) buildRequest(r *http.Request, upstream string, acct *pool.Acco
 			// metadata passes through untouched.
 			body = patchAccountUUID(body, acct.AccountUUID)
 		}
-		if acct.ModelMap != nil {
+		if mm := acct.EffectiveModelMap(); len(mm) > 0 {
 			// §4 allowed mutation #3 (cross-provider only): map the model
 			// id. Unmapped → hard error, never forward a claude id to Kimi.
 			var err error
-			body, err = rewriteModel(body, acct.ModelMap)
+			body, err = rewriteModel(body, mm)
 			if err != nil {
 				return nil, err
 			}

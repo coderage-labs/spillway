@@ -478,6 +478,33 @@ func (p *Pool) RecordQuota(a *Account, h http.Header, now time.Time) {
 	a.setWindowsSourced("headers", out)
 }
 
+// EffectiveModelMap is the account's own mapping over its provider's
+// defaults.
+//
+// The account's entries win key by key rather than replacing the map: a user
+// who maps one model should not lose the defaults for every other, which is
+// what returning whichever map is non-empty would do.
+//
+// Nil when neither exists, which keeps the no-rewrite path for providers that
+// speak the same ids we were given.
+func (a *Account) EffectiveModelMap() map[string]string {
+	base := provider.For(a.Type).DefaultModelMap
+	if len(a.ModelMap) == 0 {
+		return base
+	}
+	if len(base) == 0 {
+		return a.ModelMap
+	}
+	out := make(map[string]string, len(base)+len(a.ModelMap))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range a.ModelMap {
+		out[k] = v
+	}
+	return out
+}
+
 // setOverage records what the provider last said about extra usage.
 func (a *Account) setOverage(ov provider.Overage) {
 	a.mu.Lock()

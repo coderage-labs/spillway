@@ -296,6 +296,38 @@ processes refreshing the same account will invalidate each other.
 - A background sweep refreshes any token within 5 minutes of expiry,
   regardless of traffic — an idle account has nothing else to trigger one.
 
+## Model mapping
+
+Providers that speak different model ids get the request's `model` rewritten
+(design doc §4 mutation #3). **An id with no mapping is a hard error** —
+forwarding a Claude id to another provider is how you get a 200 back from
+something you did not ask for.
+
+Kimi ships defaults, so a freshly logged-in account works with no config:
+
+| Asked | Served | Why |
+|---|---|---|
+| `claude-opus-*` | `k3` | 1,048,576-token context — the only Kimi model that is not a downgrade from what a Claude session may already carry |
+| `claude-sonnet-*` | `k3` | as above |
+| `claude-haiku-*` | `kimi-for-coding-highspeed` | the background worker: small contexts, latency matters |
+
+Measured from Kimi's `/v1/models`, not assumed. There is deliberately **no
+catch-all**: an id from another vendor still stops rather than quietly
+becoming `k3`.
+
+Override per account, per key — your entries win individually, the rest keep
+their defaults:
+
+```yaml
+accounts:
+  - name: you@example.com
+    type: kimi-oauth
+    modelMap:
+      claude-haiku-*: k3-256k     # the other three defaults still apply
+```
+
+Exact ids beat globs, and among globs the longest pattern wins.
+
 ## Pool behaviour
 
 Selection prefers the lowest `priority` among accounts that can serve the

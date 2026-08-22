@@ -197,8 +197,13 @@ func TestModelMapThroughProxy(t *testing.T) {
 	}
 
 	// Unmapped model: hard error, upstream never hit.
+	//
+	// Not a claude-* id any more: the provider now ships defaults covering
+	// those families, so they are mapped rather than rejected. An id from
+	// another vendor is what "unmapped" means now, and it must still stop
+	// here rather than reach Kimi as-is.
 	resp, err = http.Post(front.URL+"/v1/messages", "application/json",
-		strings.NewReader(`{"model":"claude-opus-9","messages":[]}`))
+		strings.NewReader(`{"model":"gpt-4o","messages":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}

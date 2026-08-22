@@ -216,3 +216,61 @@ func gotName(a *Account) string {
 	}
 	return a.Name
 }
+
+// A freshly logged-in Kimi account must work without hand-writing a map.
+// Unmapped is a hard error, so with no defaults every request from a new
+// account failed until someone edited the config.
+func TestKimiAccountHasWorkingDefaultsWithNoConfig(t *testing.T) {
+	a := NewAccount("kimi", SourceYAML, "tok", "", 0, "")
+	a.Type = "kimi-oauth"
+	if a.ModelMap != nil {
+		t.Fatal("precondition: this account is supposed to have no map of its own")
+	}
+	m := a.EffectiveModelMap()
+	if len(m) == 0 {
+		t.Fatal("a kimi account with no config has no model mapping at all")
+	}
+	// Measured from /v1/models: k3 is the only model whose context ceiling
+	// (1M) is not a downgrade from what a Claude session may be carrying.
+	for pattern, want := range map[string]string{
+		"claude-opus-*":   "k3",
+		"claude-sonnet-*": "k3",
+		"claude-haiku-*":  "kimi-for-coding-highspeed",
+	} {
+		if m[pattern] != want {
+			t.Errorf("default %q = %q, want %q", pattern, m[pattern], want)
+		}
+	}
+	// No catch-all: an id from another vendor must still be refused rather
+	// than quietly become k3.
+	if _, ok := m["*"]; ok {
+		t.Error("a catch-all default throws away the protection that unmapped is an error")
+	}
+}
+
+// A user who maps one model must not lose the defaults for all the others,
+// which is what replacing the map wholesale would do.
+func TestAccountModelMapOverridesPerKeyNotWholesale(t *testing.T) {
+	a := NewAccount("kimi", SourceYAML, "tok", "", 0, "")
+	a.Type = "kimi-oauth"
+	a.ModelMap = map[string]string{"claude-haiku-*": "k3-256k"}
+
+	m := a.EffectiveModelMap()
+	if m["claude-haiku-*"] != "k3-256k" {
+		t.Errorf("account override lost: %q", m["claude-haiku-*"])
+	}
+	if m["claude-sonnet-*"] != "k3" {
+		t.Errorf("overriding one model dropped the default for another: %q", m["claude-sonnet-*"])
+	}
+}
+
+// Claude speaks its own ids, so there is nothing to map and no rewrite should
+// happen at all.
+func TestClaudeAccountHasNoModelMap(t *testing.T) {
+	a := NewAccount("claude", SourceYAML, "tok", "", 0, "")
+	a.Type = "claude-oauth"
+	if m := a.EffectiveModelMap(); len(m) != 0 {
+		t.Errorf("claude account carries a model map (%v); rewriting its own ids "+
+			"would be a §4 mutation for no reason", m)
+	}
+}

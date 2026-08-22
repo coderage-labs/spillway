@@ -94,6 +94,12 @@ type Spec struct {
 	WindowsFromHeaders func(header http.Header, now time.Time) []Window
 	// PollsUsage: quota comes from an endpoint rather than response headers.
 	PollsUsage bool
+	// DefaultModelMap maps incoming model ids to this provider's own, used
+	// where the account configures no mapping of its own. Without it a
+	// freshly logged-in account of a provider that speaks different ids is
+	// unusable: every request is a hard unmapped-model error until someone
+	// hand-writes a map. An account's own modelMap always wins.
+	DefaultModelMap map[string]string
 	// OverageFromHeaders reads whether the account may keep serving past its
 	// subscription quota, and be billed for it. Nil for providers with no
 	// such concept — which is not the same as "not allowed", so callers must
@@ -162,6 +168,29 @@ var specs = map[string]Spec{
 				return v
 			}
 			return "k3"
+		},
+		// Measured against /v1/models on 2026-08-22:
+		//
+		//   k3                        1,048,576 ctx, think efforts low/high/max
+		//   k3-256k                     262,144 ctx
+		//   kimi-for-coding             262,144 ctx
+		//   kimi-for-coding-highspeed   262,144 ctx
+		//
+		// k3 for the models Claude Code does real work with, because it is
+		// the only one whose context ceiling is not a downgrade from what a
+		// Claude session may already be carrying. Haiku is the background
+		// worker — small contexts, latency matters — so it gets the highspeed
+		// variant.
+		//
+		// Claude families only, with no catch-all. A first version mapped "*"
+		// so nothing could fail, which quietly threw away the property the
+		// hard error exists for: an id from some other vendor entirely should
+		// stop, not become k3. These three cover everything Claude Code
+		// actually sends, which is the whole usability problem.
+		DefaultModelMap: map[string]string{
+			"claude-opus-*":   "k3",
+			"claude-sonnet-*": "k3",
+			"claude-haiku-*":  "kimi-for-coding-highspeed",
 		},
 		Capabilities: Capabilities{
 			ThinkingDefaultOn:            true,

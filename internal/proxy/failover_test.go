@@ -47,7 +47,11 @@ func newRig(t *testing.T, handlers [2]http.HandlerFunc) *twoAccountRig {
 	return rig
 }
 
-const testBody = `{"model":"claude","max_tokens":16,"metadata":{"user_id":"session-abc"},"messages":[]}`
+// A real model id, not a placeholder. Kimi accounts now carry provider
+// default mappings, so "claude" — which is not an id anything sends — is
+// correctly rejected as unmapped, and every Kimi test using this body failed
+// for a reason that had nothing to do with what it was testing.
+const testBody = `{"model":"claude-sonnet-4-6","max_tokens":16,"metadata":{"user_id":"session-abc"},"messages":[]}`
 
 func postMessages(t *testing.T, url, body string) *http.Response {
 	t.Helper()
