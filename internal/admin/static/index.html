@@ -22,6 +22,7 @@
        or a gap opens between strip and body. */
     --swell: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 500 100' preserveAspectRatio='none'><path d='M0 36 C78 36 128 0 236 0 C344 0 410 36 500 36 L500 100 L0 100 Z' fill='%23fff'/></svg>");
     color-scheme: light;
+    --glass-h: 138px;
     --deep:    #eef4f6;
     --surface: #ffffff;
     --wall:    #d3e1e7;
@@ -61,7 +62,11 @@
 
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: clamp(1rem, 2.5vw, 2rem);
+    /* Capped and centred. Unbounded, the headroom chart stretched its 760-unit
+       viewBox across the whole desktop and the tank cards grew with it, so a
+       wide monitor made everything larger without showing anything more. */
+    margin: 0 auto; max-width: 1440px;
+    padding: clamp(1rem, 2.5vw, 2rem);
     background: var(--deep); color: var(--ink);
     font: 13px/1.5 var(--sans);
     font-variant-numeric: tabular-nums;
@@ -94,8 +99,19 @@
            border-radius: 5px; box-shadow: var(--shadow); }
 
   /* the tanks */
+  /* Four across at most, however wide the screen, and fewer as it narrows.
+     The minimum track is whichever is larger: a quarter of the row, or the
+     260px a card needs to stay readable. The quarter caps the count; the
+     260px floor takes over once a quarter of the row is smaller than that,
+     and the columns drop to three, two, one on their own.
+
+     auto-fit rather than auto-fill: auto-fill keeps the empty tracks, so two
+     accounts sat at 266px beside 900px of nothing while the chart below ran
+     the full width. Stretching to fill the row keeps the tanks aligned with
+     the panels under them. */
   .tanks { display: grid; gap: .7rem;
-           grid-template-columns: repeat(auto-fit, minmax(224px, 1fr)); }
+           grid-template-columns:
+             repeat(auto-fit, minmax(max(260px, (100% - 3 * .7rem) / 4), 1fr)); }
   .tank { padding: .85rem .95rem 1rem; }
   .tank-head { display: flex; align-items: baseline; gap: .5rem; }
   .tank-name { font-weight: 640; letter-spacing: -.015em; font-size: 13.5px;
@@ -142,7 +158,7 @@
 
   .cyls { display: flex; gap: .75rem; }
   .cyl { flex: 1; min-width: 0; text-align: center; }
-  .glass { position: relative; width: 100%; max-width: 62px; height: 138px; margin: 0 auto;
+  .glass { position: relative; width: 100%; max-width: 62px; height: var(--glass-h); margin: 0 auto;
            border-radius: 7px; overflow: hidden; background: var(--glass);
            border: 1px solid var(--wall);
            box-shadow: inset 0 2px 6px rgba(0,0,0,.18), inset 0 -1px 0 rgba(255,255,255,.06); }
@@ -187,18 +203,30 @@
   /* Refill countdown, shown over a tank that has actually run dry.
      Centred in the glass rather than below it: an empty tank is a blank
      rectangle with nothing to say, and this is the only thing the reader
-     wants from it — how long until it comes back. */
+     wants from it — how long until it comes back.
+
+     A plaque, not a dial. There was a progress ring here, and it was lying:
+     the arc needs a start as well as an end, the API gives only the reset
+     time, and the length was inferred from the window's name. That works for
+     "5h", which really is five hours long, and not for "7d", whose reset is
+     the moment the oldest usage ages out — typically hours away, not days.
+     The arc therefore sat between 92% and 99% full permanently, which is a
+     progress indicator that does not indicate progress. */
   .dryring { position: absolute; inset: 0; display: none; place-items: center;
              pointer-events: none; }
   .dryring.on { display: grid; }
-  .dryring svg { position: absolute; width: 54px; height: 54px; transform: rotate(-90deg); }
-  .dryring .track { fill: none; stroke: var(--wall); stroke-width: 3; }
-  .dryring .arc   { fill: none; stroke: var(--water-a); stroke-width: 3;
-                    stroke-linecap: round; transition: stroke-dashoffset .6s linear; }
-  .dryring .left  { position: relative; font-size: 11px; font-weight: 600;
-                    letter-spacing: -.03em; color: var(--ink);
-                    font-variant-numeric: tabular-nums; }
-  @media (prefers-reduced-motion: reduce) { .dryring .arc { transition: none; } }
+  /* No box and no caption. Both were tried and both were wrong: a plaque is
+     60px wide inside a 62px glass, so it reads as overflowing, and "REFILLS
+     IN" wraps to two lines at that width. The caption was redundant anyway —
+     "refills 12h58m" sits directly under the tank, and having the two say
+     13h and 12h58m looks like a disagreement rather than a rounding. So the
+     glass carries the glanceable number and the line below carries the
+     precise one. */
+  .dryring .left { font-size: 22px; font-weight: 640; line-height: 1;
+                   letter-spacing: -.04em; color: var(--ink);
+                   font-variant-numeric: tabular-nums;
+                   text-shadow: 0 1px 3px var(--glass), 0 0 10px var(--glass); }
+  .dryring .left.due { color: var(--water-a); }
   .cyl .val { font-size: 19px; font-weight: 560; margin-top: .55rem; letter-spacing: -.03em; }
   .cyl .val i { font-style: normal; font-size: .55em; opacity: .5; }
   .cyl .val.nodata { color: var(--ink-2); font-size: 13px; }
@@ -261,7 +289,11 @@
     0%   { transform: translate(0, 0) scale(.65); opacity: 0; }
     15%  { opacity: .8; }
     80%  { opacity: .45; }
-    100% { transform: translate(var(--sway, 3px), calc(-1 * var(--climb, 60%))) scale(1); opacity: 0; }
+    /* --climb is a length, and it has to be. A percentage in translate()
+       resolves against the element's own box, and a bubble is under six
+       pixels across — so -90% lifted it four pixels and every bubble sat in
+       the silt at the bottom of the tank. */
+    100% { transform: translate(var(--sway, 3px), calc(-1 * var(--climb, 80px))) scale(1); opacity: 0; }
   }
 
   /* charts */
@@ -617,7 +649,9 @@ function bubbleLayer(lvl, key) {
       "--dur:" + (3.4 + ((seed + i * 13) % 30) / 10) + "s;" +
       "--delay:-" + ((seed + i * 29) % 45) / 10 + "s;" +
       "--sway:" + (2 + ((seed + i) % 6)) + "px;" +
-      "--climb:" + (lvl * 100).toFixed(1) + "%;";
+      // Of the glass, not of the bubble: calc against --glass-h so the rise
+      // ends at the waterline whatever the tank's height becomes.
+      "--climb: calc(var(--glass-h) * " + lvl.toFixed(3) + ");";
     wrap.appendChild(b);
   }
   return wrap;
@@ -778,16 +812,6 @@ function ensureCard(a) {
   return entry;
 }
 
-// windowSeconds derives a quota window's length from its name ("5h", "7d",
-// "7d-fable"). The API reports when a window resets but never how long it is,
-// and without the length there is no denominator — a countdown can say "2h
-// left" but not how far round the dial that is.
-function windowSeconds(name) {
-  const m = /^(\d+)\s*([hd])/.exec(name || "");
-  if (!m) return null;
-  return Number(m[1]) * (m[2] === "d" ? 86400 : 3600);
-}
-
 // rings holds every live countdown so the one-second tick can update them
 // without touching the DOM structure. Rebuilding these on each poll is the
 // mistake the water animation already taught: it restarts the transition and
@@ -803,15 +827,12 @@ function coarseDur(secs) {
 }
 
 function updateRing(cyl) {
-  const total = cyl.ringTotal, at = cyl.ringResetAt;
-  if (!total || !at) return;
+  const at = cyl.ringResetAt;
+  if (!at) return;
   const left = Math.max(0, (at - Date.now()) / 1000);
-  const progress = Math.min(1, Math.max(0, 1 - left / total));
-  cyl.ringArc.setAttribute("stroke-dashoffset", String(cyl.ringCirc * (1 - progress)));
-  // Coarse inside the ring, exact underneath it. fmtDur gives "12h59m",
-  // which does not fit legibly in a 54px circle and duplicates the "refills"
-  // line directly below — the ring is for reading at a glance.
-  cyl.ringLeft.textContent = left <= 0 ? "due" : coarseDur(left);
+  const due = left <= 0;
+  cyl.ringLeft.textContent = due ? "due" : coarseDur(left);
+  cyl.ringLeft.classList.toggle("due", due);
 }
 
 // One timer for every tank. A countdown that only moved on the five-second
@@ -822,26 +843,8 @@ setInterval(() => { for (const c of rings) updateRing(c); }, 1000);
 // than on first use so the poll only ever toggles a class and writes two
 // values.
 function buildRing(cyl, glass) {
-  const R = 24, circ = 2 * Math.PI * R;
   const wrap = div("dryring", glass);
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 54 54");
-  const mk = (cls) => {
-    const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    c.setAttribute("cx", "27"); c.setAttribute("cy", "27"); c.setAttribute("r", String(R));
-    c.setAttribute("class", cls);
-    svg.appendChild(c);
-    return c;
-  };
-  mk("track");
-  const arc = mk("arc");
-  arc.setAttribute("stroke-dasharray", String(circ));
-  arc.setAttribute("stroke-dashoffset", String(circ));
-  wrap.appendChild(svg);
-
   cyl.ringWrap = wrap;
-  cyl.ringArc = arc;
-  cyl.ringCirc = circ;
   cyl.ringLeft = div("left", wrap);
 }
 
@@ -933,9 +936,10 @@ function renderTanks(list) {
       // The ring appears only once the tank is actually dry. Above the spill
       // point the percentage is the answer; at zero it is not, and "0%" over
       // and over tells the reader nothing they can act on.
-      const total = windowSeconds(w.name);
-      if (f !== null && f <= CREST && w.resetAt && total) {
-        cyl.ringTotal = total;
+      // No length needed any more, so a window whose name we cannot parse
+      // still gets its countdown. The old ring silently showed nothing for
+      // those — which is how Kimi's "weekly" had no overlay at all.
+      if (f !== null && f <= CREST && w.resetAt) {
         cyl.ringResetAt = new Date(w.resetAt).getTime();
         cyl.ringWrap.classList.add("on");
         cyl.ringWrap.title = w.name + " refills " + fmtReset(w.resetAt);

@@ -212,16 +212,37 @@ eval(js);
   ok['countdown ring hidden on healthy windows'] = ringsOff.length >= 2;
   ok['countdown ring states the time left'] = ringsOn.length === 1 &&
     /^\dh(\d+m)?$|^\d+m$/.test(findIn(ringsOn[0], '.left')?.textContent || '');
-  // The arc must actually be part-drawn: a full offset is an invisible ring,
-  // which is what a wrong denominator produces.
-  ok['countdown arc reflects progress'] = (() => {
-    if (ringsOn.length !== 1) return false;
-    const arc = findIn(ringsOn[0], '.arc');
-    if (!arc) return false;
-    const dash = Number(arc.getAttribute('stroke-dasharray'));
-    const off = Number(arc.getAttribute('stroke-dashoffset'));
-    return dash > 0 && off > 0 && off < dash;
-  })();
+  // No arc any more, and its absence is the assertion: a progress arc needs
+  // a start as well as an end, the API reports only the reset time, and the
+  // length was guessed from the window's name. That is right for "5h" and
+  // wrong for "7d", whose reset is when the oldest usage ages out — hours
+  // away, not days — so the arc sat above 90% full permanently.
+  ok['no progress arc is drawn'] =
+    findAllIn(els.accounts, '.arc').length === 0 &&
+    findAllIn(els.accounts, '.track').length === 0;
+  // One number in the glass, not a boxed label duplicating the caption below
+  // it. The line under the tank already reads "refills 12h58m"; a plaque
+  // saying "REFILLS IN 13h" over it looked like the two disagreed.
+  ok['countdown is one bare figure'] = ringsOn.length === 1 &&
+    findAllIn(ringsOn[0], '.plaque').length === 0 &&
+    findAllIn(ringsOn[0], '.cap').length === 0;
+
+  // Bubbles have to rise the height of the glass, and --climb is what says
+  // how far. It used to be a percentage, and a percentage inside translate()
+  // resolves against the element's own box — a bubble is under six pixels
+  // across, so -90% lifted it four pixels and every bubble sat on the floor
+  // of the tank. There is no layout engine here, so the assertion is on the
+  // declaration rather than the position: a length, never a percentage.
+  const bubs = findAllIn(els.accounts, '.bub');
+  ok['bubbles exist on a wet tank'] = bubs.length > 0;
+  ok['bubble climb is a length, not a percentage'] = bubs.length > 0 && bubs.every(b => {
+    const m = /--climb:\s*([^;]+)/.exec(String(b.style?.cssText || ''));
+    return m && !/%\s*$/.test(m[1].trim());
+  });
+  // And it must be measured against the glass, so the rise ends at the
+  // waterline rather than at a number that drifts when the tank is resized.
+  ok['bubble climb is measured against the glass'] = bubs.length > 0 && bubs.every(b =>
+    /--climb:[^;]*--glass-h/.test(String(b.style?.cssText || '')));
 
   // Extra usage is shown but NOT editable. The panel is a browser page, and
   // this is the only setting that decides whether the user is charged.
