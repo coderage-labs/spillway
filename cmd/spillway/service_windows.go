@@ -29,7 +29,9 @@ func serviceLogPaths() (out string, err error) {
 	return filepath.Join(base, "spillway", "spillway.log"), nil
 }
 
-func schtasks(args ...string) (string, error) {
+// A variable so the install sequence can be tested without a real Task
+// Scheduler, which no CI runner offers and no test can drive.
+var schtasks = func(args ...string) (string, error) {
 	out, err := exec.Command("schtasks", args...).CombinedOutput()
 	// schtasks writes UTF-16 on some locales; the ASCII we match on survives
 	// either way, so only the framing is trimmed.
@@ -69,6 +71,20 @@ func serviceInstall() error {
 		return err
 	}
 
+	// Stop whatever is running before replacing the registration.
+	//
+	// Without this, reinstalling over a running daemon did nothing at all to
+	// the daemon: /Create /F rewrites the task but leaves the process alone,
+	// and MultipleInstancesPolicy is IgnoreNew, so the /Run below is
+	// discarded because an instance is already running. The command printed
+	// "service installed" while the old binary kept serving — which is
+	// exactly what an upgrade does, and exactly when it matters.
+	//
+	// Ignoring the error is correct: it fails when nothing is running and
+	// when nothing is registered, which are the ordinary cases on a first
+	// install.
+	_, _ = schtasks("/End", "/TN", taskName)
+
 	// /F replaces an existing registration rather than failing.
 	if out, err := schtasks("/Create", "/TN", taskName, "/XML", f.Name(), "/F"); err != nil {
 		return fmt.Errorf("schtasks /Create: %v: %s", err, out)
@@ -84,6 +100,9 @@ func serviceInstall() error {
 }
 
 func serviceUninstall() error {
+	// Stop it before deregistering, or the process outlives the task that
+	// owns it and nothing is left to stop it by.
+	_, _ = schtasks("/End", "/TN", taskName)
 	if out, err := schtasks("/Delete", "/TN", taskName, "/F"); err != nil {
 		if strings.Contains(out, "cannot find") || strings.Contains(out, "does not exist") {
 			fmt.Println("service NOT installed")

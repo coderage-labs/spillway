@@ -117,3 +117,63 @@ homebrew_casks:
                              must_succeed: false
             end
           end
+
+# Scoop, not WinGet or Chocolatey. Both of those install machine-wide by
+# default, and spillway is per-user by construction: the tokens live in this
+# user's Credential Manager, which a machine-wide install has no business
+# reaching. Scoop installs under the user's own profile, and — unlike WinGet
+# for a plain zip — gives a post-install hook, which is what keeps an upgrade
+# from leaving the old daemon running.
+scoops:
+  - name: spillway
+    # Flip to false once coderage-labs/scoop-bucket exists and
+    # SCOOP_BUCKET_TOKEN is set on this repo. Until then the manifest is
+    # still generated and checked into dist/ by every release, so it is not
+    # rotting unnoticed — it just has nowhere to be published to, and a
+    # release must not fail over that.
+    skip_upload: true
+    repository:
+      owner: coderage-labs
+      name: scoop-bucket
+      branch: main
+      token: "{{ envOrDefault \"SCOOP_BUCKET_TOKEN\" \"\" }}"
+    directory: bucket
+    homepage: "https://github.com/coderage-labs/spillway"
+    description: "Pool your own AI subscription accounts behind one local proxy"
+    license: MIT
+    commit_author:
+      name: Kriskit
+      email: chris@coderage.co.uk
+    # The macOS cask's postflight, in PowerShell. Same reasoning: scoop
+    # replaces the binary but does not touch the running daemon, and the
+    # Scheduled Task holds an absolute path to the version it was registered
+    # with. Guarded on the task already existing, so it never registers a
+    # service nobody asked for, and silent on failure so a restart that does
+    # not work cannot fail the upgrade.
+    # The macOS cask's postflight, in PowerShell. Same reasoning: scoop
+    # replaces the binary but does not touch the running daemon, and the
+    # Scheduled Task holds an absolute path to the version it was registered
+    # with. Guarded on the task already existing, so it never registers a
+    # service nobody asked for, and quiet on failure so a restart that does
+    # not work cannot fail the upgrade.
+    #
+    # $LASTEXITCODE, not the truthiness of schtasks' output: `if (schtasks
+    # ...)` tests whether anything was printed, which is a different question
+    # and one that locale and stderr redirection both change the answer to.
+    #
+    # Get-Command, not $dir: $dir is ~/scoop/apps/spillway/<version>, which
+    # the next upgrade deletes. `service install` records the path it is
+    # invoked by into the task, so it has to be the shim — the one path that
+    # survives. If the shim is not on PATH yet this does nothing, which is the
+    # right way to be wrong here.
+    post_install:
+      - 'schtasks /Query /TN "\dev.coderage.spillway" *> $null'
+      - 'if ($LASTEXITCODE -eq 0) {'
+      - '  $exe = (Get-Command spillway.exe -ErrorAction SilentlyContinue).Source'
+      - '  if ($exe) {'
+      - '    Write-Host "Restarting the spillway service on the new binary"'
+      - '    & $exe service install | Out-Null'
+      - '  } else {'
+      - "    Write-Host 'spillway: shim not found - run: spillway service install'"
+      - '  }'
+      - '}'
