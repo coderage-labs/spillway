@@ -17,11 +17,15 @@ import (
 const (
 	EventServed       = "served"
 	EventRotatedQuota = "rotated-quota"
-	EventRotatedConn  = "rotated-conn"
-	EventRateRetry    = "rate-retry"
-	EventHeld         = "held"
-	EventExhausted    = "exhausted"
-	EventPassthrough  = "passthrough"
+	// EventRotatedConn: pre-first-byte rotation away from an account that
+	// wasn't a quota rejection — a dead upstream connection, or an upstream
+	// 5xx (issue #26). Neither is the account's fault, so it isn't marked
+	// exhausted; it's simply excluded from this request's retries.
+	EventRotatedConn = "rotated-conn"
+	EventRateRetry   = "rate-retry"
+	EventHeld        = "held"
+	EventExhausted   = "exhausted"
+	EventPassthrough = "passthrough"
 	// EventOverage: served past the subscription quota, at cost. Recorded
 	// separately from EventServed because it is the one outcome the user
 	// pays for, and a bill is not something to find out about from a bill.

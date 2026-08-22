@@ -468,9 +468,19 @@ machine shares.
 A quota-429 marks the account exhausted until its reset and re-sends the
 buffered request on the next account, invisibly to the client. A transient
 rate-limit-429 retries the same account with backoff (max 3), never rotates.
-Only `POST /v1/messages` bodies up to 8MB are buffered for failover; everything
-else streams straight through, and failover only happens **before the first
-response byte** — mid-stream aborts are the client's own retry behaviour.
+An upstream 5xx (529 Overloaded included — Anthropic's explicit "over
+capacity" signal, and 500/502/503/504 alike, since none of them say anything
+about this account's credentials or quota) gets exactly **one** rotation to
+another account: not the account's fault, so it isn't marked exhausted, but
+also not chained through the whole pool the way a quota-429 is — if the
+upstream is down for everyone, walking every account just serialises that
+many failures before the client sees the same 5xx it would have gotten
+immediately. If there's no other account to try (or the body wasn't
+buffered), the real upstream 5xx reaches the client — never a synthesized
+error that would hide the outage. Only `POST /v1/messages` bodies up to 8MB
+are buffered for failover; everything else streams straight through, and
+failover only happens **before the first response byte** — mid-stream aborts
+are the client's own retry behaviour.
 
 When every account is spent, `pool.exhaustedMode` decides: `fail` (pass the 429
 through), `hold` (park until the soonest reset, up to `pool.holdMax`), or
