@@ -274,3 +274,62 @@ func TestClaudeAccountHasNoModelMap(t *testing.T) {
 			"would be a §4 mutation for no reason", m)
 	}
 }
+
+// Repeated polls must replace an account's windows, not accumulate them.
+//
+// Found live: a Kimi account had 105 windows — weekly/5h/parallel, 35 copies
+// each — because the poller set no Source, so the replace-by-source filter
+// compared "poll" against "" and matched nothing. It grows without bound, and
+// OverThreshold scans every window, so one stale copy below the threshold
+// would pin the account out of rotation for good.
+func TestPollingReplacesWindowsRatherThanAppending(t *testing.T) {
+	a := NewAccount("kimi", SourceYAML, "tok", "", 0, "")
+	a.Type = "kimi-oauth"
+
+	for i := 0; i < 5; i++ {
+		a.SetQuotaWindows([]QuotaWindow{
+			{Name: "weekly", Limit: 1, Used: 0.5, FetchedAt: time.Now()},
+			{Name: "5h", Limit: 1, Used: float64(i) / 10, FetchedAt: time.Now()},
+		})
+	}
+	got := a.QuotaWindows()
+	if len(got) != 2 {
+		names := make([]string, len(got))
+		for i, w := range got {
+			names[i] = w.Name
+		}
+		t.Fatalf("after 5 polls the account has %d windows, want 2: %v", len(got), names)
+	}
+	// And the newest values win.
+	for _, w := range got {
+		if w.Name == "5h" && w.Used != 0.4 {
+			t.Errorf("5h used = %v, want the last poll's 0.4", w.Used)
+		}
+	}
+}
+
+// Header-sourced and poll-sourced windows coexist: replacing one must not
+// disturb the other. That separation is the reason the filter exists.
+func TestWindowSourcesReplaceIndependently(t *testing.T) {
+	a := NewAccount("mixed", SourceYAML, "tok", "", 0, "")
+	a.setWindowsSourced("headers", []QuotaWindow{{Name: "5h", Limit: 1, Used: 0.2}})
+	a.SetQuotaWindows([]QuotaWindow{{Name: "weekly", Limit: 1, Used: 0.3}})
+
+	if got := len(a.QuotaWindows()); got != 2 {
+		t.Fatalf("got %d windows, want one per source", got)
+	}
+	// Re-poll: the header window must survive.
+	a.SetQuotaWindows([]QuotaWindow{{Name: "weekly", Limit: 1, Used: 0.9}})
+	got := a.QuotaWindows()
+	if len(got) != 2 {
+		t.Fatalf("re-polling changed the window count to %d", len(got))
+	}
+	for _, w := range got {
+		if w.Name == "5h" && w.Used != 0.2 {
+			t.Errorf("polling clobbered the header-sourced window: %v", w)
+		}
+		if w.Name == "weekly" && w.Used != 0.9 {
+			t.Errorf("weekly = %v, want the newest poll", w.Used)
+		}
+	}
+}

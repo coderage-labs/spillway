@@ -38,6 +38,9 @@ func PollKimiUsages(ctx context.Context, p *pool.Pool, logger *slog.Logger) {
 				Used:      u.Used,
 				ResetAt:   u.ResetAt,
 				FetchedAt: time.Now(),
+				// Without this the replace-by-source filter has nothing to
+				// match and every poll appends instead.
+				Source: "poll",
 			}
 		}
 		a.SetQuotaWindows(windows)

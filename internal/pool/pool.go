@@ -608,14 +608,27 @@ func (a *Account) SetQuotaWindows(w []QuotaWindow) {
 }
 
 // setWindowsSourced replaces windows from one source, keeping others.
+//
+// It stamps the source onto what it stores. Previously the caller chose the
+// filter and the payload carried the label, so a payload that set no Source
+// was filtered as "poll" and stored as "" — the filter matched nothing, and
+// every poll appended a fresh copy of every window. A Kimi account reached a
+// hundred and five windows in an afternoon, and because OverThreshold scans
+// all of them, a single stale one below the threshold would have pinned the
+// account out of rotation permanently.
 func (a *Account) setWindowsSourced(source string, w []QuotaWindow) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	kept := a.windows[:0]
+	// Fresh slice: a.windows[:0] aliases the backing array, so the append
+	// below can overwrite entries the loop has not read yet.
+	kept := make([]QuotaWindow, 0, len(a.windows)+len(w))
 	for _, x := range a.windows {
 		if x.Source != source {
 			kept = append(kept, x)
 		}
+	}
+	for i := range w {
+		w[i].Source = source
 	}
 	a.windows = append(kept, w...)
 }
