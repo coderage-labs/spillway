@@ -88,6 +88,12 @@ func (h *Handler) terminateConnect(w http.ResponseWriter, r *http.Request, host 
 		Certificates: []tls.Certificate{*leaf},
 		NextProtos:   ours,
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			// Log every hello. A CONNECT that never produces one means the
+			// client hung up before speaking TLS at all, which is a very
+			// different problem from one that rejects what we send back.
+			h.logger.Debug("tls hello",
+				"host", host, "sni", hello.ServerName,
+				"alpn", hello.SupportedProtos, "versions", hello.SupportedVersions)
 			if len(hello.SupportedProtos) == 0 {
 				return nil, nil // no ALPN offered; nothing to negotiate
 			}
@@ -98,20 +104,28 @@ func (h *Handler) terminateConnect(w http.ResponseWriter, r *http.Request, host 
 					}
 				}
 			}
-			// No overlap: mirror what the client asked for rather than
-			// selecting nothing. Remote Control's WebSocket offers the
-			// non-standard protocol "websocket" and expects to see it
-			// selected; answering with no ALPN at all makes it hang up just
-			// as surely as alert 120 did. Mirroring is safe because nothing
-			// downstream branches on the name — Go's HTTP server treats any
-			// negotiated protocol that is not "h2" as HTTP/1.1, which is
-			// exactly what a WebSocket handshake needs.
-			h.logger.Debug("alpn: mirroring the client's protocol",
+			// No overlap: negotiate NOTHING, and never mirror.
+			//
+			// Go's http.Server, after the handshake:
+			//
+			//   if proto := ...NegotiatedProtocol; validNextProto(proto) {
+			//       if fn := c.server.TLSNextProto[proto]; fn != nil { fn(...) }
+			//       return          // returns even with no handler
+			//   }
+			//
+			// validNextProto is false only for "", "http/1.1" and "http/1.0".
+			// So echoing back a protocol we cannot serve — Remote Control's
+			// WebSocket offers "websocket" — makes the server find no handler
+			// and close the connection without a word. An earlier attempt
+			// mirrored it and moved the failure from the handshake to
+			// immediately after it, which is worse: still dead, now silent.
+			//
+			// Selecting nothing leaves proto "", so the connection is served
+			// as HTTP/1.1 and the Upgrade request reaches relayUpgrade, which
+			// is what a WebSocket needs.
+			h.logger.Debug("alpn: no overlap, negotiating none so this serves as http/1.1",
 				"host", host, "client_offered", hello.SupportedProtos)
-			cfg := &tls.Config{
-				Certificates: []tls.Certificate{*leaf},
-				NextProtos:   []string{hello.SupportedProtos[0]},
-			}
+			cfg := &tls.Config{Certificates: []tls.Certificate{*leaf}}
 			return cfg, nil
 		},
 	}

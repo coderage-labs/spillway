@@ -373,7 +373,10 @@ func TestMITMAcceptsUnknownALPN(t *testing.T) {
 		// The case that failed. Remote Control's WebSocket offers exactly
 		// this, and expects it echoed back — selecting nothing makes it hang
 		// up just as alert 120 did.
-		{"unknown only", []string{"websocket"}, "websocket"},
+		// Nothing negotiated, deliberately: Go's server closes a connection
+		// whose protocol it has no handler for, so echoing "websocket" back
+		// would kill it just after the handshake instead of during.
+		{"unknown only", []string{"websocket"}, ""},
 		// A client offering both takes the one we know.
 		{"unknown plus known", []string{"websocket", "http/1.1"}, "http/1.1"},
 	} {
@@ -431,4 +434,68 @@ func (rig *mitmRig) dialThroughProxy(t *testing.T, alpn []string) (*tls.Conn, er
 		return nil, err
 	}
 	return tc, nil
+}
+
+// A WebSocket must survive the MITM: TLS with the client's own ALPN, then an
+// HTTP/1.1 Upgrade that reaches relayUpgrade and comes back 101.
+//
+// Nothing covered this before, which is why Remote Control could be broken by
+// the proxy while every test passed and every ordinary request worked. RC's
+// realtime channel is a WebSocket offering ALPN "websocket"; it died first at
+// alert 120, then — after a fix that echoed the protocol back — silently
+// inside Go's server, which closes any connection whose negotiated protocol
+// it has no handler for.
+func TestMITMRelaysAWebSocketUpgrade(t *testing.T) {
+	upgraded := make(chan string, 1)
+	rig := newMITMRig(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "not an upgrade", http.StatusBadRequest)
+			return
+		}
+		upgraded <- r.URL.Path
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\n"+
+			"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_, _ = io.WriteString(conn, "hello-from-upstream")
+	})
+
+	// The ALPN the real client offers.
+	conn, err := rig.dialThroughProxy(t, []string{"websocket"})
+	if err != nil {
+		t.Fatalf("TLS through the proxy failed: %v", err)
+	}
+	defer conn.Close()
+
+	host := strings.TrimPrefix(rig.upstream.URL, "https://")
+	req := "GET /v1/code/sessions/abc/bridge HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Upgrade: websocket\r\nConnection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Fatalf("write upgrade: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("no response to the upgrade: %v — the proxy closed the "+
+			"connection instead of relaying it", err)
+	}
+	got := string(buf[:n])
+	if !strings.Contains(got, "101") {
+		t.Fatalf("upgrade not relayed, got:\n%s", got)
+	}
+	select {
+	case path := <-upgraded:
+		if path != "/v1/code/sessions/abc/bridge" {
+			t.Errorf("upstream saw path %q", path)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("upstream never received the upgrade")
+	}
 }
