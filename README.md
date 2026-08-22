@@ -82,6 +82,12 @@ git clone git@github.com:coderage-labs/spillway.git
 cd spillway && go install ./cmd/spillway
 ```
 
+Or, once a release exists:
+
+```sh
+brew install coderage-labs/tap/spillway
+```
+
 `go install` writes to `$(go env GOPATH)/bin` and does not touch your `PATH`.
 If `spillway` is not found afterwards, that directory is missing from it:
 

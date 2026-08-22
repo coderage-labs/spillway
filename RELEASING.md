@@ -47,6 +47,27 @@ do not trigger further automation — and both fail quietly rather than loudly.
 
 ## Artefacts
 
+Built by [goreleaser](https://goreleaser.com) from `.goreleaser.yaml`, not by
+hand. release-please still owns the version, the tag and the release notes;
+goreleaser only cross-compiles, archives, checksums, uploads to the release
+that already exists (`release.mode: keep-existing`, so it cannot overwrite the
+changelog), and writes the Homebrew cask.
+
+The cask goes to `coderage-labs/homebrew-tap` using `HOMEBREW_TAP_TOKEN`, a
+fine-grained PAT with Contents:write on that repository only — `GITHUB_TOKEN`
+is scoped to the repository running the workflow and cannot reach another one.
+Both repositories must be public: brew downloads release assets
+unauthenticated.
+
+To check a config change without tagging anything:
+
+```sh
+goreleaser check
+HOMEBREW_TAP_TOKEN=dummy goreleaser release --snapshot --clean --skip=publish
+```
+
+
+
 Six per release: `darwin`/`linux` × `arm64`/`amd64` as `.tar.gz`, and
 `windows` × `arm64`/`amd64` as `.zip` — Explorer opens zip natively and needs
 a third-party tool for tarballs. All cross-compiled on the Linux runner;

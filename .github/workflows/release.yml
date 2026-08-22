@@ -72,93 +72,32 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 ./...
 
-  build:
+  # goreleaser replaces the previous build+publish jobs: the cross-compile
+  # matrix, the archive naming, the checksums and the asset upload are all in
+  # .goreleaser.yaml now, and it writes the Homebrew cask in the same pass.
+  release:
     needs: [plan, verify]
     if: needs.plan.outputs.ship == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - { goos: darwin, goarch: arm64 }
-          - { goos: darwin, goarch: amd64 }
-          - { goos: linux, goarch: arm64 }
-          - { goos: linux, goarch: amd64 }
-          - { goos: windows, goarch: amd64 }
-          - { goos: windows, goarch: arm64 }
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.tag }}
+          # goreleaser derives version metadata from git; a shallow clone
+          # leaves it describing the wrong thing.
           fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version: stable
 
-      # Cross-compiles cleanly because the whole binary is pure Go: the SQLite
-      # driver is modernc and the dashboard is embedded rather than built.
-      # CGO_ENABLED=0 is asserted rather than assumed — a cgo dependency
-      # creeping in should fail here loudly instead of silently producing a
-      # host-linked binary.
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-          VERSION: ${{ needs.plan.outputs.tag }}
-        run: |
-          set -euo pipefail
-          date="$(git -c log.showSignature=false log -1 --format=%cI)"
-          bin=spillway
-          [ "$GOOS" = windows ] && bin=spillway.exe
-          go build -trimpath \
-            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA} -X main.date=${date}" \
-            -o "$bin" ./cmd/spillway
-          name="spillway_${VERSION}_${GOOS}_${GOARCH}"
-          # zip on Windows: a .tar.gz needs a third-party tool to open there,
-          # and Explorer handles .zip natively.
-          if [ "$GOOS" = windows ]; then
-            zip -q "${name}.zip" "$bin" LICENSE README.md
-            archive="${name}.zip"
-          else
-            tar czf "${name}.tar.gz" "$bin" LICENSE README.md
-            archive="${name}.tar.gz"
-          fi
-          shasum -a 256 "$archive" > "${archive}.sha256"
-
-      - uses: actions/upload-artifact@v4
+      - uses: goreleaser/goreleaser-action@v6
         with:
-          name: spillway_${{ matrix.goos }}_${{ matrix.goarch }}
-          path: |
-            spillway_*.tar.gz*
-            spillway_*.zip*
-          if-no-files-found: error
-
-  publish:
-    needs: [plan, build]
-    if: needs.plan.outputs.ship == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Collect checksums
-        run: |
-          set -euo pipefail
-          cd dist
-          cat *.sha256 > checksums.txt
-          rm -f *.sha256
-          ls -la
-
-      # `gh release upload` rather than an action that creates the release:
-      # release-please already made it and owns the notes. Anything that
-      # writes the release body would overwrite the changelog with something
-      # worse.
-      - name: Attach assets
+          version: "~> v2"
+          args: release --clean
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ needs.plan.outputs.tag }}
-        run: gh release upload "$TAG" dist/* --clobber
+          # Uploads the artifacts to the release release-please already made.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Separate, because GITHUB_TOKEN cannot write to another repository.
+          # Fine-grained PAT, Contents:write on coderage-labs/homebrew-tap only.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

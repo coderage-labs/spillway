@@ -1,0 +1,88 @@
+# goreleaser replaces the hand-rolled build matrix: it cross-compiles,
+# archives, checksums, attaches to the release and writes the Homebrew
+# formula, from one description instead of sixty lines of shell.
+#
+# It does NOT own versioning. release-please decides the version and creates
+# the tag and the release with its changelog; goreleaser only adds binaries to
+# what already exists — hence release.mode below.
+version: 2
+
+project_name: spillway
+
+builds:
+  - id: spillway
+    main: ./cmd/spillway
+    binary: spillway
+    # Asserted, not assumed. Everything here is pure Go (modernc sqlite, an
+    # embedded dashboard), and a cgo dependency creeping in should fail the
+    # release loudly rather than quietly produce a host-linked binary.
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      # .Tag, not .Version: .Version strips the leading v, and the binary
+      # should report the same string the tag and the release use.
+      - -s -w
+      - -X main.version={{ .Tag }}
+      - -X main.commit={{ .FullCommit }}
+      - -X main.date={{ .CommitDate }}
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: spillway
+    name_template: "spillway_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    # zip on Windows: Explorer opens it natively and needs a third-party tool
+    # for a tarball.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  # release-please already created the release and owns its body — that body
+  # is the changelog. Anything that rewrites it replaces the changelog with
+  # something worse, so goreleaser only uploads artifacts.
+  mode: keep-existing
+
+# goreleaser's own changelog is unused for the same reason.
+changelog:
+  disable: true
+
+homebrew_casks:
+  # A cask, not a formula: `brews` is deprecated because Homebrew now wants
+  # pre-built binaries distributed as casks. `directory: Casks` follows —
+  # brew looks for casks there, not in Formula/.
+  - name: spillway
+    repository:
+      owner: coderage-labs
+      name: homebrew-tap
+      branch: main
+      # A fine-grained PAT with Contents:write on the tap ONLY. GITHUB_TOKEN
+      # cannot reach another repository, which is the whole reason this
+      # secret exists.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/coderage-labs/spillway"
+    description: "Pool your own AI subscription accounts behind one local proxy"
+    license: MIT
+    binaries: [spillway]
+    commit_author:
+      name: Kriskit
+      email: chris@coderage.co.uk
+    hooks:
+      post:
+        # Downloaded archives carry the quarantine attribute, and the binary
+        # is unsigned. Without this every install is met with "cannot be
+        # opened because the developer cannot be verified".
+        install: |
+          if OS.mac?
+            system "xattr", "-d", "-r", "com.apple.quarantine", "#{staged_path}/spillway"
+          end

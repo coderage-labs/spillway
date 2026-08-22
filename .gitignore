@@ -1,3 +1,6 @@
 /spillway
 .DS_Store
 coverage.out
+
+# goreleaser output
+dist/
