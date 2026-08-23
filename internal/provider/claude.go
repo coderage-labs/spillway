@@ -46,6 +46,38 @@ var claudeSpec = Spec{
 	},
 }
 
+// Unparsed headers (issue #53), for the next person before they re-derive
+// this from scratch. Measured live together on the same real response
+// (2026-08-22):
+//
+//	Anthropic-Ratelimit-Unified-Status=allowed
+//	Anthropic-Ratelimit-Unified-Reset=<unix seconds>
+//	Anthropic-Ratelimit-Unified-Fallback-Percentage=0.5
+//
+// Status and Reset read like a pool-wide summary of the per-window values
+// anthropicWindows already parses below (one "allowed"/one reset standing
+// in for 5h + 7d + 7d-fable combined) — plausible, but nobody has forced a
+// case where they disagree with the per-window headers to actually confirm
+// it. Nothing reads them; do not treat this paragraph as having verified
+// the theory.
+//
+// Fallback-Percentage=0.5 is flatly unexplained. It is not obviously the
+// same "fallback" model routing means elsewhere in the Anthropic API, and
+// 0.5 was observed on a request that had nothing evidently 50% about it.
+// Do not let anything depend on it, guess a meaning for it, or wire it into
+// selection until someone actually determines what it tracks.
+//
+// Anthropic-Ratelimit-Unified-Overage-Status and
+// -Overage-Disabled-Reason are deliberately NOT in the unparsed set above —
+// unlike the three headers named there, they are already read, by
+// anthropicOverage immediately below.
+//
+// anthropicRepresentativeClaimHeader (issue #53, below) is a fourth header
+// this package now reads: Anthropic-Ratelimit-Unified-Representative-Claim,
+// which is the closest thing to a direct answer for which window governed
+// a given response — see claudeGoverningWindows' own comment for how it
+// differs from that static guess.
+
 // overageAllowed is the set of statuses that mean extra usage will serve.
 //
 // "allowed_warning" is not a near-miss for "allowed": it means allowed AND
@@ -196,6 +228,51 @@ func claudeGoverningWindows(model string) []string {
 		windows = append(windows, "7d-fable")
 	}
 	return windows
+}
+
+// anthropicRepresentativeClaimHeader carries Anthropic's own answer to
+// "which window governed this response" (issue #53) — as opposed to
+// claudeGoverningWindows above, which only guesses which windows COULD
+// govern a request, from the model name, before any response exists.
+const anthropicRepresentativeClaimHeader = "anthropic-ratelimit-unified-representative-claim"
+
+// representativeClaimWindows translates the header's snake_case vocabulary
+// into spillway's own window names (issue #53).
+//
+// "five_hour" is the only entry here, and it is the only one that should
+// be: it is the only value anyone has actually read off a live response
+// (a fable request, where it named the 5h bucket rather than the weekly
+// fable one #24's static map would have predicted — see
+// claudeGoverningWindows). The other families almost certainly have their
+// own spellings ("seven_day"? "seven_day_opus_income"? — nobody knows),
+// but guessing them here would silently launder a guess as a measurement:
+// AnthropicRepresentativeClaim below reports anything not in this map as
+// unrecognised rather than pretending to translate it, and callers must
+// log that as "unknown", never as a mismatch — a mismatch claims to know
+// what the value should have been, and for everything but five_hour we
+// don't.
+var representativeClaimWindows = map[string]string{
+	"five_hour": "5h", // measured live, issue #53 — the only confirmed entry
+}
+
+// AnthropicRepresentativeClaim reads the representative-claim header and
+// translates it to spillway's window naming (issue #53).
+//
+// raw == "" (ok=false) means the header was absent, which is normal and not
+// a finding: not every response carries it, the same way a Haiku request
+// carries no 7d_oi-* headers at all (issue #25). Callers must treat that as
+// a no-op, never log it.
+//
+// window == "" with recognised == false but raw != "" means the header was
+// present with a value this package doesn't yet have a translation for —
+// log it as unknown, not as evidence of a mismatch.
+func AnthropicRepresentativeClaim(h http.Header) (raw, window string, recognised bool) {
+	raw = h.Get(anthropicRepresentativeClaimHeader)
+	if raw == "" {
+		return "", "", false
+	}
+	window, recognised = representativeClaimWindows[raw]
+	return raw, window, recognised
 }
 
 // anthropicReset bounds how long an exhausted window sits out, reading the
