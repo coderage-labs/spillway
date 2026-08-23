@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/coderage-labs/spillway/internal/config"
+	"github.com/coderage-labs/spillway/internal/events"
 	"github.com/coderage-labs/spillway/internal/pool"
+	"github.com/coderage-labs/spillway/internal/reqlog"
 )
 
 // holdRig: single-account pool whose upstream quota-429s until told
@@ -88,9 +90,13 @@ func TestHoldThenSuccess(t *testing.T) {
 	}
 }
 
-// Reset beyond the hold budget: the synthetic 429 comes back immediately.
+// Reset beyond the hold budget (issue #55): the synthetic 429 comes back
+// immediately, not after parking for holdMax. holdMax is 100ms and the
+// reset is an hour out — the bound is tight enough (150ms) that a planted
+// "hold for the capped budget, then fail" regression (the literal bug #55
+// reports) fails this, not just an absolute "didn't take forever" check.
 func TestHoldCapFallsThrough(t *testing.T) {
-	front, p := holdRig(t, "hold", "50ms", func(w http.ResponseWriter, r *http.Request) {
+	front, p := holdRig(t, "hold", "100ms", func(w http.ResponseWriter, r *http.Request) {
 		quota429WithReset(time.Now().Add(time.Hour))(w, r)
 	})
 	_ = p
@@ -104,15 +110,98 @@ func TestHoldCapFallsThrough(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("status = %d, want 429", resp.StatusCode)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("took %v — should fail fast past the budget", elapsed)
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Errorf("took %v — should fail fast past the budget, not park for it", elapsed)
 	}
 }
 
-// fail mode never holds.
+// Unknown reset (issue #55's design note): nothing is exhausted with a
+// reset to reason about — the only account is disabled, not merely
+// spent — so there is no "soonest reset" to compare against the deadline.
+// Today's behaviour (pre-#55) is to hold for the request's bounded budget
+// rather than guess "unknown means far away" and fail before the budget is
+// even spent; a disabled account never recovers on its own, but treating
+// unknown as an instant failure would do the same to a genuinely transient
+// unknown (e.g. every account momentarily mid-recovery).
+func TestHoldUnknownResetHoldsToBudget(t *testing.T) {
+	front, p := holdRig(t, "hold", "150ms", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be hit — the only account is disabled before selection")
+	})
+	p.Accounts()[0].Disable()
+
+	start := time.Now()
+	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429", resp.StatusCode)
+	}
+	elapsed := time.Since(start)
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("returned after %v — did not hold the unknown-reset budget", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("took %v — the unknown-reset hold must still be bounded by holdMax", elapsed)
+	}
+}
+
+// A fail-fast 429 must not be reported as a hold: reqlog.EventHeld means
+// the request actually parked, and this one never did.
+func TestFailFastNeverLogsHeld(t *testing.T) {
+	up := httptest.NewServer(quota429WithReset(time.Now().Add(time.Hour)))
+	t.Cleanup(up.Close)
+	cfg := config.Defaults()
+	cfg.Upstream = up.URL
+	cfg.Pool.ExhaustedMode = "hold"
+	cfg.Pool.HoldMax = "100ms"
+	acct := pool.NewAccount("a", pool.SourceYAML, "tok", "", 0, "")
+	p := pool.New([]*pool.Account{acct}, time.Now())
+	h, err := NewHandler(&cfg, testLogger(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := events.New()
+	h.SetHooks(Hooks{Events: broker})
+	sub := broker.Subscribe()
+	front := httptest.NewServer(h)
+	t.Cleanup(front.Close)
+
+	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+
+	deadline := time.After(time.Second)
+	sawExhausted := false
+	for !sawExhausted {
+		select {
+		case ev := <-sub:
+			if ev.Type == reqlog.EventHeld {
+				t.Fatal("fail-fast path published EventHeld — the request never held")
+			}
+			if ev.Type == reqlog.EventExhausted {
+				sawExhausted = true
+			}
+		case <-deadline:
+			t.Fatal("never observed EventExhausted for the fail-fast request")
+		}
+	}
+}
+
+// fail mode never holds. The reset (5s) sits comfortably inside holdMax
+// (30s), so a mode check that got lost in a refactor would hold for the
+// full 5s+ — the 500ms bound below only passes when "fail" is actually
+// honoured, not just when the reset happens to be sooner than the assertion
+// window.
 func TestFailModeReturns429Immediately(t *testing.T) {
 	front, _ := holdRig(t, "fail", "30s", func(w http.ResponseWriter, r *http.Request) {
-		quota429WithReset(time.Now().Add(600*time.Millisecond))(w, r)
+		quota429WithReset(time.Now().Add(5*time.Second))(w, r)
 	})
 	start := time.Now()
 	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
@@ -123,8 +212,8 @@ func TestFailModeReturns429Immediately(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("status = %d, want 429", resp.StatusCode)
 	}
-	if time.Since(start) > time.Second {
-		t.Error("fail mode held the request")
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("took %v — fail mode held the request", elapsed)
 	}
 }
 
