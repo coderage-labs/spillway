@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.11.0](https://github.com/coderage-labs/spillway/compare/v0.10.0...v0.11.0) (2026-08-23)
+
+
+### Features
+
+* log when Representative-Claim disagrees with the static window guess ([#53](https://github.com/coderage-labs/spillway/issues/53)) ([d4bc0c8](https://github.com/coderage-labs/spillway/commit/d4bc0c8a2113b00d2b0c269200fd48f58fb93293))
+
+
+### Fixes
+
+* fail fast on a hold whose reset is beyond holdMax ([#55](https://github.com/coderage-labs/spillway/issues/55)) ([9fca136](https://github.com/coderage-labs/spillway/commit/9fca1364b65a2ad08a5beab0c54a947907fbc0ec))
+* scope quota-429 exhaustion to the window that actually rejected ([#25](https://github.com/coderage-labs/spillway/issues/25), [#54](https://github.com/coderage-labs/spillway/issues/54)) ([8e7efbc](https://github.com/coderage-labs/spillway/commit/8e7efbcdab5aef167d85e6109ec76ddfcc92a682))
+
 ## [0.10.0](https://github.com/coderage-labs/spillway/compare/v0.9.0...v0.10.0) (2026-08-23)
 
 
