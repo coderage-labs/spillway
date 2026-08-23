@@ -25,7 +25,18 @@ func runLoginClaude(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: spillway login claude <name>")
 	}
-	name := args[0]
+	cfgPath, err := config.Path()
+	if err != nil {
+		return err
+	}
+	// Resolve before anything else — in particular before the OAuth round
+	// trip below — so an ambiguous query is refused immediately rather than
+	// after the browser comes back. Unknown input is not an error here: it
+	// is a new account name, resolved to itself (#44).
+	name, err := resolveLoginAccountName(cfgPath, args[0])
+	if err != nil {
+		return err
+	}
 
 	pkce, err := accounts.GeneratePKCE()
 	if err != nil {
@@ -59,10 +70,6 @@ func runLoginClaude(args []string) error {
 		profile = &accounts.Profile{}
 	}
 
-	cfgPath, err := config.Path()
-	if err != nil {
-		return err
-	}
 	// Refuse a duplicate before the secret is written, not after. Upsert
 	// rejects it either way, but writing first leaves token material in the
 	// keychain under a name no config will ever reference again.
@@ -100,7 +107,14 @@ func runLoginKimi(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: spillway login kimi <name>")
 	}
-	name := args[0]
+	cfgPath, err := config.Path()
+	if err != nil {
+		return err
+	}
+	name, err := resolveLoginAccountName(cfgPath, args[0])
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
@@ -123,10 +137,6 @@ func runLoginKimi(args []string) error {
 		AccessToken:  tokens.AccessToken,
 		RefreshToken: tokens.RefreshToken,
 	}); err != nil {
-		return err
-	}
-	cfgPath, err := config.Path()
-	if err != nil {
 		return err
 	}
 	if err := config.UpsertAccount(cfgPath, config.AccountConfig{
@@ -221,7 +231,13 @@ func runAccounts(args []string) error {
 	store := openSecrets()
 
 	if len(args) >= 2 && args[0] == "remove" {
-		name := args[1]
+		// Exact name or exact label only (#44) — remove is destructive, so
+		// the prefix/substring fallback tier resolveAccountName otherwise
+		// offers is refused rather than resolved. See resolveRemoveAccountName.
+		name, err := resolveRemoveAccountName(cfgPath, args[1])
+		if err != nil {
+			return err
+		}
 		if err := config.RemoveAccount(cfgPath, name); err != nil {
 			return err
 		}
@@ -232,10 +248,18 @@ func runAccounts(args []string) error {
 		return nil
 	}
 	if len(args) >= 2 && args[0] == "overage" {
-		return setOverage(cfgPath, args[1:])
+		name, err := resolveConfigAccountName(cfgPath, args[1])
+		if err != nil {
+			return err
+		}
+		return setOverage(cfgPath, append([]string{name}, args[2:]...))
 	}
 	if len(args) >= 2 && args[0] == "priority" {
-		return setPriority(cfgPath, args[1:])
+		name, err := resolveConfigAccountName(cfgPath, args[1])
+		if err != nil {
+			return err
+		}
+		return setPriority(cfgPath, append([]string{name}, args[2:]...))
 	}
 	if len(args) > 0 {
 		return fmt.Errorf("usage: spillway accounts [remove <name>] " +
