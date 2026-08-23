@@ -30,10 +30,13 @@ type stateJSON struct {
 	// preferentially; Total counts every configured account.
 	Usable int `json:"usable"`
 	Total  int `json:"total"`
-	// Reserve is eligible but over the rotate-away threshold: its quota
-	// headers say it is finished, so it is used only when nothing better
-	// exists. Counting these as usable made an account spillway was actively
-	// avoiding render as healthy.
+	// Reserve is eligible but over the rotate-away threshold for the general
+	// windows (5h/7d — issue #24): its quota headers say it is finished for
+	// ordinary Sonnet/Opus/Haiku traffic, so it is used only when nothing
+	// better exists. Counting these as usable made an account spillway was
+	// actively avoiding render as healthy. An account spent only on its
+	// fable bucket is NOT counted here — it is fully usable for the traffic
+	// this aggregate, model-agnostic view is about.
 	Reserve int `json:"reserve"`
 	// Exhausted, Parked and Disabled break down the rest. Disabled is the
 	// one that needs a human: the credential is gone.
@@ -83,7 +86,7 @@ func (s *Server) state() stateJSON {
 			st.Overage++
 		case a.State() == pool.StateExhausted:
 			st.Exhausted++
-		case a.OverThreshold(s.pool.Threshold()):
+		case a.OverThresholdFor("", s.pool.Threshold()):
 			st.Reserve++
 		default:
 			st.Usable++

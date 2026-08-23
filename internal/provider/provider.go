@@ -111,6 +111,21 @@ type Spec struct {
 	// unusable: every request is a hard unmapped-model error until someone
 	// hand-writes a map. An account's own modelMap always wins.
 	DefaultModelMap map[string]string
+	// GoverningWindows returns the quota window names that govern a given
+	// model (issue #24): Anthropic reports separate buckets per model
+	// family ("5h", "7d", "7d-fable"), and a bucket being spent for one
+	// family must not read as the whole account being done for every other.
+	//
+	// nil means the provider has no family-scoped buckets at all — Kimi's
+	// windows are just whatever /usages reports, with nothing to narrow by
+	// model — and callers must fall back to treating every recorded window
+	// as governing, which is the behaviour from before this field existed.
+	//
+	// A non-nil implementation must still resolve an unrecognised model: it
+	// has to return the provider's general windows rather than nothing, and
+	// must never guess a narrower family (e.g. fable) for a model it does
+	// not actually recognise as belonging to it.
+	GoverningWindows func(model string) []string
 	// OverageFromHeaders reads whether the account may keep serving past its
 	// subscription quota, and be billed for it. Nil for providers with no
 	// such concept — which is not the same as "not allowed", so callers must

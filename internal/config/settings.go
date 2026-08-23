@@ -19,12 +19,13 @@ import (
 // from "set to the zero value", so a partial update cannot silently reset a
 // field the caller never mentioned.
 type Settings struct {
-	ExhaustedMode   *string `json:"exhaustedMode,omitempty"`
-	HoldMax         *string `json:"holdMax,omitempty"`
-	SwitchThreshold *string `json:"switchThreshold,omitempty"`
-	ProbeOnStart    *bool   `json:"probeOnStart,omitempty"`
-	ProbeInterval   *string `json:"probeInterval,omitempty"`
-	CrossProvider   *bool   `json:"crossProvider,omitempty"`
+	ExhaustedMode      *string `json:"exhaustedMode,omitempty"`
+	HoldMax            *string `json:"holdMax,omitempty"`
+	SwitchThreshold    *string `json:"switchThreshold,omitempty"`
+	ProbeOnStart       *bool   `json:"probeOnStart,omitempty"`
+	ProbeInterval      *string `json:"probeInterval,omitempty"`
+	CrossProvider      *bool   `json:"crossProvider,omitempty"`
+	StickyAcrossFamily *bool   `json:"stickyAcrossFamily,omitempty"`
 	// Accounts maps account name -> editable per-account fields.
 	Accounts map[string]AccountSettings `json:"accounts,omitempty"`
 }
@@ -44,12 +45,14 @@ func CurrentSettings(c *Config) Settings {
 	mode, hold, probeIv := c.Pool.ExhaustedMode, c.Pool.HoldMax, c.Pool.ProbeInterval
 	thr := fmt.Sprintf("%g", c.Pool.SwitchThreshold)
 	cross := c.Pool.CrossProvider
+	sticky := c.Pool.StickyAcrossFamily
 	probe := c.Pool.ProbeOnStart == nil || *c.Pool.ProbeOnStart
 
 	s := Settings{
 		ExhaustedMode: &mode, HoldMax: &hold, SwitchThreshold: &thr,
 		ProbeOnStart: &probe, ProbeInterval: &probeIv, CrossProvider: &cross,
-		Accounts: map[string]AccountSettings{},
+		StickyAcrossFamily: &sticky,
+		Accounts:           map[string]AccountSettings{},
 	}
 	for _, a := range c.Accounts {
 		label, disabled, prio := a.Label, a.Disabled, a.Priority
@@ -75,6 +78,9 @@ func (s Settings) apply(cfg *Config) error {
 	}
 	if s.CrossProvider != nil {
 		cfg.Pool.CrossProvider = *s.CrossProvider
+	}
+	if s.StickyAcrossFamily != nil {
+		cfg.Pool.StickyAcrossFamily = *s.StickyAcrossFamily
 	}
 	if s.SwitchThreshold != nil {
 		var f float64

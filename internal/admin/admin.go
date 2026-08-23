@@ -322,7 +322,20 @@ type accountJSON struct {
 	// OverThreshold marks an account the selector will rotate away from even
 	// though nothing has 429'd it — its own quota headers say it is finished.
 	// Without this it renders as healthy while spillway quietly avoids it.
+	//
+	// This is the GENERAL windows only (5h/7d), the same ones an
+	// unrecognised or ordinary Sonnet/Opus request is judged against (issue
+	// #24) — not "any window", which is what let a spent fable bucket mark
+	// an otherwise-healthy account as done for every request. See
+	// FableSpent for the narrower family.
 	OverThreshold bool `json:"overThreshold,omitempty"`
+	// FableSpent names the one other family spillway currently knows about
+	// (§24 decision 3): true when the account's fable-specific weekly
+	// bucket (7d-fable) is over threshold, independently of OverThreshold.
+	// An account can be OverThreshold=false, FableSpent=true — fine for
+	// Sonnet/Opus, done for fable — and the two bits are how the dashboard
+	// says that instead of collapsing both families into one "spent" flag.
+	FableSpent bool `json:"fableSpent,omitempty"`
 	// Overage: the provider says extra usage is available on this account.
 	// Paid is true only when it would actually be spent — available AND
 	// permitted by config.
@@ -350,7 +363,8 @@ func (s *Server) accounts() []accountJSON {
 			Type:          a.Type,
 			Source:        a.Source,
 			InFlight:      a.InFlight(),
-			OverThreshold: a.OverThreshold(s.pool.Threshold()),
+			OverThreshold: a.OverThresholdFor("", s.pool.Threshold()),
+			FableSpent:    a.OverThresholdForWindow("7d-fable", s.pool.Threshold()),
 			Overage:       a.Overage().Available,
 			OverageReason: a.Overage().Reason,
 			OverageUsed:   a.Overage().Utilization,

@@ -36,6 +36,7 @@ var claudeSpec = Spec{
 		return ErrRate
 	},
 	WindowsFromHeaders:   anthropicWindows,
+	GoverningWindows:     claudeGoverningWindows,
 	OverageFromHeaders:   anthropicOverage,
 	RefreshFlavour:       AnthropicOAuth,
 	ClassifiableStatuses: []int{http.StatusTooManyRequests, http.StatusUnauthorized},
@@ -124,6 +125,26 @@ func anthropicWindows(h http.Header, now time.Time) []Window {
 		out = append(out, win)
 	}
 	return out
+}
+
+// claudeGoverningWindows implements Spec.GoverningWindows for Claude
+// (issue #24). "5h" and "7d" are account-wide — every request draws on them,
+// fable included, which is why anthropicRejected above checks only those two
+// for the hard-stop case. "7d-fable" is the extra weekly bucket fable models
+// draw on top of that; a model outside the fable family never touches it, so
+// its own bucket being spent must not make a Sonnet or Opus request look
+// like it is talking to a done account.
+//
+// An unrecognised model — including the empty string modelOf returns for a
+// malformed or absent body — resolves to the general windows, never to
+// fable: guessing narrower for a model this package cannot actually identify
+// would silently gate traffic on a bucket that has nothing to do with it.
+func claudeGoverningWindows(model string) []string {
+	windows := []string{"5h", "7d"}
+	if strings.Contains(strings.ToLower(model), "fable") {
+		windows = append(windows, "7d-fable")
+	}
+	return windows
 }
 
 func anthropicReset(h http.Header, now time.Time) time.Time {
