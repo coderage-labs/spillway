@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -216,5 +217,132 @@ func TestSetAccountOverageRejectsAnUnknownAccount(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "typo") {
 		t.Errorf("error %q should name the account", err)
+	}
+}
+
+// loginOwnedFields are the only AccountConfig fields a login flow is
+// entitled to overwrite on re-upsert (#45): the OAuth callers build their
+// payload from the exchange result and nothing else. Every field NOT named
+// here must survive a re-upsert exactly as the user left it. This list is
+// deliberately used only by the test, in the "what login is allowed to
+// change" direction: the production merge in accounts.go does not use an
+// equivalent list — see its doc comment for why that asymmetry is the
+// point.
+var loginOwnedFields = map[string]bool{
+	"Name":        true, // the match key; always equal on both sides here
+	"Type":        true,
+	"ExpiresAt":   true,
+	"AccountUUID": true,
+}
+
+// fillWithSentinels sets every AccountConfig field to a distinctive non-zero
+// value, keyed by the field's kind rather than its name, so a field added to
+// the struct in the future is picked up automatically. An unhandled kind
+// fails loudly rather than silently skipping the new field.
+func fillWithSentinels(t *testing.T, acct *AccountConfig) {
+	t.Helper()
+	v := reflect.ValueOf(acct).Elem()
+	rt := v.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		f := v.Field(i)
+		switch name {
+		case "Name":
+			f.SetString("work")
+			continue
+		case "Type":
+			// Must satisfy Validate's provider.Known check; the value itself
+			// is irrelevant to this test since Type is login-owned and gets
+			// overwritten by loginPayload regardless.
+			f.SetString("claude-oauth")
+			continue
+		case "Upstream":
+			// Must satisfy Validate's absolute-URL check.
+			f.SetString("https://sentinel-upstream.example.com")
+			continue
+		}
+		switch f.Kind() {
+		case reflect.String:
+			f.SetString("sentinel-" + name)
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			f.SetInt(4242)
+		case reflect.Ptr:
+			if f.Type().Elem().Kind() == reflect.Bool {
+				b := true
+				f.Set(reflect.ValueOf(&b))
+				continue
+			}
+			t.Fatalf("field %s: fillWithSentinels does not know this pointer type (%s); extend it", name, f.Type())
+		case reflect.Map:
+			m := reflect.MakeMap(f.Type())
+			m.SetMapIndex(reflect.ValueOf("k").Convert(f.Type().Key()), reflect.ValueOf("v").Convert(f.Type().Elem()))
+			f.Set(m)
+		default:
+			t.Fatalf("field %s: fillWithSentinels does not know this kind (%s); extend it for the new AccountConfig field", name, f.Kind())
+		}
+	}
+}
+
+// TestUpsertAccountPreservesUserSettingsOnRelogin is issue #45: re-upserting
+// an existing account with a login-shaped payload (only what OAuth actually
+// learned — type, expiry, provider uuid) must leave every OTHER field
+// exactly as the user set it: label, priority, disabled, allowOverage,
+// upstream, modelMap, and whatever gets added to AccountConfig next.
+//
+// Every field is asserted in its own subtest specifically so that breaking
+// one field (e.g. priority) fails on its own, not merged into one big
+// diff that could hide a partial regression.
+func TestUpsertAccountPreservesUserSettingsOnRelogin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spillway.yaml")
+
+	var original AccountConfig
+	fillWithSentinels(t, &original)
+	if err := UpsertAccount(path, original); err != nil {
+		t.Fatalf("seed UpsertAccount: %v", err)
+	}
+
+	// Shaped exactly like runLoginClaude's payload in cmd/spillway/login.go:
+	// name (to match), type, expiresAt, accountUuid. Nothing else.
+	loginPayload := AccountConfig{
+		Name:        "work",
+		Type:        "claude-oauth",
+		ExpiresAt:   999999999,
+		AccountUUID: "uuid-from-relogin",
+	}
+	if err := UpsertAccount(path, loginPayload); err != nil {
+		t.Fatalf("relogin UpsertAccount: %v", err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Accounts) != 1 {
+		t.Fatalf("accounts after relogin = %+v", cfg.Accounts)
+	}
+	got := cfg.Accounts[0]
+
+	rt := reflect.TypeOf(AccountConfig{})
+	ov := reflect.ValueOf(original)
+	lv := reflect.ValueOf(loginPayload)
+	gv := reflect.ValueOf(got)
+	for i := 0; i < rt.NumField(); i++ {
+		name := rt.Field(i).Name
+		t.Run(name, func(t *testing.T) {
+			gotVal := gv.Field(i).Interface()
+			if loginOwnedFields[name] {
+				want := lv.Field(i).Interface()
+				if !reflect.DeepEqual(gotVal, want) {
+					t.Errorf("login-owned field %s = %#v, want %#v (what login just learned)", name, gotVal, want)
+				}
+				return
+			}
+			want := ov.Field(i).Interface()
+			if !reflect.DeepEqual(gotVal, want) {
+				t.Errorf("user-set field %s = %#v, want %#v (preserved from before relogin)", name, gotVal, want)
+			}
+		})
 	}
 }

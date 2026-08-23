@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"reflect"
 )
 
 // UpsertAccount adds or replaces (by name) an account's metadata in the
@@ -14,8 +15,7 @@ func UpsertAccount(path string, acct AccountConfig) error {
 	}
 	for i := range cfg.Accounts {
 		if cfg.Accounts[i].Name == acct.Name {
-			acct.Upstream = firstNonEmpty(acct.Upstream, cfg.Accounts[i].Upstream)
-			cfg.Accounts[i] = acct
+			cfg.Accounts[i] = mergeLoginUpdate(cfg.Accounts[i], acct)
 			return validateAndWrite(path, cfg)
 		}
 	}
@@ -117,11 +117,38 @@ func validateAndWrite(path string, cfg *Config) error {
 	return writeFile(path, cfg)
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+// mergeLoginUpdate returns existing with every field acct actually set (left
+// at a non-zero value) applied on top of it. This exists because of #45:
+// UpsertAccount used to replace the whole struct on re-login, so the login
+// callers — which build their payload from nothing but the OAuth result
+// (type, expiresAt, accountUuid) — silently wiped every field the user had
+// configured by hand: label, priority, disabled, allowOverage, upstream,
+// modelMap. Re-authenticating is the documented recovery for a dead
+// credential, so that fired exactly when someone was already having a bad
+// day, and one of the wiped fields (allowOverage) is the one that costs
+// money.
+//
+// Reflection over zero-vs-non-zero, rather than a hand-maintained list of
+// "fields login is allowed to touch", is deliberate: a field added to
+// AccountConfig tomorrow defaults to preserved without this function
+// changing. Login has to opt a field IN by actually setting it to something
+// non-zero — which is exactly what it does today for type/expiresAt/uuid,
+// and for upstream on the kimi path. The one place this needs a second look
+// is if a future field's zero value is itself a meaningful "set to nothing"
+// (e.g. explicitly un-labelling an account by setting label back to "");
+// UpsertAccount cannot express that today, and did not before this change
+// either — SetAccountPriority/SetAccountOverage exist precisely because
+// those two already needed to say "set to exactly this, including zero".
+func mergeLoginUpdate(existing, acct AccountConfig) AccountConfig {
+	merged := existing
+	mv := reflect.ValueOf(&merged).Elem()
+	av := reflect.ValueOf(acct)
+	for i := 0; i < av.NumField(); i++ {
+		if f := av.Field(i); !f.IsZero() {
+			mv.Field(i).Set(f)
+		}
 	}
-	return b
+	return merged
 }
 
 // SetAccountOverage sets, clears or unsets an account's allowOverage.
