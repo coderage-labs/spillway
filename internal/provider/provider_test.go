@@ -334,3 +334,54 @@ func TestNoProviderNamedOutsideTheRegistry(t *testing.T) {
 		t.Errorf("%s — put the decision in the registry instead", o)
 	}
 }
+
+// Issue #24: Claude reports separate quota buckets per model family, and the
+// map from model to governing window(s) is provider knowledge, tested at the
+// registry rather than through the pool's selection behaviour alone.
+func TestClaudeGoverningWindows(t *testing.T) {
+	gw := claudeSpec.GoverningWindows
+	if gw == nil {
+		t.Fatal("claudeSpec.GoverningWindows is nil")
+	}
+
+	has := func(windows []string, name string) bool {
+		for _, w := range windows {
+			if w == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, tc := range []struct {
+		model     string
+		wantFable bool
+	}{
+		{"claude-sonnet-4-6", false},
+		{"claude-opus-5", false},
+		{"claude-haiku-4-5-20251001", false},
+		// Unrecognised entirely — must resolve to the general windows, never
+		// be silently treated as fable.
+		{"some-future-model-nobody-has-heard-of", false},
+		{"", false},
+		{"claude-opus-4-fable-preview", true},
+		{"FABLE", true}, // case-insensitive
+	} {
+		windows := gw(tc.model)
+		if !has(windows, "5h") || !has(windows, "7d") {
+			t.Errorf("GoverningWindows(%q) = %v, want 5h and 7d present", tc.model, windows)
+		}
+		if got := has(windows, "7d-fable"); got != tc.wantFable {
+			t.Errorf("GoverningWindows(%q) 7d-fable presence = %v, want %v", tc.model, got, tc.wantFable)
+		}
+	}
+}
+
+// Kimi has no family-scoped buckets at all — the map must say so (nil)
+// rather than pretend to know, so callers fall back to checking every
+// recorded window instead of guessing which one governs.
+func TestKimiHasNoGoverningWindows(t *testing.T) {
+	if kimiSpec.GoverningWindows != nil {
+		t.Error("kimiSpec.GoverningWindows should be nil: Kimi reports no per-family buckets")
+	}
+}

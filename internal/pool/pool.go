@@ -229,6 +229,15 @@ type Pool struct {
 	// account is skipped while another eligible account exists (§6.5
 	// predictive rotation). 0 → default 0.98. Guarded by mu (issue #13).
 	switchThreshold float64
+	// stickyAcrossFamily keeps a session pinned to its sticky account even
+	// when that account's governing window for the request's family is
+	// spent, rather than moving to a colder account with headroom (issue
+	// #24 decision 2). Off by default: the pool moves, the same way every
+	// other predictive-rotation decision in this package already prefers a
+	// healthier account over the one on file. On trades a possible refusal
+	// for keeping the account's prompt cache warm. Guarded by mu, same as
+	// switchThreshold above.
+	stickyAcrossFamily bool
 	// holds are the requests currently parked waiting for a reset, guarded
 	// by mu. See hold.go.
 	holds map[*hold]struct{}
@@ -346,6 +355,12 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// model governs which quota window(s) a request's headroom is judged
+	// against (issue #24) — "" (no body, or no top-level model field) reads
+	// as an unrecognised model to every provider's GoverningWindows, which
+	// resolves it to the general windows rather than guessing narrower.
+	model := modelOf(body)
+
 	usable := func(a *Account) bool {
 		if skip[a.Name] {
 			return false
@@ -372,9 +387,15 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 	}
 
 	if name, ok := p.sticky[session]; ok {
-		if a := p.find(name); a != nil && a.eligible() && !a.OverThreshold(p.threshold()) && usable(a) {
-			a.addInFlight(1)
-			return a
+		if a := p.find(name); a != nil && a.eligible() && usable(a) {
+			// stickyAcrossFamily short-circuits the threshold check
+			// entirely: decision 2 (#24) is "stay pinned no matter what",
+			// not "stay pinned unless every window is spent" — the whole
+			// point is trading a possible refusal for the warm cache.
+			if p.stickyAcrossFamily || !a.OverThresholdFor(model, p.threshold()) {
+				a.addInFlight(1)
+				return a
+			}
 		}
 		delete(p.sticky, session)
 	}
@@ -382,7 +403,7 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 	// Three tiers, cheapest first. Nothing in a later tier is touched while
 	// anything in an earlier one can serve.
 	best := p.leastLoaded(func(a *Account) bool {
-		return a.eligible() && !a.OverThreshold(p.threshold()) && usable(a)
+		return a.eligible() && !a.OverThresholdFor(model, p.threshold()) && usable(a)
 	})
 	if best == nil {
 		// Over-threshold but not yet rejected: the provider may still say
@@ -882,6 +903,9 @@ type Settings struct {
 	SwitchThreshold float64
 	CrossProvider   bool
 	AllowOverage    bool
+	// StickyAcrossFamily is pool.stickyAcrossFamily's config-facing value
+	// (issue #24 decision 2). See that field's comment.
+	StickyAcrossFamily bool
 	// Accounts, if non-empty, is applied to the matching pool accounts by
 	// Name. Left empty (e.g. from buildPool at startup, where per-account
 	// fields are already set at construction and park state is applied
@@ -907,6 +931,7 @@ func (p *Pool) Apply(s Settings) {
 	p.switchThreshold = s.SwitchThreshold
 	p.crossProvider = s.CrossProvider
 	p.allowOverage = s.AllowOverage
+	p.stickyAcrossFamily = s.StickyAcrossFamily
 	p.mu.Unlock()
 
 	if len(s.Accounts) == 0 {

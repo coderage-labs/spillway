@@ -106,6 +106,15 @@ type Config struct {
 		// underneath it can change the context ceiling and break forced tool
 		// calls (§6.18, §6.19). Same-provider rotation is unaffected.
 		CrossProvider bool `yaml:"crossProvider,omitempty"`
+		// StickyAcrossFamily keeps a session pinned to its sticky account
+		// even when the model-family bucket that request needs is spent on
+		// that account and another account has headroom (issue #24). Off by
+		// default: spillway moves to the healthier account and the session
+		// eats a cold prompt cache. Set true to keep the warm cache instead
+		// and risk the upstream refusal that account's own bucket would
+		// give — same-family requests where the sticky account still has
+		// headroom are never affected either way.
+		StickyAcrossFamily bool `yaml:"stickyAcrossFamily,omitempty"`
 		// MaxBufferBytes caps the request body held for cross-account retry.
 		// Larger bodies stream straight through with no failover, so this
 		// trades memory for how big a request can still be retried.

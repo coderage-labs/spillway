@@ -318,6 +318,7 @@ pool:
   canaryInterval: 2h        # check idle accounts for dead credentials; "0" = off
   maxBufferBytes: 8388608   # largest body still eligible for cross-account retry
   crossProvider: false      # see the cross-provider caveat below
+  stickyAcrossFamily: false # see "Per-family quota" below
 log:
   level: info
 accounts:
@@ -419,10 +420,38 @@ Selection prefers the lowest `priority` among accounts that can serve the
 request, then the least loaded — so a reserve account stays unused while a
 preferred one has headroom, but never blocks one when it is spent. Sessions
 stick to one account (prompt-cache affinity) and rotate only on quota
-exhaustion, or when an account crosses `pool.switchThreshold` in any window
-(predictive rotation — skipped while another eligible account exists, used
-anyway when it is the last one). Claude quota comes from
-`anthropic-ratelimit-*` response headers; Kimi's from `/v1/usages` polling.
+exhaustion, or when an account crosses `pool.switchThreshold` in the window
+that governs the request (predictive rotation — skipped while another
+eligible account exists, used anyway when it is the last one). Claude quota
+comes from `anthropic-ratelimit-*` response headers; Kimi's from
+`/v1/usages` polling.
+
+### Per-family quota (fable)
+
+Anthropic reports separate quota buckets per model family: `5h` and `7d` are
+account-wide, and `7d-fable` is an extra weekly bucket that only fable models
+draw on. An account whose fable bucket is spent is still fully usable for
+Sonnet and Opus, so it is deprioritised **only for a fable request** — the
+same "preference, not a ban" rule `switchThreshold` already applies, now
+scoped to the family the request actually needs rather than scanning every
+window regardless of what was asked. An unrecognised model resolves to the
+general (`5h`/`7d`) windows, never to fable — spillway does not guess a
+narrower family for a model it cannot identify. Kimi has no such buckets, so
+none of this changes its behaviour.
+
+This interacts with stickiness: a session pinned to an account whose fable
+bucket is spent will, by default, move to another account with headroom for
+a fable request — trading the prompt cache for an account that will not
+refuse the request. Set `pool.stickyAcrossFamily: true` to keep the session
+on its pinned account instead, eating the possible refusal to keep the cache
+warm. Same-family requests, and requests against an account with headroom,
+are unaffected either way.
+
+The dashboard and `/api/accounts` reflect the same scoping: `overThreshold`
+means the general windows are spent (what actually affects Sonnet/Opus/Haiku
+traffic), and a separate `fableSpent` flag names the fable bucket
+specifically, so an account can show as healthy and fable-spent at once
+without the two meanings colliding.
 
 **Rank accounts of different providers.** At equal priority the tie-break is
 in-flight count, and headroom below the threshold does not enter into it — so
@@ -512,8 +541,8 @@ probed unconditionally.
 
 The dashboard can edit an allowlisted subset of the config —
 `exhaustedMode`, `holdMax`, `switchThreshold`, `probeOnStart`,
-`probeInterval`, `crossProvider`, and per-account `label`, `priority` and
-`disabled`.
+`probeInterval`, `crossProvider`, `stickyAcrossFamily`, and per-account
+`label`, `priority` and `disabled`.
 Changes validate before they are written and apply to the running pool with no
 restart. Credentials are not editable and are not exposed: token material must
 not be reachable from a browser, loopback or not.
