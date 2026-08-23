@@ -33,7 +33,7 @@ func newMITMRig(t *testing.T, upstreamHandler http.HandlerFunc) *mitmRig {
 	upstream := httptest.NewTLSServer(upstreamHandler)
 	t.Cleanup(upstream.Close)
 
-	ca, err := mitm.EnsureCA(secrets.NewFake(), filepath.Join(t.TempDir(), "ca.pem"))
+	ca, err := mitm.EnsureCA(secrets.NewFake(), filepath.Join(t.TempDir(), "ca.pem"), testLogger())
 	if err != nil {
 		t.Fatalf("EnsureCA: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestConnectMITMValidatesUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	ca, err := mitm.EnsureCA(secrets.NewFake(), filepath.Join(t.TempDir(), "ca.pem"))
+	ca, err := mitm.EnsureCA(secrets.NewFake(), filepath.Join(t.TempDir(), "ca.pem"), testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

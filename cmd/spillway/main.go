@@ -350,7 +350,7 @@ func runServer(args []string) error {
 	if err != nil {
 		return err
 	}
-	if ca, err := mitm.EnsureCA(openSecrets(), pemPath); err != nil {
+	if ca, err := mitm.EnsureCA(openSecrets(), pemPath, logger); err != nil {
 		logger.Error("MITM CA unavailable — CONNECT termination disabled, base-URL mode still works", "err", err)
 	} else {
 		handler.SetMITM(ca)

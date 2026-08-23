@@ -10,6 +10,24 @@ type Fake struct {
 	mu   sync.Mutex
 	data map[string]Secrets
 	raw  map[string][]byte
+
+	// rawErr, when non-nil, is returned by GetRaw instead of the normal
+	// lookup — for tests simulating a locked/denied/transient keychain,
+	// which callers must treat differently from a genuine ErrNotFound
+	// (issue #65: conflating the two silently regenerates the MITM CA
+	// over a working one).
+	rawErr error
+}
+
+// SetGetRawErr makes every subsequent GetRaw call return err instead of
+// consulting the map. Pass nil to go back to normal lookups. err must not
+// be (and must not wrap) ErrNotFound — that has a distinct meaning
+// ("genuinely absent") that real Store implementations only return when
+// the entry truly isn't there; use Delete/plain absence for that case.
+func (f *Fake) SetGetRawErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rawErr = err
 }
 
 // NewFake returns an empty in-memory Store.
@@ -46,6 +64,9 @@ func (f *Fake) Delete(name string) error {
 func (f *Fake) GetRaw(name string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.rawErr != nil {
+		return nil, f.rawErr
+	}
 	v, ok := f.raw[name]
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, name)
