@@ -332,6 +332,15 @@ func TestUpsertAccountPreservesUserSettingsOnRelogin(t *testing.T) {
 		name := rt.Field(i).Name
 		t.Run(name, func(t *testing.T) {
 			gotVal := gv.Field(i).Interface()
+			// Token material is neither login-owned nor preserved: §5 keeps
+			// the config to metadata only, so a re-login clears it. See
+			// TestUpsertAccountClearsInlineTokenMaterial.
+			if name == "AccessToken" || name == "RefreshToken" {
+				if gotVal != interface{}("") {
+					t.Errorf("%s = %#v, want cleared — token material must not survive in the yaml", name, gotVal)
+				}
+				return
+			}
 			if loginOwnedFields[name] {
 				want := lv.Field(i).Interface()
 				if !reflect.DeepEqual(gotVal, want) {
@@ -344,5 +353,58 @@ func TestUpsertAccountPreservesUserSettingsOnRelogin(t *testing.T) {
 				t.Errorf("user-set field %s = %#v, want %#v (preserved from before relogin)", name, gotVal, want)
 			}
 		})
+	}
+}
+
+// A re-login must not leave token material in the yaml. §5 keeps the config
+// to metadata only, and the whole-struct overwrite that mergeLoginUpdate
+// replaced enforced that by accident — the login payload carries no tokens,
+// so a legacy inline one was zeroed on every login. Preserving every unset
+// field would have quietly undone it, and MigrateInlineSecrets does not help
+// here: it runs in `spillway server`, not in `spillway login`.
+func TestUpsertAccountClearsInlineTokenMaterial(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spillway.yaml")
+
+	if err := UpsertAccount(path, AccountConfig{
+		Name: "legacy", Type: "claude-oauth",
+		AccessToken: "inline-access", RefreshToken: "inline-refresh",
+		Label: "keepme", Priority: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A login-shaped payload: no tokens, as cmd/spillway/login.go builds it.
+	if err := UpsertAccount(path, AccountConfig{
+		Name: "legacy", Type: "claude-oauth", ExpiresAt: 123, AccountUUID: "u",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	accts, err := ListAccountConfigs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got AccountConfig
+	for _, a := range accts {
+		if a.Name == "legacy" {
+			got = a
+		}
+	}
+	if got.AccessToken != "" || got.RefreshToken != "" {
+		t.Errorf("token material survived a re-login: access=%q refresh=%q",
+			got.AccessToken, got.RefreshToken)
+	}
+	// And the user's settings still survive — the point of the fix.
+	if got.Label != "keepme" || got.Priority != 3 {
+		t.Errorf("user settings lost: label=%q priority=%d", got.Label, got.Priority)
+	}
+	// Raw file check: the yaml itself must not contain the secret.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "inline-access") || strings.Contains(string(raw), "inline-refresh") {
+		t.Error("the yaml on disk still contains token material")
 	}
 }

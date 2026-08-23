@@ -148,6 +148,16 @@ func mergeLoginUpdate(existing, acct AccountConfig) AccountConfig {
 			mv.Field(i).Set(f)
 		}
 	}
+	// Token material is the exception, and it is cleared rather than
+	// preserved. §5 is that the config holds metadata only, and the whole-
+	// struct overwrite this replaced happened to enforce that by accident:
+	// the login payload carries no tokens, so a legacy inline token in the
+	// yaml was zeroed every time. Preserving everything unset would quietly
+	// undo that. MigrateInlineSecrets scrubs these at daemon startup, but it
+	// runs in `spillway server` only — someone re-authenticating with the
+	// daemon down would otherwise keep a plaintext token on disk.
+	merged.AccessToken = ""
+	merged.RefreshToken = ""
 	return merged
 }
 
