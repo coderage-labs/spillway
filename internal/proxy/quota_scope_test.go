@@ -19,11 +19,11 @@ import (
 // no per-window signal at all.
 func TestAccountWideRejectionScoping(t *testing.T) {
 	tests := []struct {
-		name         string
-		acctType     string
-		rejected     []string
-		wantWide     bool
-		wantWideSet  []string
+		name        string
+		acctType    string
+		rejected    []string
+		wantWide    bool
+		wantWideSet []string
 	}{
 		{"claude 5h only", "claude-oauth", []string{"5h"}, true, []string{"5h"}},
 		{"claude 7d only", "claude-oauth", []string{"7d"}, true, []string{"7d"}},
