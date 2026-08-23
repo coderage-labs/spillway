@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/coderage-labs/spillway/compare/v0.11.0...v0.12.0) (2026-08-23)
+
+
+### Features
+
+* rewrite advisor models nested in tools[] on cross-provider rotation ([#29](https://github.com/coderage-labs/spillway/issues/29)) ([ddb919b](https://github.com/coderage-labs/spillway/commit/ddb919bbdf564f4aa3244a75302c0df3b4ee88d1))
+
 ## [0.11.0](https://github.com/coderage-labs/spillway/compare/v0.10.0...v0.11.0) (2026-08-23)
 
 
