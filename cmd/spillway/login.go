@@ -98,6 +98,7 @@ func runLoginClaude(args []string) error {
 	fmt.Printf("logged in: %s (%s, org %s) — token expires %s\n",
 		name, profile.Email, profile.OrgName,
 		time.UnixMilli(tokens.ExpiresAt).UTC().Format(time.RFC3339))
+	warnIfDaemonStale(name)
 	return nil
 }
 
@@ -150,6 +151,7 @@ func runLoginKimi(args []string) error {
 	fmt.Printf("logged in: %s (kimi) — token expires %s\n",
 		name, time.UnixMilli(tokens.ExpiresAtMs(time.Now())).UTC().Format(time.RFC3339))
 	fmt.Println("note: set modelMap for this account in the config, e.g. claude-sonnet-4-6 → your kimi model id (see README)")
+	warnIfDaemonStale(name)
 	return nil
 }
 
