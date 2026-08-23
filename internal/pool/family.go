@@ -16,6 +16,7 @@ package pool
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/coderage-labs/spillway/internal/provider"
 )
@@ -78,4 +79,52 @@ func (a *Account) OverThresholdForWindow(name string, frac float64) bool {
 		}
 	}
 	return false
+}
+
+// WindowRejectedFor reports whether any window governing model has been
+// confirmed rejected by upstream and has not yet reset (issue #54's
+// correction to #24).
+//
+// This is deliberately a different question from OverThresholdFor: that
+// one is a PREFERENCE built from proactive utilization headers ("prefer
+// another account, but serve from this one if it's all there is" —
+// TestFableSpentAccountStillChosenWhenOnlyOption pins that down). A window
+// named here means upstream has already returned a 429 for it — not a
+// maybe, a confirmed no until the recorded deadline — so this must EXCLUDE
+// the account for the family that window governs, even when it is the
+// only account in the pool. SelectExcept then returns nil and the request
+// takes the existing hold-then-429 path, the same as when every account is
+// StateExhausted.
+//
+// nil GoverningWindows (Kimi: no family-scoped provider) has nothing to
+// check — that provider's rejections go through pool.MarkExhausted's
+// account-wide StateExhausted instead, which eligible() already covers.
+func (a *Account) WindowRejectedFor(model string) bool {
+	gw := provider.For(a.Type).GoverningWindows
+	if gw == nil {
+		return false
+	}
+	governing := gw(model)
+	now := time.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, name := range governing {
+		if until, ok := a.windowRejected[name]; ok && until.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// WindowRejectedUntil exposes one window's rejection deadline (for the
+// admin/dashboard surface), false when none is recorded or it has already
+// passed.
+func (a *Account) WindowRejectedUntil(name string) (time.Time, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	until, ok := a.windowRejected[name]
+	if !ok || !until.After(time.Now()) {
+		return time.Time{}, false
+	}
+	return until, true
 }

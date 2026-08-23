@@ -95,6 +95,15 @@ type Account struct {
 	quota          map[string]string // last seen anthropic-ratelimit-* headers
 	quotaAt        time.Time
 	windows        []QuotaWindow // provider-agnostic quota state (§6.5)
+	// windowRejected records a confirmed upstream refusal per window name,
+	// keyed by the window's spillway name ("7d-fable"), until it resets
+	// (issue #54's correction to #24). Distinct from windows[]'s
+	// Used/Limit, which is a proactive, PREFER-not-refuse signal
+	// (OverThresholdFor): this is upstream having already said no for
+	// certain, so it must EXCLUDE selection for the family that window
+	// governs — including when the account is the only one in the pool —
+	// rather than merely deprioritise it.
+	windowRejected map[string]time.Time
 }
 
 // QuotaWindow is one provider quota bucket in a provider-agnostic shape:
@@ -370,6 +379,15 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 				return false
 			}
 		}
+		// A confirmed per-window rejection excludes outright (issue #54's
+		// correction to #24) — unlike OverThresholdFor below, which only
+		// deprioritises. Checked here, ahead of every tier AND the pin and
+		// sticky paths: a window upstream has already refused for certain
+		// must not be handed this request again just because it is the
+		// pinned/sticky/only account, or because nothing billable remains.
+		if a.WindowRejectedFor(model) {
+			return false
+		}
 		return CanServe(a, body) == nil
 	}
 
@@ -497,6 +515,43 @@ func (p *Pool) MarkExhausted(a *Account, until time.Time) {
 	a.state = StateExhausted
 	a.exhaustedUntil = until
 	a.mu.Unlock()
+}
+
+// MarkWindowRejected records that upstream has refused window `name` until
+// `until` (issue #54's correction to #24): a hard, confirmed exclusion for
+// whatever model that window governs, deliberately NOT touching a.state —
+// a fable-only rejection must leave the account StateOK so Sonnet/Haiku
+// requests (governed only by the account-wide "5h"/"7d" windows) keep
+// serving from it.
+//
+// This also updates the visible QuotaWindow of the same name (utilization
+// forced to 1.0, ResetAt set to until) so the admin/dashboard surface
+// (accountJSON.FableSpent, driven by OverThresholdForWindow) reflects the
+// rejection immediately, rather than waiting on whatever utilization value
+// happened to arrive on the header — which issue #54 explicitly does not
+// trust to already be at/above the switch threshold.
+func (p *Pool) MarkWindowRejected(a *Account, name string, until time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.windowRejected == nil {
+		a.windowRejected = map[string]time.Time{}
+	}
+	a.windowRejected[name] = until
+
+	now := time.Now()
+	for i := range a.windows {
+		if a.windows[i].Name == name {
+			a.windows[i].Used = 1
+			a.windows[i].Limit = 1
+			a.windows[i].ResetAt = until
+			a.windows[i].Source = "headers"
+			a.windows[i].FetchedAt = now
+			return
+		}
+	}
+	a.windows = append(a.windows, QuotaWindow{
+		Name: name, Limit: 1, Used: 1, ResetAt: until, Source: "headers", FetchedAt: now,
+	})
 }
 
 // RecordQuota stores the raw rate-limit headers for inspection and fills
