@@ -461,9 +461,14 @@ or if it would move a live session to another provider (§6.18: the client
 configured its capabilities from the first model it saw). Switching costs the
 prompt cache, which is per account.
 
-The pin is pool-wide, not per session, because sticky selection already is: the
-session key hashes `metadata.user_id`, which every Claude Code session on the
-machine shares.
+The pin is pool-wide: it is consulted before the sticky map, so it applies to
+every session at once. Sticky selection itself is **per session** — the session
+key hashes `metadata.user_id`, and Claude Code sends a JSON blob there
+carrying `device_id`, `account_uuid` and a per-session `session_id`, so two
+windows on one machine get different keys and can sit on different accounts.
+
+(An earlier version of this paragraph said every session on the machine shared
+one key. Measured on 2026-08-23: they do not.)
 
 A quota-429 marks the account exhausted until its reset and re-sends the
 buffered request on the next account, invisibly to the client. A transient

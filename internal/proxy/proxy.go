@@ -822,6 +822,22 @@ func retryAfterSeconds(h http.Header) int {
 
 // sessionKey identifies a logical session for sticky selection: a hash of
 // metadata.user_id when the buffered body carries one, else the client IP.
+//
+// Claude Code does not send a bare user id there. It sends a JSON string:
+//
+//	{"device_id":"…","account_uuid":"…","session_id":"…"}
+//
+// Hashing it whole therefore yields one key per *session*, not per user or per
+// machine — measured 2026-08-23, two `claude -p` invocations produced
+// different keys. That is what makes concurrent sessions spread across
+// accounts rather than piling onto one, and it is why the tie-break on
+// in-flight count in better() is reachable at all.
+//
+// Two consequences worth keeping in mind. The account_uuid inside that blob is
+// rewritten per account (§4, mutation #2) — but the rewrite happens after this
+// runs, on the outgoing copy, so a session's key never shifts underneath it.
+// And a session that somehow omits metadata falls back to the client IP, which
+// on one machine means every such session shares a key.
 func sessionKey(r *http.Request, body []byte, buffered bool) string {
 	if buffered {
 		var v struct {
