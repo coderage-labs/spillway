@@ -222,12 +222,28 @@ func TestFailedBindReleasesAlreadyOpenedListener(t *testing.T) {
 		t.Fatal("second login should have failed on the already-held [::1] family")
 	}
 
-	// If the failed attempt actually released 127.0.0.1 rather than
-	// leaking it, a third call asking only for 127.0.0.1 must still
-	// succeed.
-	third, err := StartCallback("c")
-	if err != nil {
-		t.Fatalf("127.0.0.1 leaked from the previous failed bind: %v", err)
+	// If the failed attempt actually released 127.0.0.1 rather than leaking
+	// it, a third call asking only for 127.0.0.1 must succeed.
+	//
+	// Retried rather than checked once: closing a listener does not make its
+	// port instantly rebindable on Windows, and a single immediate attempt
+	// read that delay as a leak and failed CI there while passing on macOS
+	// and Linux. The retry still distinguishes the two cases — a genuinely
+	// leaked listener is held for the life of the process and never becomes
+	// bindable, however long this waits.
+	var third *CallbackServer
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var err error
+		third, err = StartCallback("c")
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("127.0.0.1 never became bindable after the failed bind rolled back, "+
+				"so it was leaked rather than slow to release: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	third.Close()
 }
