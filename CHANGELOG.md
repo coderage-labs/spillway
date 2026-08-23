@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.10.0](https://github.com/coderage-labs/spillway/compare/v0.9.0...v0.10.0) (2026-08-23)
+
+
+### Features
+
+* warn on login if daemon still holds the old credential ([#46](https://github.com/coderage-labs/spillway/issues/46)) ([#49](https://github.com/coderage-labs/spillway/issues/49)) ([633cd30](https://github.com/coderage-labs/spillway/commit/633cd30025368d7cc7b156b75970cd2c2ff2741f))
+
+
+### Fixes
+
+* a partial bind must not count as owning the callback port ([#52](https://github.com/coderage-labs/spillway/issues/52)) ([06b1168](https://github.com/coderage-labs/spillway/commit/06b1168219060d1d824f185d6890cdb785c05375))
+* re-authenticating no longer wipes an account's label, priority and overage ([#50](https://github.com/coderage-labs/spillway/issues/50)) ([4492dea](https://github.com/coderage-labs/spillway/commit/4492dea98c122f770c3e1d8e4169f0968a77ccc1))
+* share the account-name resolver across login, remove, priority, overage ([#44](https://github.com/coderage-labs/spillway/issues/44)) ([#47](https://github.com/coderage-labs/spillway/issues/47)) ([cbc15c1](https://github.com/coderage-labs/spillway/commit/cbc15c15573a5f7d22d12648633e64bc7ae1ca35))
+
 ## [0.9.0](https://github.com/coderage-labs/spillway/compare/v0.8.0...v0.9.0) (2026-08-23)
 
 
