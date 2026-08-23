@@ -531,6 +531,51 @@ func TestKimiHasNoRejectedWindows(t *testing.T) {
 	}
 }
 
+// TestAnthropicRepresentativeClaimAbsentIsNoOp: a response carrying no
+// Representative-Claim header (the normal case — issue #25 already
+// established most responses carry no 7d_oi-* either) must translate to
+// "no data", never to "unknown" — those are different signals, and
+// callers only skip logging on the former.
+func TestAnthropicRepresentativeClaimAbsentIsNoOp(t *testing.T) {
+	raw, window, recognised := AnthropicRepresentativeClaim(http.Header{})
+	if raw != "" || window != "" || recognised {
+		t.Errorf("AnthropicRepresentativeClaim(no header) = (%q, %q, %v), want (\"\", \"\", false)",
+			raw, window, recognised)
+	}
+}
+
+// TestAnthropicRepresentativeClaimTranslatesMeasuredValue pins the one
+// entry issue #53 actually measured live: "five_hour" on a fable request.
+func TestAnthropicRepresentativeClaimTranslatesMeasuredValue(t *testing.T) {
+	h := http.Header{}
+	h.Set("Anthropic-Ratelimit-Unified-Representative-Claim", "five_hour")
+	raw, window, recognised := AnthropicRepresentativeClaim(h)
+	if raw != "five_hour" || window != "5h" || !recognised {
+		t.Errorf("AnthropicRepresentativeClaim(five_hour) = (%q, %q, %v), want (\"five_hour\", \"5h\", true)",
+			raw, window, recognised)
+	}
+}
+
+// TestAnthropicRepresentativeClaimUnrecognisedValueIsHandledGracefully: a
+// claim value this package has no translation for must come back as
+// unrecognised, not crash and not silently resolve to some window name —
+// so a caller can log it as "unknown" rather than mistake it for a
+// mismatch (which asserts we know what it SHOULD have said).
+func TestAnthropicRepresentativeClaimUnrecognisedValueIsHandledGracefully(t *testing.T) {
+	h := http.Header{}
+	h.Set("Anthropic-Ratelimit-Unified-Representative-Claim", "some_future_bucket_name")
+	raw, window, recognised := AnthropicRepresentativeClaim(h)
+	if raw != "some_future_bucket_name" {
+		t.Errorf("raw = %q, want the original header value preserved", raw)
+	}
+	if recognised {
+		t.Errorf("recognised = true for an unmapped claim value, want false")
+	}
+	if window != "" {
+		t.Errorf("window = %q for an unrecognised claim, want empty", window)
+	}
+}
+
 // TestClaudeRejectedWindowsNamesExactlyWhatFired is issue #54's widening of
 // #25's bool to actual names, asserted directly against RejectedWindows
 // (Classify's ErrQuota/ErrRate split already covers the bool behaviour in

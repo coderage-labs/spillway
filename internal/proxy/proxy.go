@@ -71,6 +71,9 @@ type Handler struct {
 	egress *egress.Egress
 	// hooks are optional observability sinks (request log, event broker).
 	hooks Hooks
+	// claims observes the Representative-Claim header against #24's static
+	// guess (issue #53). Never touches selection/rotation/eligibility.
+	claims *representativeClaimObserver
 }
 
 // Hooks are optional observability sinks wired by the daemon.
@@ -138,6 +141,7 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, p *pool.Pool) (*Handler
 		allowedHosts:  map[string]bool{},
 		exhaustedMode: cfg.Pool.ExhaustedMode,
 		holdMax:       cfg.PoolHoldMax(),
+		claims:        newRepresentativeClaimObserver(),
 	}
 	h.SetMITM(nil)
 	return h, nil
@@ -445,6 +449,12 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		if q, at := acct.Quota(); len(q) > 0 {
 			h.logger.Debug("quota signal", "account", name, "headers", q, "at", at)
 		}
+		// Issue #53: observe whether Anthropic's own Representative-Claim
+		// header agrees with #24's static model-name guess. Purely
+		// observational — it reads modelServed (what actually went
+		// upstream, mapped model included) and never feeds back into
+		// selection, rotation, or eligibility.
+		h.claims.check(h.logger, provider.For(acct.Type), modelServed, resp.Header)
 
 		// Upstream 5xx (issue #26): 529 Overloaded is the clear case, but this
 		// treats the whole 5xx range alike. Every provider's
