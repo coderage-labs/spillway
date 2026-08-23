@@ -203,12 +203,12 @@ that works over SSH.
 | `spillway server` | Run the daemon (proxy + admin listener) |
 | `spillway run [-- <claude args>]` | Spawn `claude` wired to the proxy; refuses if the daemon is down |
 | `spillway status [--json]` | Compact pool summary in the terminal; `--json` for state, accounts and recent requests |
-| `spillway accounts [remove <name>]` | List or remove accounts |
-| `spillway accounts overage <name> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — see [Extra usage](#extra-usage) |
-| `spillway accounts priority <name> <n>` | Order selection; lower is preferred |
+| `spillway accounts [remove <account>]` | List accounts, or remove one — `<account>` must be its exact name or exact label; a partial match is refused rather than guessed, since the wrong match deletes the wrong credential |
+| `spillway accounts overage <account> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — resolved by name, label or a unique prefix/substring — see [Extra usage](#extra-usage) |
+| `spillway accounts priority <account> <n>` | Order selection for one account — resolved by name, label or a unique prefix/substring; lower is preferred |
 | `spillway switch [<account>\|--auto] [--force]` | Point the pool at one account — resolved by name, label or a unique prefix/substring — until told otherwise; with no argument, reports what's pinned and what you could switch to |
-| `spillway login claude <name>` | Add a Claude account (OAuth PKCE) |
-| `spillway login kimi <name>` | Add a Kimi account (OAuth device flow) |
+| `spillway login claude <account>` | Add a Claude account (OAuth PKCE), or re-authenticate an existing one — `<account>` resolves against existing accounts by name, label or a unique prefix/substring first, and only becomes a new account's name if nothing matches |
+| `spillway login kimi <account>` | Add a Kimi account (OAuth device flow), or re-authenticate an existing one — same resolution as `login claude` |
 | `spillway statusline` | Print the Claude Code status line |
 | `spillway statusline install\|uninstall\|status` | Wire it into `~/.claude/settings.json` |
 | `spillway service install\|uninstall\|status` | Run the daemon in the background — launchd on macOS, a Scheduled Task on Windows, a systemd user unit on Linux |

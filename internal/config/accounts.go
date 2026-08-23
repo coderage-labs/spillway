@@ -50,6 +50,20 @@ func RemoveAccount(path, name string) error {
 	return fmt.Errorf("account %q not found in %s", name, path)
 }
 
+// ListAccountConfigs returns the accounts recorded in the config file at
+// path. Exported for #44's shared name resolver: `login`, `accounts
+// remove/priority/overage` all need to resolve a name against the config
+// with no daemon running, and a read for that purpose has no business
+// creating the file if it's missing — unlike LoadFrom, this reuses
+// readOrDefaults and never writes.
+func ListAccountConfigs(path string) ([]AccountConfig, error) {
+	cfg, err := readOrDefaults(path)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Accounts, nil
+}
+
 // FindAccountByUUID reports the existing account with this provider account
 // uuid, or "". Exported so login can refuse a duplicate BEFORE writing token
 // material: UpsertAccount rejects it too, but by then the secret is already
