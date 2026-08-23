@@ -2,7 +2,7 @@ package proxy
 
 // The replay suite (design doc §6.8a): a recorded Claude Code request is
 // pushed through the proxy against a mock upstream, and what arrives is
-// compared byte-for-byte against what was sent — except the three mutations
+// compared byte-for-byte against what was sent — except the four mutations
 // §4 permits.
 //
 // This is the test that guards the invariant the whole project rests on. If
@@ -10,6 +10,18 @@ package proxy
 // Claude-Code-on-subscription and bills it as metered API instead. Unit tests
 // on individual mutations cannot catch an accidental addition; only comparing
 // whole requests can.
+//
+// The fingerprint was widened from three mutations to four for issue #29:
+// spillway now also rewrites a "model" field nested directly inside a
+// tools[] element (an advisor model), because leaving it untouched let a
+// Claude model id reach a non-Claude provider verbatim on cross-provider
+// rotation — exactly what §6.12's hard error exists to prevent, just via a
+// second, previously-unguarded field. TestReplayPreservesRequestFingerprint
+// below still runs with no modelMap configured (a same-provider account), so
+// its "tools" field must stay wholly unchanged; the case where a modelMap IS
+// configured and DOES rewrite a nested model is covered separately by
+// TestNestedToolModelMapThroughProxy in nested_model_test.go, which is the
+// fingerprint test for mutation #4 specifically.
 
 import (
 	"bytes"

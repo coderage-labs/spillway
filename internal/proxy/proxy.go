@@ -712,8 +712,10 @@ func (h *Handler) buildRequest(r *http.Request, upstream string, acct *pool.Acco
 			body = patchAccountUUID(body, acct.AccountUUID)
 		}
 		if mm := acct.EffectiveModelMap(); len(mm) > 0 {
-			// §4 allowed mutation #3 (cross-provider only): map the model
-			// id. Unmapped → hard error, never forward a claude id to Kimi.
+			// §4 allowed mutations #3 and #4 (cross-provider only): map the
+			// top-level model id AND any advisor model nested in tools[]
+			// (issue #29). Unmapped → hard error, never forward a claude id
+			// to Kimi from either place.
 			var err error
 			body, err = rewriteModel(body, mm)
 			if err != nil {
