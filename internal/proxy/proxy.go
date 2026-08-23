@@ -549,7 +549,6 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		}
 
 		if classifyError(acct, resp, errBody) == errQuota {
-			until := quotaReset(acct, resp.Header)
 			// A quota rejection while serving on extra usage is a different
 			// event: the subscription was already gone, so what just ran out
 			// is the credit. RecordQuota above has taken the provider's word
@@ -571,15 +570,64 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 				}
 				onOverage = false
 			}
-			h.pool.MarkExhausted(acct, until)
+
+			// Issue #54: WHICH window(s) fired decides how far this
+			// rejection reaches. A provider with no per-window signal
+			// (RejectedWindows nil, e.g. Kimi) has nothing to narrow by and
+			// degrades to today's account-wide behaviour rather than
+			// silently stopping protecting the account's quota.
+			var rejected []string
+			if spec := provider.For(acct.Type); spec.RejectedWindows != nil {
+				rejected = spec.RejectedWindows(resp.Header)
+			}
+			accountWide, wideNames := accountWideRejection(acct.Type, rejected)
+
+			var until time.Time
+			var detail string
+			if accountWide {
+				until = quotaReset(acct, resp.Header, wideNames)
+				h.pool.MarkExhausted(acct, until)
+				detail = "quota exhausted until " + until.UTC().Format(time.RFC3339)
+				// A mixed rejection (e.g. 5h AND 7d-fable together) still
+				// gets its family-only member(s) recorded on their own
+				// reset, in addition to the account-wide exhaustion above:
+				// otherwise, once the account-wide window resets and
+				// StateExhausted clears, a fable bucket that is separately
+				// still rejected (its own reset can be much further out)
+				// would silently read as healthy again.
+				for _, winName := range rejected {
+					if containsStr(wideNames, winName) {
+						continue
+					}
+					h.pool.MarkWindowRejected(acct, winName, quotaReset(acct, resp.Header, []string{winName}))
+				}
+			} else {
+				// Only a family-scoped window (e.g. "7d-fable") rejected:
+				// the account itself is not done — Sonnet/Haiku, which
+				// never draw on that bucket (issue #24's
+				// GoverningWindows), must keep serving on it. Exclude
+				// selection for the family this window governs instead of
+				// touching account state at all (pool.Account.MarkWindowRejected,
+				// checked by SelectExcept's per-request eligibility, not
+				// the softer OverThresholdFor demotion).
+				for _, winName := range rejected {
+					wUntil := quotaReset(acct, resp.Header, []string{winName})
+					h.pool.MarkWindowRejected(acct, winName, wUntil)
+					if wUntil.After(until) {
+						until = wUntil
+					}
+				}
+				detail = "window(s) " + strings.Join(rejected, ",") + " rejected until " + until.UTC().Format(time.RFC3339)
+			}
+
 			h.pool.Done(acct)
 			tried[name] = true
 			acct = nil
 			rotatedQuota = true
-			h.logger.Info("quota exhausted, rotating",
-				"account", name, "until", until.UTC().Format(time.RFC3339))
-			h.publish(events.Event{Type: reqlog.EventRotatedQuota, Account: name,
-				Detail: "quota exhausted until " + until.UTC().Format(time.RFC3339)})
+			h.logger.Info("quota rejected, rotating",
+				"account", name, "accountWide", accountWide, "windows", rejected,
+				"until", until.UTC().Format(time.RFC3339))
+			h.publish(events.Event{Type: reqlog.EventRotatedQuota, Account: name, Detail: detail})
 			continue
 		}
 
@@ -749,40 +797,61 @@ func classifyError(acct *pool.Account, resp *http.Response, body []byte) errKind
 	}
 }
 
-// quotaReset bounds how long an exhausted account sits out. The provider
-// decides how: response headers, its own polled quota state, or a default.
-func quotaReset(acct *pool.Account, h http.Header) time.Time {
+// quotaReset bounds how long the named window(s) sit out. The provider
+// decides how: response headers restricted to windows, its own polled
+// quota state, or a default (issue #54: windows is the rejected set —
+// account-wide for a whole-account exhaustion, a single family name for a
+// window-scoped one — never every window this provider knows about).
+func quotaReset(acct *pool.Account, h http.Header, windows []string) time.Time {
 	now := time.Now()
 	fallback := time.Time{}
 	if reset, ok := acct.EarliestQuotaReset(); ok {
 		fallback = reset
 	}
-	return provider.For(acct.Type).ResetHint(h, now, fallback)
+	return provider.For(acct.Type).ResetHint(h, windows, now, fallback)
 }
 
-// resetHint derives when an exhausted account becomes eligible again: the
-// latest unified reset header (unix seconds), else retry-after, else 1h.
-func resetHint(h http.Header, now time.Time) time.Time {
-	var reset time.Time
-	for _, k := range []string{
-		"anthropic-ratelimit-unified-5h-reset",
-		"anthropic-ratelimit-unified-7d-reset",
-	} {
-		if v := h.Get(k); v != "" {
-			if sec, err := strconv.ParseFloat(v, 64); err == nil {
-				if t := time.Unix(int64(sec), 0); t.After(reset) {
-					reset = t
-				}
+// accountWideRejection reports whether any of the rejected window names is
+// account-wide — draws on every request regardless of model — and returns
+// that account-wide subset (issue #54).
+//
+// "Account-wide" is derived from the provider's own general/fallback
+// GoverningWindows("") rather than a hardcoded {"5h","7d"} list here: a
+// fourth family becomes account-wide or family-scoped by how claudeWindows
+// and claudeGoverningWindows classify it, never by an edit in this package.
+//
+// No RejectedWindows or no GoverningWindows at all means the provider has
+// no per-window signal to narrow by (Kimi today) — this degrades to
+// today's account-wide behaviour on any quota rejection, not to "never
+// exhaust": the absence of a signal is not evidence the rejection was
+// narrow. The same fallback covers the (should-not-happen, since Classify
+// uses the identical RejectedWindows to decide ErrQuota in the first
+// place) case of an empty rejected set reaching here regardless — fail
+// toward the wider, safer scope.
+func accountWideRejection(acctType string, rejected []string) (wide bool, wideNames []string) {
+	spec := provider.For(acctType)
+	if spec.RejectedWindows == nil || spec.GoverningWindows == nil || len(rejected) == 0 {
+		return true, rejected
+	}
+	general := spec.GoverningWindows("")
+	for _, r := range rejected {
+		for _, g := range general {
+			if r == g {
+				wideNames = append(wideNames, r)
+				break
 			}
 		}
 	}
-	if !reset.IsZero() && reset.After(now) {
-		return reset
+	return len(wideNames) > 0, wideNames
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
 	}
-	if ra := retryAfterSeconds(h); ra > 0 {
-		return now.Add(time.Duration(ra) * time.Second)
-	}
-	return now.Add(time.Hour)
+	return false
 }
 
 // backoff is the wait before a same-account rate-limit retry: the upstream

@@ -30,18 +30,19 @@ var claudeSpec = Spec{
 		if status != http.StatusTooManyRequests {
 			return ErrNone
 		}
-		if anthropicRejected(h) {
+		if len(anthropicRejectedWindows(h)) > 0 {
 			return ErrQuota
 		}
 		return ErrRate
 	},
+	RejectedWindows:      anthropicRejectedWindows,
 	WindowsFromHeaders:   anthropicWindows,
 	GoverningWindows:     claudeGoverningWindows,
 	OverageFromHeaders:   anthropicOverage,
 	RefreshFlavour:       AnthropicOAuth,
 	ClassifiableStatuses: []int{http.StatusTooManyRequests, http.StatusUnauthorized},
-	ResetHint: func(h http.Header, now, _ time.Time) time.Time {
-		return anthropicReset(h, now)
+	ResetHint: func(h http.Header, windows []string, now, _ time.Time) time.Time {
+		return anthropicReset(h, windows, now)
 	},
 }
 
@@ -101,19 +102,23 @@ func anthropicOverage(h http.Header) Overage {
 // the window, and the header prefix Anthropic uses for it
 // (anthropic-ratelimit-unified-<prefix>-{status,utilization,reset}).
 //
-// anthropicRejected and anthropicWindows both range over this list instead
-// of naming header strings themselves, so a fourth family (issue #25 found
-// "7d_oi" for fable the hard way, by a live 429 going unrecognised) is
-// covered everywhere by adding one line here, not by remembering to update
-// two functions in lockstep.
+// anthropicRejectedWindows and anthropicWindows both range over this list
+// instead of naming header strings themselves, so a fourth family (issue
+// #25 found "7d_oi" for fable the hard way, by a live 429 going
+// unrecognised) is covered everywhere by adding one line here, not by
+// remembering to update two functions in lockstep.
 var claudeWindows = []struct{ name, prefix string }{
 	{"5h", "5h"},
 	{"7d", "7d"},
 	{"7d-fable", "7d_oi"},
 }
 
-// anthropicRejected reports whether any window family's status header says
-// this request was refused for quota, not throttled.
+// anthropicRejectedWindows names which window families' status header say
+// this request was refused for quota, not throttled (issue #25, widened by
+// #54 from a bool to the actual names: knowing a request was quota-rejected
+// doesn't say how far to rotate — the proxy needs to know which window
+// fired so it can scope exhaustion to what that window actually governs,
+// instead of the whole account for every model).
 //
 // Checked as "!= allowed" rather than "== rejected": the measured
 // vocabulary is only {allowed, rejected} today (issue #25's comment), but
@@ -127,18 +132,19 @@ var claudeWindows = []struct{ name, prefix string }{
 //
 // An absent status header is neither: it means this request never engaged
 // that family (a Haiku request carries no 7d_oi-* at all, per #25), so it
-// is skipped rather than compared.
-func anthropicRejected(h http.Header) bool {
+// is skipped rather than compared — never returned as a rejected name.
+func anthropicRejectedWindows(h http.Header) []string {
+	var out []string
 	for _, w := range claudeWindows {
 		v := h.Get("anthropic-ratelimit-unified-" + w.prefix + "-status")
 		if v == "" {
 			continue
 		}
 		if v != "allowed" {
-			return true
+			out = append(out, w.name)
 		}
 	}
-	return false
+	return out
 }
 
 func anthropicWindows(h http.Header, now time.Time) []Window {
@@ -171,12 +177,14 @@ func anthropicWindows(h http.Header, now time.Time) []Window {
 // like it is talking to a done account — that is what this function's
 // narrowing is for.
 //
-// anthropicRejected (issue #25), by contrast, checks all three families:
-// it only decides whether a 429 the account actually received is quota or
-// throttle, before any model is known. It does not itself widen exhaustion
-// to the whole account — pool.MarkExhausted does that unconditionally on
-// any ErrQuota, with no per-window/per-model narrowing, which is a
-// separate, pre-existing gap this issue did not create and does not fix.
+// anthropicRejectedWindows (issue #25), by contrast, checks all three
+// families: it only decides whether a 429 the account actually received is
+// quota or throttle, before any model is known. This function is also the
+// answer to "which of the rejected names is account-wide" — the proxy
+// (issue #54) calls claudeGoverningWindows("") to get exactly this
+// account-wide set, and only widens exhaustion to the whole account when a
+// rejected window is in it; a fable-only rejection instead marks just that
+// window, never pool.MarkExhausted.
 //
 // An unrecognised model — including the empty string modelOf returns for a
 // malformed or absent body — resolves to the general windows, never to
@@ -190,13 +198,29 @@ func claudeGoverningWindows(model string) []string {
 	return windows
 }
 
-func anthropicReset(h http.Header, now time.Time) time.Time {
+// anthropicReset bounds how long an exhausted window sits out, reading the
+// reset header of only the named windows (issue #54).
+//
+// Before this, the reset was always the max of 5h and 7d's own headers,
+// regardless of which window actually rejected the request: a 5h-only
+// rejection (5h rejected, 7d allowed) borrowed 7d's far-off reset and
+// sidelined the account for the whole week instead of ~2 hours — measured
+// live on main, 144h instead of 2. Restricting the scan to `windows` (the
+// caller passes only the window(s) that actually fired) fixes that same
+// bug for every family at once, fable's 7d_oi included, rather than adding
+// a fourth special case here.
+//
+// windows empty (a provider with no per-window signal, or a defensive call
+// with nothing to narrow by) finds no reset header to read and falls
+// straight to the fallbacks below — never to a wider scan across every
+// window this package knows about.
+func anthropicReset(h http.Header, windows []string, now time.Time) time.Time {
 	var reset time.Time
-	for _, k := range []string{
-		"anthropic-ratelimit-unified-5h-reset",
-		"anthropic-ratelimit-unified-7d-reset",
-	} {
-		if v := h.Get(k); v != "" {
+	for _, w := range claudeWindows {
+		if !containsName(windows, w.name) {
+			continue
+		}
+		if v := h.Get("anthropic-ratelimit-unified-" + w.prefix + "-reset"); v != "" {
 			if sec, err := strconv.ParseFloat(v, 64); err == nil {
 				if t := time.Unix(int64(sec), 0); t.After(reset) {
 					reset = t
@@ -211,6 +235,15 @@ func anthropicReset(h http.Header, now time.Time) time.Time {
 		return now.Add(time.Duration(ra) * time.Second)
 	}
 	return now.Add(time.Hour)
+}
+
+func containsName(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func retryAfter(h http.Header) int {

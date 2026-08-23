@@ -233,19 +233,49 @@ func TestResetHintPrefersProviderSignal(t *testing.T) {
 	now := time.Date(2026, 8, 22, 6, 0, 0, 0, time.UTC)
 
 	// Kimi has no reset headers; it falls back to its polled quota state.
+	// windows is always empty for Kimi (no header-scoped families) — passed
+	// as nil here the same as a real caller would.
 	polled := now.Add(90 * time.Minute)
-	if got := For("kimi-oauth").ResetHint(http.Header{}, now, polled); !got.Equal(polled) {
+	if got := For("kimi-oauth").ResetHint(http.Header{}, nil, now, polled); !got.Equal(polled) {
 		t.Errorf("kimi should use its polled reset, got %v", got)
 	}
 	// With nothing to go on, an hour rather than forever.
-	if got := For("kimi-oauth").ResetHint(http.Header{}, now, time.Time{}); !got.Equal(now.Add(time.Hour)) {
+	if got := For("kimi-oauth").ResetHint(http.Header{}, nil, now, time.Time{}); !got.Equal(now.Add(time.Hour)) {
 		t.Errorf("kimi default = %v, want +1h", got)
 	}
-	// Anthropic reads its own headers and ignores the fallback.
+	// Anthropic reads its own headers and ignores the fallback, restricted
+	// to the windows named — here just "5h", the one that was rejected.
 	h := http.Header{}
 	h.Set("anthropic-ratelimit-unified-5h-reset", itoa(now.Add(30*time.Minute).Unix()))
-	if got := For("claude-oauth").ResetHint(h, now, polled); !got.Equal(now.Add(30 * time.Minute)) {
+	if got := For("claude-oauth").ResetHint(h, []string{"5h"}, now, polled); !got.Equal(now.Add(30 * time.Minute)) {
 		t.Errorf("claude should use its header, got %v", got)
+	}
+}
+
+// TestResetHintScopesToRejectedWindowOnly is issue #54's third defect,
+// reproduced directly: a 5h-only rejection (5h rejected, 7d allowed and
+// far out) must bound the deadline to 5h's own reset, not the max across
+// every window this account has. Before the fix, anthropicReset always
+// scanned both 5h and 7d regardless of which was actually rejected, so a
+// 5h-only rejection silently borrowed 7d's ~144h-out reset — measured live
+// on main (2026-08-22): the account sat out 144h instead of ~2h.
+func TestResetHintScopesToRejectedWindowOnly(t *testing.T) {
+	now := time.Date(2026, 8, 22, 6, 0, 0, 0, time.UTC)
+	h := http.Header{}
+	h.Set("anthropic-ratelimit-unified-5h-status", "rejected")
+	h.Set("anthropic-ratelimit-unified-5h-reset", itoa(now.Add(2*time.Hour).Unix()))
+	h.Set("anthropic-ratelimit-unified-7d-status", "allowed")
+	h.Set("anthropic-ratelimit-unified-7d-reset", itoa(now.Add(144*time.Hour).Unix()))
+
+	rejected := For("claude-oauth").RejectedWindows(h)
+	if len(rejected) != 1 || rejected[0] != "5h" {
+		t.Fatalf("RejectedWindows = %v, want exactly [5h]", rejected)
+	}
+
+	got := For("claude-oauth").ResetHint(h, rejected, now, time.Time{})
+	want := now.Add(2 * time.Hour)
+	if !got.Equal(want) {
+		t.Errorf("ResetHint(rejected=%v) = %v, want %v (5h's own reset, not 7d's 144h)", rejected, got, want)
 	}
 }
 
@@ -488,4 +518,73 @@ func TestKimiHasNoGoverningWindows(t *testing.T) {
 	if kimiSpec.GoverningWindows != nil {
 		t.Error("kimiSpec.GoverningWindows should be nil: Kimi reports no per-family buckets")
 	}
+}
+
+// Kimi's classification is body-based (kimiSpec.Classify); it has no
+// per-window header signal to name a rejection by, so RejectedWindows must
+// be nil too (issue #54) — a caller checking for nil is how it knows to
+// degrade to account-wide behaviour instead of trying to narrow with
+// nothing to narrow by.
+func TestKimiHasNoRejectedWindows(t *testing.T) {
+	if kimiSpec.RejectedWindows != nil {
+		t.Error("kimiSpec.RejectedWindows should be nil: Kimi has no header-scoped windows")
+	}
+}
+
+// TestClaudeRejectedWindowsNamesExactlyWhatFired is issue #54's widening of
+// #25's bool to actual names, asserted directly against RejectedWindows
+// (Classify's ErrQuota/ErrRate split already covers the bool behaviour in
+// TestClaudeClassification above).
+func TestClaudeRejectedWindowsNamesExactlyWhatFired(t *testing.T) {
+	rw := claudeSpec.RejectedWindows
+	if rw == nil {
+		t.Fatal("claudeSpec.RejectedWindows is nil")
+	}
+
+	eq := func(t *testing.T, got, want []string) {
+		t.Helper()
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("got %v, want %v", got, want)
+			}
+		}
+	}
+
+	t.Run("5h only", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-5h-status", "rejected")
+		h.Set("anthropic-ratelimit-unified-7d-status", "allowed")
+		eq(t, rw(h), []string{"5h"})
+	})
+
+	t.Run("5h and fable both rejected, 7d allowed", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-5h-status", "rejected")
+		h.Set("anthropic-ratelimit-unified-7d-status", "allowed")
+		h.Set("anthropic-ratelimit-unified-7d_oi-status", "rejected")
+		eq(t, rw(h), []string{"5h", "7d-fable"})
+	})
+
+	t.Run("fable only", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-5h-status", "allowed")
+		h.Set("anthropic-ratelimit-unified-7d-status", "allowed")
+		h.Set("anthropic-ratelimit-unified-7d_oi-status", "rejected")
+		eq(t, rw(h), []string{"7d-fable"})
+	})
+
+	// The measured Haiku case (#25): no 7d_oi-* headers at all must never
+	// be read as a rejected name, only as "not engaged".
+	t.Run("haiku: fable header absent entirely", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-5h-status", "allowed")
+		h.Set("anthropic-ratelimit-unified-7d-status", "allowed")
+		got := rw(h)
+		if len(got) != 0 {
+			t.Errorf("got %v, want no rejected windows", got)
+		}
+	})
 }

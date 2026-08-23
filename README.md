@@ -453,6 +453,22 @@ traffic), and a separate `fableSpent` flag names the fable bucket
 specifically, so an account can show as healthy and fable-spent at once
 without the two meanings colliding.
 
+**A confirmed 429 is stronger than "over threshold".** The above is all
+proactive — a *preference*, built from utilization headers, that still
+serves the request when nothing better exists. An actual quota-429 from
+upstream is upgraded from a maybe to a certainty, and is scoped the same
+way: a fable-only rejection excludes the account from fable selection
+entirely (never served for fable again until that window's own reset,
+even if it's the only account left — the request falls through to the
+usual hold-then-429 path instead) while leaving it fully eligible for
+Sonnet/Opus/Haiku, which a fable rejection never touches. A rejection of
+`5h` or `7d` still exhausts the whole account as before, and now waits out
+only the window that actually rejected the request rather than the
+longest reset among every window the account has — a fable-only 429 used
+to be misread as a same-account throttle and retried three times, and a
+5h-only 429 used to borrow 7d's far longer reset and sideline the account
+for up to a week when it should have cleared in a couple of hours.
+
 **Rank accounts of different providers.** At equal priority the tie-break is
 in-flight count, and headroom below the threshold does not enter into it — so
 whichever account happens to be idle at that instant wins the session, and

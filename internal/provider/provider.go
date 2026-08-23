@@ -91,6 +91,20 @@ type Spec struct {
 	Capabilities Capabilities
 	// Classify decides what an upstream failure means for the pool.
 	Classify func(status int, header http.Header, body []byte) ErrKind
+	// RejectedWindows names which quota window(s) (spillway's names, e.g.
+	// "5h", "7d-fable") a response's headers say were refused for quota —
+	// issue #54's fix to #25: knowing THAT a request was quota-rejected is
+	// not enough to decide how far to rotate; knowing WHICH window fired is
+	// what lets the proxy exhaust only the scope that window actually
+	// governs, instead of the whole account for every model.
+	//
+	// nil means this provider has no per-window rejection signal at all
+	// (Kimi: classification is body-based — see kimiSpec.Classify — with no
+	// named buckets to report). Callers must then fall back to today's
+	// account-wide behaviour on any ErrQuota, never to "never exhaust": the
+	// absence of a signal to narrow by is not evidence the rejection was
+	// narrow.
+	RejectedWindows func(header http.Header) []string
 	// ClassifiableStatuses are the response codes worth reading a body for.
 	// Kimi overloads 401 and 403; Anthropic does not, and reading bodies it
 	// never classifies would buffer responses for nothing.
@@ -131,9 +145,17 @@ type Spec struct {
 	// such concept — which is not the same as "not allowed", so callers must
 	// check Known before acting.
 	OverageFromHeaders func(header http.Header) Overage
-	// ResetHint bounds how long an exhausted account sits out. fallback is
-	// the account's own last-known reset, if it has one.
-	ResetHint func(header http.Header, now time.Time, fallback time.Time) time.Time
+	// ResetHint bounds how long an exhausted account, or one rejected window,
+	// sits out. windows names which window(s)' reset headers to read (issue
+	// #54): the caller passes only the rejected ones — the account-wide
+	// subset when exhausting the whole account, a single family name when
+	// scoping to just that bucket — so the deadline reflects what actually
+	// fired rather than the max across every window this provider knows
+	// about (a 5h-only rejection must not borrow 7d's far-off reset). A
+	// provider with no header-scoped windows (Kimi) ignores it and falls
+	// back to fallback / now+1h same as before. fallback is the account's
+	// own last-known reset, if it has one.
+	ResetHint func(header http.Header, windows []string, now time.Time, fallback time.Time) time.Time
 	// RefreshFlavour names the credential-refresh shape. The implementation
 	// itself stays with the Manager, which owns the base URLs and HTTP
 	// client a package-level registry could not hold per-instance. A new

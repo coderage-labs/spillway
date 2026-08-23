@@ -79,7 +79,10 @@ var kimiSpec = Spec{
 	// 403 carries quota/billing here, and 401 can be a model-id error.
 	ClassifiableStatuses: []int{
 		http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusForbidden},
-	ResetHint: func(_ http.Header, now, fallback time.Time) time.Time {
+	// Kimi has no header-scoped windows (RejectedWindows/GoverningWindows
+	// are both nil), so windows is always empty here — ignored, same as
+	// before this parameter existed.
+	ResetHint: func(_ http.Header, _ []string, now, fallback time.Time) time.Time {
 		if fallback.After(now) {
 			return fallback
 		}
