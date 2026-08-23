@@ -45,13 +45,51 @@ type callbackResult struct {
 	err  error
 }
 
+// loopbackFamilies reports which loopback address families this call to
+// StartCallback must bind. It is a package variable, not a hard-coded call
+// inside StartCallback, purely so tests can force a single-family host
+// without StartCallback itself knowing it is under test.
+var loopbackFamilies = probeLoopbackFamilies
+
+// probeLoopbackFamilies determines which of 127.0.0.1 and ::1 this host can
+// actually serve loopback traffic on.
+//
+// It must NOT probe by binding LoopbackPort itself: that would either race
+// the bind StartCallback is about to make (two goroutines/processes both
+// trying the real port at once) or falsely report the port as busy because
+// of the probe's own listener sitting on it. Instead each candidate is
+// bound on an ephemeral port (":0") and immediately closed. Whether the
+// kernel will hand out *a* socket on that address at all is a property of
+// the host's network stack (is the IPv6 loopback interface up, etc.),
+// independent of which port number is requested — so probing on :0 answers
+// the "can this host do this family" question honestly without ever
+// touching :54545.
+func probeLoopbackFamilies() []string {
+	var supported []string
+	for _, host := range []string{"127.0.0.1", "[::1]"} {
+		ln, err := net.Listen("tcp", host+":0")
+		if err != nil {
+			continue
+		}
+		ln.Close()
+		supported = append(supported, host)
+	}
+	return supported
+}
+
 // StartCallback binds the loopback listener. A bind failure is not fatal to
 // login — the caller falls back to paste — so the error explains rather than
 // stops.
 //
-// Both 127.0.0.1 and ::1 are bound where possible: "localhost" resolves to
-// either depending on the machine, and binding only v4 on a v6-first host
-// gives the user a browser that cannot connect to a server that is running.
+// "localhost" resolves to 127.0.0.1 or ::1 depending on the machine and the
+// resolver's preference, and the redirect URI has to match whichever the
+// browser actually uses. So this binds every family the host supports, not
+// a best-effort subset: probeLoopbackFamilies (or its test override) says
+// what the host can do, and every one of those must bind here or the whole
+// call fails. A host that only has one family still gets a working server
+// on that family; a host with both must get both, because a partial bind
+// leaves the other family's traffic reaching nothing — or, worse, another
+// login's server.
 func StartCallback(state string) (*CallbackServer, error) {
 	cs := &CallbackServer{got: make(chan callbackResult, 1), uri: LoopbackRedirectURI}
 
@@ -85,15 +123,23 @@ func StartCallback(state string) (*CallbackServer, error) {
 		http.NotFound(w, r)
 	})
 
-	for _, host := range []string{"127.0.0.1", "[::1]"} {
+	families := loopbackFamilies()
+	if len(families) == 0 {
+		return nil, fmt.Errorf("no loopback address family available on this host")
+	}
+
+	for _, host := range families {
 		ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, LoopbackPort))
 		if err != nil {
-			continue
+			// This family was just probed as available on an ephemeral
+			// port, so failing on the real one means something else is
+			// already bound to it — not that the host lacks the family.
+			for _, opened := range cs.lns {
+				opened.Close()
+			}
+			return nil, fmt.Errorf("cannot listen on localhost:%d (in use?): %w", LoopbackPort, err)
 		}
 		cs.lns = append(cs.lns, ln)
-	}
-	if len(cs.lns) == 0 {
-		return nil, fmt.Errorf("cannot listen on localhost:%d (in use?)", LoopbackPort)
 	}
 
 	cs.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}

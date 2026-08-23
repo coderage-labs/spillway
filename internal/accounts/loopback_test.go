@@ -142,6 +142,184 @@ func TestSecondCallbackServerFailsToBind(t *testing.T) {
 	}
 }
 
+// withFamilies forces loopbackFamilies for the duration of one test, so a
+// test can exercise a single-family or dual-family host regardless of what
+// this machine actually supports.
+func withFamilies(t *testing.T, families []string) {
+	t.Helper()
+	orig := loopbackFamilies
+	loopbackFamilies = func() []string { return families }
+	t.Cleanup(func() { loopbackFamilies = orig })
+}
+
+// withFamiliesSequence gives successive StartCallback calls different family
+// lists — the first call in the sequence gets seqs[0], the second seqs[1],
+// and so on (the last entry repeats if more calls are made than entries
+// given). This is what actually reproduces the bug from #51: the two
+// StartCallback calls in a real partial-bind race don't request the same
+// set — one login ends up with fewer families bound than the other asks
+// for.
+func withFamiliesSequence(t *testing.T, seqs ...[]string) {
+	t.Helper()
+	orig := loopbackFamilies
+	i := 0
+	loopbackFamilies = func() []string {
+		f := seqs[i]
+		if i < len(seqs)-1 {
+			i++
+		}
+		return f
+	}
+	t.Cleanup(func() { loopbackFamilies = orig })
+}
+
+// This is the exact shape of the bug in #51: the first login only has (or
+// only requests) one family, and a second login requesting every family the
+// host supports must still be refused outright — not allowed to quietly
+// take over the family the first login left unbound and end up serving
+// /callback on the same port as a different, unrelated login.
+func TestSecondLoginCannotStealTheFamilyFirstLoginLeftUnbound(t *testing.T) {
+	real := probeLoopbackFamilies()
+	if len(real) < 2 {
+		t.Skip("this host does not support both loopback families")
+	}
+	withFamiliesSequence(t, []string{"127.0.0.1"}, real)
+
+	first, err := StartCallback("a")
+	if err != nil {
+		t.Skipf("port %d unavailable: %v", LoopbackPort, err)
+	}
+	defer first.Close()
+
+	if second, err := StartCallback("b"); err == nil {
+		second.Close()
+		t.Fatal("second login bound the family the first login left free — " +
+			"one login could receive the other's authorization code")
+	}
+}
+
+// When a bind partway through the family list fails, any listener already
+// opened for an earlier family in this same call must be released — not
+// leaked — so the failed attempt does not itself squat on the port.
+func TestFailedBindReleasesAlreadyOpenedListener(t *testing.T) {
+	real := probeLoopbackFamilies()
+	if len(real) < 2 {
+		t.Skip("this host does not support both loopback families")
+	}
+	// First login takes [::1] only. Second login is forced to try
+	// 127.0.0.1 (succeeds) then [::1] (fails, already held) — exercising
+	// the rollback of the 127.0.0.1 listener it just opened.
+	withFamiliesSequence(t, []string{"[::1]"}, []string{"127.0.0.1", "[::1]"}, []string{"127.0.0.1"})
+
+	first, err := StartCallback("a")
+	if err != nil {
+		t.Skipf("port %d unavailable: %v", LoopbackPort, err)
+	}
+	defer first.Close()
+
+	if second, err := StartCallback("b"); err == nil {
+		second.Close()
+		t.Fatal("second login should have failed on the already-held [::1] family")
+	}
+
+	// If the failed attempt actually released 127.0.0.1 rather than
+	// leaking it, a third call asking only for 127.0.0.1 must still
+	// succeed.
+	third, err := StartCallback("c")
+	if err != nil {
+		t.Fatalf("127.0.0.1 leaked from the previous failed bind: %v", err)
+	}
+	third.Close()
+}
+
+// On a host that genuinely supports both loopback families, a second login
+// must be refused outright rather than silently taking over whichever
+// family the first login left unbound.
+func TestSecondCallbackServerFailsToBind_BothFamiliesSupported(t *testing.T) {
+	real := probeLoopbackFamilies()
+	if len(real) < 2 {
+		t.Skip("this host does not support both loopback families")
+	}
+	withFamilies(t, real)
+
+	first, err := StartCallback("a")
+	if err != nil {
+		t.Skipf("port %d unavailable: %v", LoopbackPort, err)
+	}
+	defer first.Close()
+
+	second, err := StartCallback("b")
+	if err == nil {
+		second.Close()
+		t.Fatal("a second callback server bound the same port on a dual-family host")
+	}
+	if !strings.Contains(err.Error(), "in use") {
+		t.Errorf("error = %v, want an 'in use' error", err)
+	}
+}
+
+// A host that only has one loopback family available (forced here rather
+// than relying on the test machine actually lacking one) must still get a
+// fully working callback server on that family — requiring "all supported
+// families" must not regress into requiring both unconditionally.
+func TestStartCallback_SingleFamilyHostStillWorks(t *testing.T) {
+	withFamilies(t, []string{"127.0.0.1"})
+
+	cs, err := StartCallback("st-single")
+	if err != nil {
+		t.Skipf("port %d unavailable: %v", LoopbackPort, err)
+	}
+	defer cs.Close()
+
+	go func() { _, _, _ = get(cs.RedirectURI() + "?code=abc123&state=st-single") }()
+
+	code, err := cs.Wait(context.Background(), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != "abc123" {
+		t.Errorf("code = %q, want abc123", code)
+	}
+}
+
+// The error for "this host has no usable loopback family" must read
+// differently from "the port is already in use" — the first blames the
+// host, the second blames a real conflict, and a user or a bug report
+// needs to be able to tell them apart.
+func TestStartCallback_NoFamilyErrorDistinctFromPortInUse(t *testing.T) {
+	withFamilies(t, nil)
+
+	_, err := StartCallback("st-none")
+	if err == nil {
+		t.Fatal("expected an error when no loopback family is available")
+	}
+	if strings.Contains(err.Error(), "in use") {
+		t.Errorf("no-family error should not read like a port-in-use error: %v", err)
+	}
+}
+
+// The port genuinely being held by another login (as opposed to this host
+// lacking a family) must produce the "in use" error, forced deterministic
+// here by pinning both servers to the same single family instead of relying
+// on whatever families this machine happens to support.
+func TestStartCallback_PortInUseErrorIsDistinguishable(t *testing.T) {
+	withFamilies(t, []string{"127.0.0.1"})
+
+	first, err := StartCallback("a")
+	if err != nil {
+		t.Skipf("port %d unavailable: %v", LoopbackPort, err)
+	}
+	defer first.Close()
+
+	_, err = StartCallback("b")
+	if err == nil {
+		t.Fatal("expected the second server to fail to bind")
+	}
+	if !strings.Contains(err.Error(), "in use") {
+		t.Errorf("error = %v, want an 'in use' error", err)
+	}
+}
+
 func urlEscaped(s string) string {
 	return strings.NewReplacer(":", "%3A", "/", "%2F").Replace(s)
 }
