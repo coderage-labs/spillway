@@ -200,3 +200,161 @@ func TestNestedToolModelMapThroughProxy(t *testing.T) {
 	default:
 	}
 }
+
+// A duplicate top-level "tools" key makes encoding/json's decode (which
+// keeps only the LAST occurrence) disagree with the scanner's byte
+// positions (which, before this test's fix, matched every occurrence).
+// That disagreement must be a clean error, never a panic and never a
+// silent wrong-tool splice. Reproduces the exact body that panicked
+// rewriteModel at model.go:133 before the fix.
+func TestRewriteModelDuplicateTopLevelToolsKeyRefuses(t *testing.T) {
+	mm := map[string]string{"claude-sonnet-4-6": "k3[1m]", "claude-fable-5": "kimi-for-coding"}
+	body := []byte(`{"model":"claude-sonnet-4-6","tools":[{"model":"claude-fable-5"},{"model":"claude-fable-5"}],"tools":[{"model":"claude-fable-5"}]}`)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("rewriteModel panicked instead of erroring: %v", r)
+		}
+	}()
+	_, err := rewriteModel(body, mm)
+	if err == nil {
+		t.Fatal("err = nil, want a hard error for the duplicate top-level \"tools\" key")
+	}
+	if !strings.Contains(err.Error(), "tools") || !strings.Contains(err.Error(), "ambigu") {
+		t.Errorf("error should name the duplicate key and the ambiguity: %v", err)
+	}
+}
+
+// Same defect class as above, but with BOTH "tools" arrays the same
+// length (one element each). A bounds check alone cannot catch this —
+// every index the scanner reports is in range of probe.Tools — so this
+// specifically exercises the dedicated duplicate-top-level-key guard.
+// Without it, this would silently splice the LAST array's (real) model
+// mapping into the FIRST array's (discarded) byte span: a wrong rewrite,
+// not an error.
+func TestRewriteModelDuplicateTopLevelToolsKeySameLengthStillRefuses(t *testing.T) {
+	mm := map[string]string{
+		"claude-sonnet-4-6": "k3[1m]",
+		"claude-haiku-4-5":  "kimi-for-coding-highspeed",
+		"claude-fable-5":    "kimi-for-coding",
+	}
+	body := []byte(`{"model":"claude-sonnet-4-6","tools":[{"model":"claude-haiku-4-5"}],"tools":[{"model":"claude-fable-5"}]}`)
+	out, err := rewriteModel(body, mm)
+	if err == nil {
+		t.Fatalf("err = nil (out = %s), want a hard error — same-length duplicate \"tools\" keys must not silently rewrite", out)
+	}
+	if !strings.Contains(err.Error(), "tools") || !strings.Contains(err.Error(), "ambigu") {
+		t.Errorf("error should name the duplicate key and the ambiguity: %v", err)
+	}
+}
+
+// Two "model" keys directly on the SAME tools[] element: same toolIndex,
+// two byte spans, no panic — but encoding/json's decode (last wins) and a
+// naive scanner (which would pair BOTH spans with that last-wins value)
+// disagree about which span the decoded value actually belongs to. Refuse
+// rather than guess.
+func TestRewriteModelDuplicateModelKeyWithinOneToolRefuses(t *testing.T) {
+	mm := map[string]string{"claude-sonnet-4-6": "k3[1m]", "claude-fable-5": "kimi-for-coding", "claude-haiku-4-5": "kimi-for-coding-highspeed"}
+	body := []byte(`{"model":"claude-sonnet-4-6","tools":[{"model":"claude-fable-5","model":"claude-haiku-4-5"}]}`)
+	_, err := rewriteModel(body, mm)
+	if err == nil {
+		t.Fatal("err = nil, want a hard error for the duplicate \"model\" key within tools[0]")
+	}
+	if !strings.Contains(err.Error(), "tools[0]") || !strings.Contains(err.Error(), "ambigu") {
+		t.Errorf("error should name the tool index and the ambiguity: %v", err)
+	}
+}
+
+// SAFE case: a "model" key spelled with a JSON escape that decodes to the
+// same text ("model") is exactly the shape a scanner that compares raw
+// bytes would fail to recognize, while encoding/json decodes it correctly
+// — the same disagreement class as the duplicate-key cases above, just via
+// escaping instead of repetition. Must refuse rather than silently forward
+// the advisor model unmapped (which is the exact defect issue #29 exists
+// to close — an escape would otherwise reopen it).
+func TestRewriteModelEscapedModelKeyEvasionRefuses(t *testing.T) {
+	mm := map[string]string{"claude-sonnet-4-6": "k3[1m]", "claude-fable-5": "kimi-for-coding"}
+	// The key is spelled with a JSON unicode escape for its first letter
+	// (backslash, u, 0, 0, 6, d, then "odel"), which decodes to "model" —
+	// encoding/json reads the field as "model", but the scanner's literal
+	// byte comparison sees ten raw characters, not "model".
+	escapedKey := "\\u006dodel"
+	body := []byte(`{"model":"claude-sonnet-4-6","tools":[{"` + escapedKey + `":"claude-fable-5"}]}`)
+	_, err := rewriteModel(body, mm)
+	if err == nil {
+		t.Fatal("err = nil, want a hard error: the decoder found a nested model the scanner could not locate")
+	}
+	if !strings.Contains(err.Error(), "claude-fable-5") || !strings.Contains(err.Error(), "tools[0]") {
+		t.Errorf("error should name the decoded model and its tool index: %v", err)
+	}
+}
+
+// SAFE case, proven rather than assumed: a "model" key's value being an
+// empty string has no modelMap entry (lookupModel("") never matches), so it
+// hard-errors the same way any other unmapped model does — it is not a
+// silent no-op and not a special case that needs its own guard.
+func TestRewriteModelEmptyNestedModelValueIsHardError(t *testing.T) {
+	mm := map[string]string{"claude-sonnet-4-6": "k3[1m]"}
+	body := []byte(`{"model":"claude-sonnet-4-6","tools":[{"type":"advisor_x","model":""}]}`)
+	_, err := rewriteModel(body, mm)
+	var unmapped *errUnmappedModel
+	if err == nil || !asUnmapped(err, &unmapped) {
+		t.Fatalf("err = %v, want errUnmappedModel for an empty nested model value", err)
+	}
+}
+
+// SAFE case, proven: "tools" present but not an array (or an array of
+// non-objects, or a tool whose "model" is a JSON number rather than a
+// string) fails type-checked decoding into probe at the very first
+// json.Unmarshal in rewriteModel — already a hard "malformed request body"
+// error today, with no special-case handling needed for mutation #4.
+func TestRewriteModelToolsNotAnArrayIsMalformedBodyError(t *testing.T) {
+	cases := map[string]string{
+		"tools is a string":            `{"model":"claude-sonnet-4-6","tools":"nope"}`,
+		"tools is an array of strings": `{"model":"claude-sonnet-4-6","tools":["nope"]}`,
+		"a tool's model is a number":   `{"model":"claude-sonnet-4-6","tools":[{"model":42}]}`,
+	}
+	mm := map[string]string{"claude-sonnet-4-6": "k3[1m]"}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := rewriteModel([]byte(body), mm)
+			if err == nil || !strings.Contains(err.Error(), "malformed") {
+				t.Errorf("err = %v, want a malformed-body error", err)
+			}
+		})
+	}
+}
+
+// SAFE case, proven: "tools": null decodes to a nil slice with no error
+// (standard encoding/json behaviour), the scanner finds no tools-array
+// elements either (the value isn't "["), and the two agree on nothing —
+// so this is a normal no-op, byte-identical to the input.
+func TestRewriteModelToolsNullIsSafeNoop(t *testing.T) {
+	mm := map[string]string{"k3[1m]": "k3[1m]"}
+	body := []byte(`{"model":"k3[1m]","tools":null,"messages":[]}`)
+	out, err := rewriteModel(body, mm)
+	if err != nil {
+		t.Fatalf("rewriteModel: %v", err)
+	}
+	if string(out) != string(body) {
+		t.Errorf("body changed for tools:null:\n got  %s\n want %s", out, body)
+	}
+}
+
+// SAFE case, proven: escaped quotes in a tool's OTHER fields, immediately
+// adjacent to its "model" field, must not confuse the scanner into
+// mis-locating the model value's boundaries.
+func TestRewriteModelEscapedQuotesNearModelBoundaryStillRewrites(t *testing.T) {
+	mm := map[string]string{"claude-sonnet-4-6": "k3[1m]", "claude-fable-5": "kimi-for-coding"}
+	body := []byte(`{"model":"claude-sonnet-4-6","tools":[{"type":"advisor_\"x\"","model":"claude-fable-5","note":"a \"quoted\" note"}]}`)
+	out, err := rewriteModel(body, mm)
+	if err != nil {
+		t.Fatalf("rewriteModel: %v", err)
+	}
+	if !strings.Contains(string(out), `"model":"kimi-for-coding"`) {
+		t.Errorf("nested model not rewritten around escaped neighbours:\n%s", out)
+	}
+	if !strings.Contains(string(out), `"note":"a \"quoted\" note"`) {
+		t.Errorf("escaped neighbour field corrupted:\n%s", out)
+	}
+}

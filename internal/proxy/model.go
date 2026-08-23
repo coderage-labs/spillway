@@ -18,6 +18,17 @@ package proxy
 // Nothing outside tools[] is touched: a "model" string typed into ordinary
 // message content, or nested deeper inside a tool's own schema (e.g.
 // input_schema.properties.model), is left exactly as the client sent it.
+//
+// Mutation #4 locates nested values with a hand-rolled byte scanner
+// (findNestedToolModelValues) while decoding their actual values with
+// encoding/json (probe.Tools) — the same split findTopLevelModelValue and
+// probe.Model already use for mutation #3. A malformed or adversarial body
+// can make the two disagree (duplicate JSON keys, an escaped key our
+// scanner's literal comparison won't unescape): rewriteModel treats any
+// such disagreement as a hard error rather than guessing, on the same
+// fail-closed principle as an unmapped model — see the guards immediately
+// before the tools[] loop below, and nested_model_test.go for one example
+// of each case.
 
 import (
 	"encoding/json"
@@ -129,7 +140,40 @@ func rewriteModel(body []byte, modelMap map[string]string) ([]byte, error) {
 	// Mutation #4: nested advisor models under tools[]. Same map, same hard
 	// error on an unmapped id (§6.12) — the whole point is that one cannot
 	// escape mapping by hiding inside tools[].
-	for _, site := range findNestedToolModelValues(body) {
+	//
+	// Both findNestedToolModelValues (a byte scanner) and probe.Tools (an
+	// encoding/json decode) parse the same bytes independently, and a
+	// malformed or adversarial body can make them disagree about what
+	// tools[] actually contains — a duplicate top-level "tools" key, a
+	// duplicate "model" key inside one element, or a key spelled with a
+	// JSON escape our scanner's literal byte comparison doesn't unescape.
+	// Any such disagreement means we cannot be confident which bytes are
+	// which model, so — per the same §6.12 fail-closed stance an unmapped
+	// model gets — this refuses to forward rather than guessing. See
+	// nested_model_test.go for one worked example of each case this guards.
+	if n := countTopLevelKey(body, "tools"); n > 1 {
+		return nil, fmt.Errorf("spillway: request body has %d top-level %q keys — refusing to forward under that structural ambiguity", n, "tools")
+	}
+	sites := findNestedToolModelValues(body)
+	siteCount := make(map[int]int, len(sites))
+	for _, site := range sites {
+		siteCount[site.toolIndex]++
+	}
+	for i, tool := range probe.Tools {
+		if tool.Model != "" && siteCount[i] == 0 {
+			return nil, fmt.Errorf("spillway: tools[%d].model %q was decoded from the body but the byte scanner could not locate it (a non-literal or escaped key?) — refusing to forward under that disagreement", i, tool.Model)
+		}
+	}
+	seen := make(map[int]bool, len(sites))
+	for _, site := range sites {
+		if site.toolIndex < 0 || site.toolIndex >= len(probe.Tools) {
+			return nil, fmt.Errorf("spillway: nested model scan found tools[%d].model but the body decoded only %d tools[] entries — refusing to forward under that disagreement", site.toolIndex, len(probe.Tools))
+		}
+		if seen[site.toolIndex] {
+			return nil, fmt.Errorf("spillway: tools[%d] has more than one %q key — refusing to forward under that structural ambiguity", site.toolIndex, "model")
+		}
+		seen[site.toolIndex] = true
+
 		nestedModel := probe.Tools[site.toolIndex].Model
 		nestedMapped, ok := lookupModel(modelMap, nestedModel)
 		if !ok {
@@ -182,6 +226,68 @@ func applyModelEdits(body []byte, edits []modelEdit) []byte {
 	}
 	out = append(out, body[pos:]...)
 	return out
+}
+
+// countTopLevelKey returns how many times a key named "name" appears as a
+// direct key of the root JSON object, using the same key/value tracking
+// convention as findTopLevelModelValue (a string is a candidate key exactly
+// when no key has been recorded yet for the current top-level pair).
+//
+// This exists to detect a duplicate top-level "tools" key: JSON permits
+// duplicate keys, encoding/json keeps the LAST occurrence when decoding
+// probe.Tools, and without this check a scanner match against an EARLIER
+// occurrence could be paired with the wrong (last-decoded) tool, either
+// panicking on an out-of-range index or — worse — silently splicing one
+// tool's mapped model into a different tool's byte span.
+func countTopLevelKey(body []byte, name string) int {
+	depth := 0
+	inStr := false
+	esc := false
+	readingKey := false
+	keyStart := 0
+	key := ""
+	count := 0
+	for i := 0; i < len(body); i++ {
+		b := body[i]
+		if inStr {
+			if esc {
+				esc = false
+				continue
+			}
+			if b == '\\' {
+				esc = true
+				continue
+			}
+			if b == '"' {
+				inStr = false
+				if readingKey {
+					key = string(body[keyStart:i])
+					readingKey = false
+					if depth == 1 && key == name {
+						count++
+					}
+				}
+			}
+			continue
+		}
+		switch b {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		case '"':
+			inStr = true
+			if depth == 1 && key == "" {
+				readingKey = true
+				keyStart = i + 1
+			}
+		case ',':
+			if depth == 1 {
+				key = ""
+			}
+		}
+	}
+	return count
 }
 
 // findTopLevelModelValue locates the value of the top-level "model" key,
