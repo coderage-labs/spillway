@@ -55,18 +55,88 @@ func TestKimiClassification(t *testing.T) {
 	}
 }
 
+// TestClaudeClassification covers anthropicRejected (issue #25): a fable
+// weekly rejection (header prefix "7d_oi") must be recognised as a quota
+// rejection exactly like 5h/7d, an absent family header must never be read
+// as a rejection, and an unrecognised status value must fail toward quota
+// (rotate) rather than toward transient (retry a possibly-spent account).
+// Header names and values are the live-measured set from #25's comment.
 func TestClaudeClassification(t *testing.T) {
 	c := For("claude-oauth")
-	// Set(), not a literal map: Go canonicalises "5h" with a lowercase h, so
-	// a hand-written key silently fails to match Get().
-	rejected := http.Header{}
-	rejected.Set("anthropic-ratelimit-unified-5h-status", "rejected")
-	if got := c.Classify(429, rejected, nil); got != ErrQuota {
-		t.Errorf("rejected status = %v, want quota", got)
+
+	tests := []struct {
+		name string
+		set  map[string]string
+		want ErrKind
+	}{
+		{
+			name: "5h rejected",
+			set:  map[string]string{"anthropic-ratelimit-unified-5h-status": "rejected"},
+			want: ErrQuota,
+		},
+		{
+			name: "7d rejected",
+			set:  map[string]string{"anthropic-ratelimit-unified-7d-status": "rejected"},
+			want: ErrQuota,
+		},
+		{
+			// The bug #25 reports: fable's own weekly bucket, distinct from
+			// the account-wide 5h/7d windows anthropicRejected used to check.
+			name: "7d_oi (fable) rejected",
+			set:  map[string]string{"anthropic-ratelimit-unified-7d_oi-status": "rejected"},
+			want: ErrQuota,
+		},
+		{
+			name: "all allowed",
+			set: map[string]string{
+				"anthropic-ratelimit-unified-5h-status":    "allowed",
+				"anthropic-ratelimit-unified-7d-status":    "allowed",
+				"anthropic-ratelimit-unified-7d_oi-status": "allowed",
+			},
+			want: ErrRate,
+		},
+		{
+			// Haiku, measured live (#25): no 7d_oi-* headers at all because
+			// the fable family was never engaged on that request. Absent
+			// must mean "this family wasn't involved", never "rejected".
+			name: "7d_oi header absent entirely (haiku case)",
+			set: map[string]string{
+				"anthropic-ratelimit-unified-5h-status": "allowed",
+				"anthropic-ratelimit-unified-7d-status": "allowed",
+			},
+			want: ErrRate,
+		},
+		{
+			// The status vocabulary isn't exhaustively known (only "allowed"
+			// and "rejected" are measured so far). An unrecognised value
+			// must fail toward quota — one account rotated undeservedly —
+			// never toward transient, which would retry a possibly-spent
+			// account 3x with backoff, the exact failure #25 reports.
+			name: "unknown status value",
+			set:  map[string]string{"anthropic-ratelimit-unified-7d_oi-status": "some_future_status"},
+			want: ErrQuota,
+		},
+		{
+			name: "no rate-limit headers at all",
+			set:  map[string]string{},
+			want: ErrRate,
+		},
 	}
-	if got := c.Classify(429, http.Header{}, nil); got != ErrRate {
-		t.Errorf("bare 429 = %v, want rate", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := http.Header{}
+			// Set(), not a literal map: Go canonicalises "5h" with a
+			// lowercase h, so a hand-written key silently fails Get().
+			for k, v := range tt.set {
+				h.Set(k, v)
+			}
+			if got := c.Classify(429, h, nil); got != tt.want {
+				t.Errorf("Classify = %v, want %v", got, tt.want)
+			}
+		})
 	}
+
 	// Anthropic does not overload 401 the way Kimi does.
 	if got := c.Classify(401, http.Header{}, []byte("model id")); got != ErrNone {
 		t.Errorf("401 = %v, want none", got)
@@ -123,6 +193,40 @@ func (s Spec) specWindows(h http.Header, now time.Time) []Window {
 		return nil
 	}
 	return s.WindowsFromHeaders(h, now)
+}
+
+// TestAnthropicWindowsFromHeadersIncludesFable pins the "7d_oi" header
+// prefix to spillway's "7d-fable" window name (issue #25), and confirms an
+// absent 7d_oi-* (the measured Haiku case) yields no fable window at all
+// rather than a zero-valued one.
+func TestAnthropicWindowsFromHeadersIncludesFable(t *testing.T) {
+	now := time.Now()
+	reset := now.Add(48 * time.Hour).Unix()
+	h := http.Header{}
+	h.Set("anthropic-ratelimit-unified-5h-utilization", "0.01")
+	h.Set("anthropic-ratelimit-unified-7d-utilization", "0.02")
+	h.Set("anthropic-ratelimit-unified-7d_oi-utilization", "0.02")
+	h.Set("anthropic-ratelimit-unified-7d_oi-reset", itoa(reset))
+
+	w := For("claude-oauth").WindowsFromHeaders(h, now)
+	if len(w) != 3 {
+		t.Fatalf("want 3 windows, got %d: %+v", len(w), w)
+	}
+	if w[2].Name != "7d-fable" || w[2].Used != 0.02 || w[2].Limit != 1 {
+		t.Errorf("7d-fable window wrong: %+v", w[2])
+	}
+	if !w[2].ResetAt.Equal(time.Unix(reset, 0)) {
+		t.Errorf("7d-fable reset not parsed: %v", w[2].ResetAt)
+	}
+
+	// The measured Haiku case: no 7d_oi-* headers at all.
+	haiku := http.Header{}
+	haiku.Set("anthropic-ratelimit-unified-5h-utilization", "0.05")
+	haiku.Set("anthropic-ratelimit-unified-7d-utilization", "0.05")
+	wh := For("claude-oauth").WindowsFromHeaders(haiku, now)
+	if len(wh) != 2 {
+		t.Fatalf("haiku request must not synthesize a fable window, got %d: %+v", len(wh), wh)
+	}
 }
 
 func TestResetHintPrefersProviderSignal(t *testing.T) {

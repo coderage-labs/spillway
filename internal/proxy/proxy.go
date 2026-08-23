@@ -719,15 +719,6 @@ func writeJSON(w http.ResponseWriter, status int, body string) {
 	_, _ = io.WriteString(w, body)
 }
 
-// isQuotaRejection distinguishes a durable quota-429 (rotate accounts) from a
-// transient rate-limit-429 (retry same account) using Anthropic's unified
-// rate-limit status headers. Anthropic
-// accounts only; kimi classification is body-based (see classifyError).
-func isQuotaRejection(h http.Header) bool {
-	return h.Get("anthropic-ratelimit-unified-5h-status") == "rejected" ||
-		h.Get("anthropic-ratelimit-unified-7d-status") == "rejected"
-}
-
 // errKind is the classification of an upstream error response.
 type errKind int
 

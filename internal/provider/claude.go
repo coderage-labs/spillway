@@ -96,19 +96,55 @@ func anthropicOverage(h http.Header) Overage {
 	return ov
 }
 
+// claudeWindows is the single source of truth for every Anthropic
+// rate-limit window family this package understands: spillway's name for
+// the window, and the header prefix Anthropic uses for it
+// (anthropic-ratelimit-unified-<prefix>-{status,utilization,reset}).
+//
+// anthropicRejected and anthropicWindows both range over this list instead
+// of naming header strings themselves, so a fourth family (issue #25 found
+// "7d_oi" for fable the hard way, by a live 429 going unrecognised) is
+// covered everywhere by adding one line here, not by remembering to update
+// two functions in lockstep.
+var claudeWindows = []struct{ name, prefix string }{
+	{"5h", "5h"},
+	{"7d", "7d"},
+	{"7d-fable", "7d_oi"},
+}
+
+// anthropicRejected reports whether any window family's status header says
+// this request was refused for quota, not throttled.
+//
+// Checked as "!= allowed" rather than "== rejected": the measured
+// vocabulary is only {allowed, rejected} today (issue #25's comment), but
+// it is not exhaustively known, and the two ways to be wrong are not
+// equally bad. Treating an unrecognised status as a rejection costs one
+// account an undeserved rotation — every other account in the pool is
+// still tried. Treating it as transient instead means retrying the same
+// spent account three times with backoff while a healthy one sits idle,
+// which is the exact failure #25 reports; an unknown future status must
+// not be able to reproduce that. Fail toward rotation, not toward retry.
+//
+// An absent status header is neither: it means this request never engaged
+// that family (a Haiku request carries no 7d_oi-* at all, per #25), so it
+// is skipped rather than compared.
 func anthropicRejected(h http.Header) bool {
-	return h.Get("anthropic-ratelimit-unified-5h-status") == "rejected" ||
-		h.Get("anthropic-ratelimit-unified-7d-status") == "rejected"
+	for _, w := range claudeWindows {
+		v := h.Get("anthropic-ratelimit-unified-" + w.prefix + "-status")
+		if v == "" {
+			continue
+		}
+		if v != "allowed" {
+			return true
+		}
+	}
+	return false
 }
 
 func anthropicWindows(h http.Header, now time.Time) []Window {
 	var out []Window
-	for _, w := range []struct{ name, util, reset string }{
-		{"5h", "anthropic-ratelimit-unified-5h-utilization", "anthropic-ratelimit-unified-5h-reset"},
-		{"7d", "anthropic-ratelimit-unified-7d-utilization", "anthropic-ratelimit-unified-7d-reset"},
-		{"7d-fable", "anthropic-ratelimit-unified-7d_oi-utilization", "anthropic-ratelimit-unified-7d_oi-reset"},
-	} {
-		v := h.Get(w.util)
+	for _, w := range claudeWindows {
+		v := h.Get("anthropic-ratelimit-unified-" + w.prefix + "-utilization")
 		if v == "" {
 			continue
 		}
@@ -117,7 +153,7 @@ func anthropicWindows(h http.Header, now time.Time) []Window {
 			continue
 		}
 		win := Window{Name: w.name, Limit: 1, Used: f, Source: "headers"}
-		if rs := h.Get(w.reset); rs != "" {
+		if rs := h.Get("anthropic-ratelimit-unified-" + w.prefix + "-reset"); rs != "" {
 			if sec, err := strconv.ParseFloat(rs, 64); err == nil {
 				win.ResetAt = time.Unix(int64(sec), 0)
 			}
@@ -128,12 +164,19 @@ func anthropicWindows(h http.Header, now time.Time) []Window {
 }
 
 // claudeGoverningWindows implements Spec.GoverningWindows for Claude
-// (issue #24). "5h" and "7d" are account-wide — every request draws on them,
-// fable included, which is why anthropicRejected above checks only those two
-// for the hard-stop case. "7d-fable" is the extra weekly bucket fable models
-// draw on top of that; a model outside the fable family never touches it, so
-// its own bucket being spent must not make a Sonnet or Opus request look
-// like it is talking to a done account.
+// (issue #24). "5h" and "7d" are account-wide — every request draws on
+// them, fable included. "7d-fable" is the extra weekly bucket fable models
+// draw on top of that; a model outside the fable family never touches it,
+// so its own bucket being spent must not make a Sonnet or Opus request look
+// like it is talking to a done account — that is what this function's
+// narrowing is for.
+//
+// anthropicRejected (issue #25), by contrast, checks all three families:
+// it only decides whether a 429 the account actually received is quota or
+// throttle, before any model is known. It does not itself widen exhaustion
+// to the whole account — pool.MarkExhausted does that unconditionally on
+// any ErrQuota, with no per-window/per-model narrowing, which is a
+// separate, pre-existing gap this issue did not create and does not fix.
 //
 // An unrecognised model — including the empty string modelOf returns for a
 // malformed or absent body — resolves to the general windows, never to
