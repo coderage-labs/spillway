@@ -14,10 +14,11 @@ Anthropic-shaped endpoint) and rotates requests across a pool of **your own**
 subscription accounts, so a session doesn't stop at a 429.
 
 It is a **proxy, never a client**: the vendor's own CLI stays in the loop, and
-spillway forwards its requests byte-faithfully apart from three mutations
-(auth header, `account_uuid`, and the model when mapping across providers).
-That fidelity is what keeps usage inside your subscription rather than falling
-through to metered API billing.
+spillway forwards its requests byte-faithfully apart from four mutations
+(auth header, `account_uuid`, and the model when mapping across providers —
+both where Claude Code puts it: the top-level executor model, and an
+advisor's model nested inside `tools[]`). That fidelity is what keeps usage
+inside your subscription rather than falling through to metered API billing.
 
 Single user, single machine. Not a team server.
 
@@ -388,6 +389,15 @@ Providers that speak different model ids get the request's `model` rewritten
 (design doc §4 mutation #3). **An id with no mapping is a hard error** —
 forwarding a Claude id to another provider is how you get a 200 back from
 something you did not ask for.
+
+The same map, and the same hard error, also apply to an **advisor's model
+nested inside `tools[]`** (design doc §4 mutation #4). Claude Code puts the
+executor's model at the top level and an advisor's model as a `model` field
+directly on the tool object — `{"tools": [{"type": "advisor_...", "model":
+"..."}]}` — and both would otherwise reach the provider unmapped. Nothing
+else nested in the body is touched: a `model` string inside a message the
+user typed, or a same-named field buried in a tool's own schema, is left
+exactly as sent.
 
 Kimi ships defaults, so a freshly logged-in account works with no config:
 

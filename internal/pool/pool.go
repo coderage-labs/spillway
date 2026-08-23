@@ -76,9 +76,10 @@ type Account struct {
 	// Type is the provider kind ("claude-oauth" / "kimi-oauth") — error
 	// classification and refresh endpoints are provider-specific.
 	Type string
-	// ModelMap rewrites the request body's model id when serving through
-	// this account (§4 allowed mutation #3, cross-provider only). nil for
-	// same-provider accounts.
+	// ModelMap rewrites the request body's model id — both the top-level
+	// model and any advisor model nested in tools[] (issue #29) — when
+	// serving through this account (§4 allowed mutations #3 and #4,
+	// cross-provider only). nil for same-provider accounts.
 	ModelMap map[string]string
 	// AccountUUID is the UUID Claude Code embeds in metadata.user_id for
 	// this account; empty disables the rewrite (pass through rather than
