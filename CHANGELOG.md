@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/coderage-labs/spillway/compare/v0.8.0...v0.9.0) (2026-08-23)
+
+
+### Features
+
+* per-family quota selection so a spent fable bucket doesn't gate Sonnet ([#24](https://github.com/coderage-labs/spillway/issues/24)) ([#43](https://github.com/coderage-labs/spillway/issues/43)) ([e71db0a](https://github.com/coderage-labs/spillway/commit/e71db0a03975e006217dcea2df74961166b11cb7))
+
+
+### Documentation
+
+* the session key is per session, not per machine ([#41](https://github.com/coderage-labs/spillway/issues/41)) ([9d71760](https://github.com/coderage-labs/spillway/commit/9d71760b8d3689f11b0ce55202258c63d84d952e))
+
 ## [0.8.0](https://github.com/coderage-labs/spillway/compare/v0.7.1...v0.8.0) (2026-08-22)
 
 
