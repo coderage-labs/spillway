@@ -93,7 +93,7 @@ func runClaude(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := mitm.EnsureCA(openSecrets(), pemPath); err != nil {
+	if _, err := mitm.EnsureCA(openSecrets(), pemPath, nil); err != nil {
 		return fmt.Errorf("ensure MITM CA: %w", err)
 	}
 

@@ -292,6 +292,28 @@ upgrades (`/v1/session_ingress/ws*`) — relay with the client's own credential
 verbatim: no injection, no pool, no rewrite. That is what keeps Remote Control
 and the CLI's own token refresh working through the proxy.
 
+**If the CA is regenerated, restart every proxied CLI.** Because
+`NODE_EXTRA_CA_CERTS` is read once at process start, a client launched before
+the CA changed can never be made to trust the new one — reconnecting doesn't
+help, and the failures look like plain network flakiness (`tls: bad record
+MAC`, `EOF`, connection resets) rather than a trust-anchor change. spillway
+logs a WARN naming the reason and the new CA's fingerprint whenever this
+happens, and says explicitly when a restart is required — that only happens
+when the CA's private key itself had to be replaced (the key was genuinely
+missing from the keychain, e.g. a fresh install or the entry was deleted).
+If only the certificate file was missing or corrupt, it's rewritten from the
+existing key and nothing needs restarting, since already-running clients
+validate leaves against the key, not the exact cert bytes on disk.
+
+**If the keychain is locked, denied, or unreachable at startup**, spillway
+never treats that as "no CA yet": it leaves the existing key and cert
+untouched and fails loudly instead (`server` degrades to base-URL mode,
+logging the failure; `run` refuses to launch the CLI). Silently minting a
+replacement key on an ambiguous read error is exactly what caused a prior
+outage — the same distinction the OS keychain section below draws for
+account credentials (a locked/denied keychain is a refusal, not permission
+to fall back).
+
 ## Config
 
 `~/.config/spillway.yaml` (override with `SPILLWAY_CONFIG`), created with
