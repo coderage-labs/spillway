@@ -538,6 +538,18 @@ through), `hold` (park until the soonest reset, up to `pool.holdMax`), or
 `API_TIMEOUT_MS` past `holdMax` so the client waits out a hold, never lowering
 an existing value.
 
+`hold` and `notify` fail fast, rather than parking for the full `holdMax`,
+once the soonest known reset would land past the hold deadline anyway — a
+spent weekly window with days left on it gets the same 429 a full-length
+hold would have reached, just without the wait (issue #55; a 5-hour window
+almost always resets inside a 4-hour `holdMax`, so this mainly matters for
+7-day and `fable`'s 7-day windows). When nothing exhausted has a known reset
+to wait for at all (every blocking account is disabled rather than merely
+spent), spillway still holds for the full `holdMax` rather than guessing —
+an unknown reset is not the same as a known-far-off one, and treating it
+that way would turn a possibly transient gap into an instant, unretryable
+error.
+
 An idle account reports no quota until something is routed to it, so a standby
 tank would sit blank. `probeOnStart` sends one minimal request per account with
 no reading, and `probeInterval` re-probes readings that have gone stale. This
