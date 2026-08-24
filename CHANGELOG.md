@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.2](https://github.com/coderage-labs/spillway/compare/v0.12.1...v0.12.2) (2026-08-24)
+
+
+### Fixes
+
+* give non-Node subprocesses a CA bundle that extends the system roots ([#64](https://github.com/coderage-labs/spillway/issues/64)) ([3e6398a](https://github.com/coderage-labs/spillway/commit/3e6398a74aaf329e591b5cb3b8a2410f1df33130))
+
 ## [0.12.1](https://github.com/coderage-labs/spillway/compare/v0.12.0...v0.12.1) (2026-08-24)
 
 
