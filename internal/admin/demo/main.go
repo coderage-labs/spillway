@@ -172,9 +172,16 @@ func buildAccounts(now time.Time, hold bool) (work, labs, side, kimi *pool.Accou
 			Reason:      "extra usage exhausted for this billing period",
 			ResetAt:     now.Add(3 * 24 * time.Hour),
 		})
+		// Kept closer to the Claude cluster than the healthy scenario's
+		// Kimi figures (0.31/0.47 there): the chart's own label-collision
+		// bug (index.html's drawHeadroom, ~line 762 — reported upstream,
+		// not fixed here) pushes an isolated high-headroom label off the
+		// plot's top edge when several other series are bunched at zero.
+		// Still comfortably "ok" (nowhere near the 0.98 threshold) and
+		// still the healthiest account in the pool.
 		kimi.SetQuotaWindows([]pool.QuotaWindow{
-			{Name: "5h", Limit: 1, Used: 0.33, Source: "poll", ResetAt: now.Add(3*time.Hour + 20*time.Minute), FetchedAt: now},
-			{Name: "7d", Limit: 1, Used: 0.48, Source: "poll", ResetAt: now.Add(4*24*time.Hour + 9*time.Hour), FetchedAt: now},
+			{Name: "5h", Limit: 1, Used: 0.55, Source: "poll", ResetAt: now.Add(3*time.Hour + 20*time.Minute), FetchedAt: now},
+			{Name: "7d", Limit: 1, Used: 0.65, Source: "poll", ResetAt: now.Add(4*24*time.Hour + 9*time.Hour), FetchedAt: now},
 		})
 		return
 	}
@@ -186,19 +193,26 @@ func buildAccounts(now time.Time, hold bool) (work, labs, side, kimi *pool.Accou
 	labs.SetQuotaWindows([]pool.QuotaWindow{
 		{Name: "5h", Limit: 1, Used: 0.22, Source: "headers", ResetAt: now.Add(4*time.Hour + 6*time.Minute), FetchedAt: now},
 		{Name: "7d", Limit: 1, Used: 0.53, Source: "headers", ResetAt: now.Add(5*24*time.Hour + 4*time.Hour), FetchedAt: now},
-		// Over the 0.98 switch threshold: fableSpent, even though the
-		// account is otherwise healthy for Sonnet/Opus/Haiku.
-		{Name: "7d-fable", Limit: 1, Used: 0.985, Source: "headers", ResetAt: now.Add(2*24*time.Hour + 9*time.Hour), FetchedAt: now},
+		// Present so the per-family bucket is visible in a healthy pool,
+		// but well under the 0.98 switch threshold — a hero image should
+		// not lead with a spent bucket. The window going over threshold
+		// (fableSpent) is demonstrated by the -hold state instead.
+		{Name: "7d-fable", Limit: 1, Used: 0.35, Source: "headers", ResetAt: now.Add(2*24*time.Hour + 9*time.Hour), FetchedAt: now},
 	})
 	side.SetQuotaWindows([]pool.QuotaWindow{
-		{Name: "5h", Limit: 1, Used: 1, Source: "headers", ResetAt: now.Add(55 * time.Minute), FetchedAt: now},
-		{Name: "7d", Limit: 1, Used: 0.97, Source: "headers", ResetAt: now.Add(2*24*time.Hour + 19*time.Hour), FetchedAt: now},
+		{Name: "5h", Limit: 1, Used: 0.58, Source: "headers", ResetAt: now.Add(55 * time.Minute), FetchedAt: now},
+		{Name: "7d", Limit: 1, Used: 0.34, Source: "headers", ResetAt: now.Add(2*24*time.Hour + 19*time.Hour), FetchedAt: now},
 	})
-	// Subscription quota is gone (5h at 1.0) but extra usage is available
-	// and already in use — tier 3 from the README's overage table, the
-	// ordinary "paid" state rather than a crisis.
+	// Extra usage is available and permitted (CanOverage doesn't require
+	// the subscription quota to actually be spent — it's a standing
+	// permission, confirmed by the provider), so the "on extra usage"
+	// badge is honest even though this account's quota is currently
+	// healthy. OverageUsed > 0 while InUse is false: it was drawn on
+	// earlier in this billing period and that counter refills on its own
+	// slower cycle (README §Extra usage), not with the quota window that
+	// has since reset — not currently billing, just not starting from 0.
 	side.SetOverageForTest(provider.Overage{
-		Known: true, Available: true, InUse: true,
+		Known: true, Available: true, InUse: false,
 		Utilization: 0.22,
 		ResetAt:     now.Add(11 * 24 * time.Hour),
 	})
@@ -209,21 +223,46 @@ func buildAccounts(now time.Time, hold bool) (work, labs, side, kimi *pool.Accou
 	return
 }
 
-// historyStart is the used-fraction the seeded history starts at, low
-// enough to draw a rising trend into the account's live figure but never
-// above it: a history that starts above cur would draw usage falling on
-// its own within one quota window, which never happens — a window only
-// ever climbs until it resets, at which point spillway records a fresh
-// window rather than a dip in the old one. Without the second clamp, an
-// account whose live Used is very small (cur*0.35 below the 0.02 floor)
-// would get exactly that impossible dip.
-func historyStart(cur float64) float64 {
+// historyStartShort is the used-fraction the seeded history starts at for
+// a fast-cycling window (5h today), low enough to draw a visible rising
+// trend into the account's live figure but never above it: a history that
+// starts above cur would draw usage falling on its own within one quota
+// window, which never happens — a window only ever climbs until it
+// resets, at which point spillway records a fresh window rather than a
+// dip in the old one. Without the second clamp, an account whose live Used
+// is very small (cur*0.35 below the 0.02 floor) would get exactly that
+// impossible dip.
+func historyStartShort(cur float64) float64 {
 	start := cur * 0.35
 	if start < 0.02 {
 		start = 0.02
 	}
 	if start > cur {
 		start = cur
+	}
+	return start
+}
+
+// historyStartLong is the seeded starting point for a window whose reset
+// is days away (7d, 7d-fable, or anything else the demo doesn't
+// specifically know is fast-cycling). Two reasons it stays almost flat
+// rather than climbing the same 65% that historyStartShort draws:
+//
+//   - realism: a bucket that only resets every several days genuinely
+//     barely moves within the 5.5h of history seeded here.
+//   - the dashboard's burn-rate alarm (index.html's beatsReset) compares a
+//     projected dry time against the window's OWN reset, which for a 7d
+//     window is measured in days. Reading a 65%-over-5.5h climb into that
+//     projection makes almost any account look like it is about to run
+//     dry before refilling — which is what actually happened in the
+//     first cut of this demo (issue #72 review): a healthy pool's hero
+//     screenshot came out with a red "runs dry" banner. A small, mostly
+//     flat climb keeps the projected dry time safely past any multi-day
+//     reset instead.
+func historyStartLong(cur float64) float64 {
+	start := cur - 0.01
+	if start < 0 {
+		start = 0
 	}
 	return start
 }
@@ -246,10 +285,23 @@ func seedQuotaHistory(rl *reqlog.Log, now time.Time, accounts []*pool.Account) {
 				continue
 			}
 			cur := w.Used / w.Limit
-			start := historyStart(cur)
+			short := w.Name == "5h"
+			var start float64
+			if short {
+				start = historyStartShort(cur)
+			} else {
+				start = historyStartLong(cur)
+			}
 			for i := 0; i < points; i++ {
 				frac := float64(i) / float64(points-1)
-				used := start + (cur-start)*frac + (rnd.Float64()-0.5)*0.02
+				used := start + (cur-start)*frac
+				if short {
+					// Noise only where the slope is steep enough to carry
+					// it — on a long window it would swamp the deliberately
+					// tiny climb and reintroduce the false-alarm risk
+					// historyStartLong exists to avoid.
+					used += (rnd.Float64() - 0.5) * 0.02
+				}
 				if used < 0 {
 					used = 0
 				}

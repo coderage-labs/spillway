@@ -10,15 +10,16 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/dashboard-healthy.png" alt="spillway admin dashboard: four pooled accounts across Claude and Kimi, one pinned, one on paid extra usage, a headroom-over-time chart, and per-window exact figures" width="720">
+  <img src="docs/images/dashboard-healthy.png" alt="spillway admin dashboard: four pooled accounts across Claude and Kimi, one pinned, one permitted paid extra usage, and a headroom-over-time chart with a burn-rate projection" width="720">
 </p>
 
 The dashboard above (`internal/admin/demo` serves it over mock data —
 `go run ./internal/admin/demo`): four accounts across two providers, one
-pinned to keep a piece of work off the others, one drawing on paid extra
-usage once its subscription quota is gone, and a headroom curve per quota
-window with a burn-rate projection. See [Admin API + web UI](#admin-api--web-ui)
-below for what happens when the pool actually runs dry.
+pinned to keep a piece of work off the others, one permitted to draw on
+paid extra usage if its subscription quota ever runs out, and a headroom
+curve per quota window with a burn-rate projection. See
+[Admin API + web UI](#admin-api--web-ui) below for what the same pool looks
+like once it actually runs dry.
 
 Local, single-user daemon that proxies official AI CLIs (Claude Code, and any
 Anthropic-shaped endpoint) and rotates requests across a pool of **your own**
