@@ -13,7 +13,7 @@ import (
 
 func TestRunEnv(t *testing.T) {
 	cfg := config.Defaults()
-	env := runEnv(&cfg, "/home/u/.config/spillway-ca.pem")
+	env := runEnv(&cfg, "/home/u/.config/spillway-ca.pem", "")
 	joined := strings.Join(env, "\n")
 	for _, want := range []string{
 		"HTTPS_PROXY=http://127.0.0.1:7654",
@@ -27,17 +27,57 @@ func TestRunEnv(t *testing.T) {
 	}
 }
 
+// TestRunEnvSetsCABundleVarsWhenBundlePresent covers issue #64: when a
+// combined CA bundle exists, all three non-Node TLS variables must point at
+// it, and NODE_EXTRA_CA_CERTS must be untouched (Node keeps trusting the
+// plain CA cert, not the bundle).
+func TestRunEnvSetsCABundleVarsWhenBundlePresent(t *testing.T) {
+	cfg := config.Defaults()
+	env := runEnv(&cfg, "/tmp/ca.pem", "/tmp/ca-bundle.pem")
+	joined := strings.Join(env, "\n")
+	for _, want := range []string{
+		"SSL_CERT_FILE=/tmp/ca-bundle.pem",
+		"REQUESTS_CA_BUNDLE=/tmp/ca-bundle.pem",
+		"CURL_CA_BUNDLE=/tmp/ca-bundle.pem",
+		"NODE_EXTRA_CA_CERTS=/tmp/ca.pem",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("env missing %q", want)
+		}
+	}
+}
+
+// TestRunEnvOmitsCABundleVarsWhenBundleAbsent is the other half of the trap
+// in issue #64: an empty bundlePath (mitm.EnsureCABundle couldn't confidently
+// find this platform's system roots) must leave SSL_CERT_FILE,
+// REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE unset entirely — never pointed at a
+// bundle missing the system roots, which would break verification of every
+// ordinary site for anything reading those variables.
+func TestRunEnvOmitsCABundleVarsWhenBundleAbsent(t *testing.T) {
+	cfg := config.Defaults()
+	env := runEnv(&cfg, "/tmp/ca.pem", "")
+	joined := strings.Join(env, "\n")
+	for _, banned := range []string{"SSL_CERT_FILE=", "REQUESTS_CA_BUNDLE=", "CURL_CA_BUNDLE="} {
+		if strings.Contains(joined, banned) {
+			t.Errorf("env must not contain %q when no bundle exists", banned)
+		}
+	}
+	if !strings.Contains(joined, "NODE_EXTRA_CA_CERTS=/tmp/ca.pem") {
+		t.Error("NODE_EXTRA_CA_CERTS should still be set")
+	}
+}
+
 func TestRunEnvAPITimeoutBump(t *testing.T) {
 	cfg := config.Defaults() // holdMax 4h → 4h+60s = 14460000ms
 
-	env := runEnv(&cfg, "/tmp/ca.pem")
+	env := runEnv(&cfg, "/tmp/ca.pem", "")
 	if !strings.Contains(strings.Join(env, "\n"), "API_TIMEOUT_MS=14460000") {
 		t.Error("API_TIMEOUT_MS not set to holdMax+60s")
 	}
 
 	// Never lower an existing higher value.
 	t.Setenv("API_TIMEOUT_MS", "20000000")
-	env = runEnv(&cfg, "/tmp/ca.pem")
+	env = runEnv(&cfg, "/tmp/ca.pem", "")
 	joined := strings.Join(env, "\n")
 	if !strings.Contains(joined, "API_TIMEOUT_MS=20000000") {
 		t.Error("existing higher API_TIMEOUT_MS was lowered")
@@ -45,7 +85,7 @@ func TestRunEnvAPITimeoutBump(t *testing.T) {
 
 	// An existing LOWER value is raised.
 	t.Setenv("API_TIMEOUT_MS", "1000")
-	env = runEnv(&cfg, "/tmp/ca.pem")
+	env = runEnv(&cfg, "/tmp/ca.pem", "")
 	joined = strings.Join(env, "\n")
 	if !strings.Contains(joined, "API_TIMEOUT_MS=14460000") || strings.Count(joined, "API_TIMEOUT_MS=") != 1 {
 		t.Errorf("existing lower API_TIMEOUT_MS not replaced exactly once:\n%s", joined)
@@ -53,7 +93,7 @@ func TestRunEnvAPITimeoutBump(t *testing.T) {
 
 	// holdMax 0 → no bump; an inherited value passes through untouched.
 	cfg.Pool.HoldMax = "0"
-	env = runEnv(&cfg, "/tmp/ca.pem")
+	env = runEnv(&cfg, "/tmp/ca.pem", "")
 	joined = strings.Join(env, "\n")
 	if strings.Contains(joined, "API_TIMEOUT_MS=14460000") {
 		t.Error("API_TIMEOUT_MS bumped despite holdMax 0")
@@ -70,7 +110,7 @@ func TestRunEnvStripsAnthropicKnobs(t *testing.T) {
 	t.Setenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
 	cfg := config.Defaults()
-	env := runEnv(&cfg, "/tmp/ca.pem")
+	env := runEnv(&cfg, "/tmp/ca.pem", "")
 	joined := strings.Join(env, "\n")
 	for _, banned := range []string{"ANTHROPIC_BASE_URL=", "ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN="} {
 		if strings.Contains(joined, banned) {
@@ -110,7 +150,7 @@ func TestSpawnCLIFakeClaude(t *testing.T) {
 	}
 
 	cfg := config.Defaults()
-	env := append(runEnv(&cfg, "/tmp/ca.pem"), "FAKE_OUT="+outFile)
+	env := append(runEnv(&cfg, "/tmp/ca.pem", ""), "FAKE_OUT="+outFile)
 	err := spawnCLI(fake, []string{"--version"}, env)
 	var exitErr *ExitCodeError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {

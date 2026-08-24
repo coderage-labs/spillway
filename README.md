@@ -342,6 +342,70 @@ base-URL mode, logging the failure; `run` refuses to launch the CLI).
 Silently minting a replacement on an ambiguous read error is exactly what
 caused the original outage.
 
+### Non-Node subprocesses (issue #64)
+
+`run` only ever taught **Node** to trust spillway's CA, via
+`NODE_EXTRA_CA_CERTS`. But every subprocess of the spawned CLI inherits
+`HTTPS_PROXY`/`HTTP_PROXY` too — MCP servers included — and a non-Node one
+(a Python MCP server under `uv`, most concretely) that happens to call a
+MITM'd host (`api.anthropic.com`) has no way to trust that CA: Python's
+`ssl` reads `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`, curl reads
+`CURL_CA_BUNDLE`, and neither knows anything about
+`NODE_EXTRA_CA_CERTS`. Measured live: one such client retried the same
+failing request roughly 7 times a minute, indefinitely, producing 11,665
+log lines from a single MCP server over one afternoon.
+
+`run` now also writes a combined CA bundle — this machine's system root
+certificates concatenated with spillway's own CA cert — to
+`spillway-ca-bundle.pem` beside `spillway-ca.pem`, and points
+`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE` at it.
+`NODE_EXTRA_CA_CERTS` is untouched — Node keeps trusting the plain CA cert,
+not the bundle. Unlike the CA cert and leaf manifest, this file holds only
+public certificates, so it is world-readable (0644), not 0600.
+
+**The bundle is only ever written when the system roots can be confidently
+obtained.** `SSL_CERT_FILE` and friends *replace* a client's trust store
+rather than extend it — a bundle missing the system roots would turn
+today's narrow failure (only MITM'd hosts break) into every ordinary site
+failing to verify for anything that reads these variables. Go gives no
+portable way to read the system roots back out as PEM
+(`x509.SystemCertPool()`'s `CertPool` cannot be enumerated), so this is
+platform-specific: macOS shells out to `security find-certificate`, the
+same mechanism other tools use to reach the Keychain's root store; Linux
+reads the first present well-known system bundle file (`/etc/ssl/certs/ca-
+certificates.crt` and similar, matching each distro's convention). Windows
+has no equivalent well-known bundle file and its own certificate store
+mostly bypasses these variables anyway, so it is deliberately left
+unimplemented. Whenever the roots can't be found — including this
+unimplemented-platform case — **nothing is written and none of the three
+variables are set**, silently, logged once at WARN: leaving those
+subprocesses exactly as they were before this fix (some things fail loudly
+against a MITM'd host) is strictly better than a bundle that breaks
+everything else.
+
+**This changes what an MCP server's own calls to a MITM'd host actually
+do.** Today they fail outright. Once this bundle exists, they succeed —
+which means they get rotated across your account pool and **consume your
+subscription quota**, silently, for inference the CLI never asked for. This
+is not gated or policed: spillway intercepts the hosts it is configured to
+intercept and pools whatever reaches them, same as always. To make such a
+request visible after the fact, the request log and the `request` log line
+now also carry the client's own `User-Agent` header verbatim — the CLI's
+own is distinctive (`claude-cli/x.y.z (external, cli)`); most other HTTP
+clients (`python-requests`, `urllib`, curl's own) are not, so this is a
+hint to look at when something seems off, never something to gate or route
+on.
+
+The "mitm connection failed" warning (logged when a terminated TLS
+connection errors out — a client that doesn't trust the leaf, a client that
+walked away mid-handshake) is now rate-limited per host and failure detail:
+the first occurrence always logs, repeats within a one-minute window are
+folded into the next line's `suppressed_repeats` count instead of one line
+each. This exists independently of the bundle above — it is what let the
+11,665-line loop bury an unrelated Remote Control failure in noise for
+hours, and a client stuck in some other permanent failure mode would do the
+same regardless of what the bundle does or doesn't fix.
+
 ## Config
 
 `~/.config/spillway.yaml` (override with `SPILLWAY_CONFIG`), created with

@@ -46,6 +46,15 @@ type Entry struct {
 	// account, and that difference is invisible everywhere else (doc §6.18).
 	ModelAsked  string `json:"model_asked,omitempty"`
 	ModelServed string `json:"model_served,omitempty"`
+	// UserAgent is the client's own User-Agent header, verbatim (issue #64).
+	// Once a combined CA bundle (internal/mitm.EnsureCABundle) lets a
+	// non-Node subprocess's TLS verification succeed against a MITM'd host,
+	// its requests get pooled and billed exactly like the CLI's own — a
+	// behaviour change worth being able to see after the fact. The CLI's own
+	// UA is distinctive ("claude-cli/x.y.z (external, cli)"); most other
+	// HTTP clients (python-requests, urllib, curl) are not, so this is only
+	// ever a hint, never something to gate or route on.
+	UserAgent string `json:"user_agent,omitempty"`
 }
 
 // Log is an open request-log database.
@@ -76,7 +85,7 @@ func Open(path string) (*Log, error) {
 		return nil, fmt.Errorf("create request log schema: %w", err)
 	}
 	// Added after the first release; existing databases need the columns.
-	for _, col := range []string{"model_asked", "model_served"} {
+	for _, col := range []string{"model_asked", "model_served", "user_agent"} {
 		if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN ` + col + ` TEXT NOT NULL DEFAULT ''`); err != nil &&
 			!strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -104,10 +113,10 @@ func (l *Log) Record(e Entry) error {
 		e.Ts = time.Now()
 	}
 	_, err := l.db.Exec(`INSERT INTO requests
-		(ts, account, path, status, duration_ms, bytes, event, model_asked, model_served)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(ts, account, path, status, duration_ms, bytes, event, model_asked, model_served, user_agent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.Ts.UnixMilli(), e.Account, e.Path, e.Status, e.DurationMs, e.Bytes, e.Event,
-		e.ModelAsked, e.ModelServed)
+		e.ModelAsked, e.ModelServed, e.UserAgent)
 	return err
 }
 
@@ -117,7 +126,7 @@ func (l *Log) Recent(limit int) ([]Entry, error) {
 		limit = 100
 	}
 	rows, err := l.db.Query(`SELECT ts, account, path, status, duration_ms, bytes, event,
-		model_asked, model_served
+		model_asked, model_served, user_agent
 		FROM requests ORDER BY ts DESC, rowid DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -128,7 +137,7 @@ func (l *Log) Recent(limit int) ([]Entry, error) {
 		var e Entry
 		var ts int64
 		if err := rows.Scan(&ts, &e.Account, &e.Path, &e.Status, &e.DurationMs, &e.Bytes, &e.Event,
-			&e.ModelAsked, &e.ModelServed); err != nil {
+			&e.ModelAsked, &e.ModelServed, &e.UserAgent); err != nil {
 			return nil, err
 		}
 		e.Ts = time.UnixMilli(ts)

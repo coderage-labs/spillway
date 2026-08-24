@@ -38,7 +38,19 @@ var stripEnv = []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AU
 // runEnv builds the MITM proxy env for a spawned CLI (design doc §6.15):
 // HTTPS_PROXY/HTTP_PROXY at the spillway listener, NO_PROXY for loopback,
 // NODE_EXTRA_CA_CERTS trusting our CA — never the system store.
-func runEnv(cfg *config.Config, pemPath string) []string {
+//
+// bundlePath, when non-empty, additionally points the non-Node TLS stacks a
+// subprocess of the CLI might use (issue #64: an MCP server run under
+// python/uv, most concretely) at a combined bundle — system roots plus
+// spillway's CA — via SSL_CERT_FILE, REQUESTS_CA_BUNDLE and CURL_CA_BUNDLE.
+// Every subprocess inherits HTTPS_PROXY/HTTP_PROXY transitively, but only
+// Node was ever taught to trust spillway's CA; without this, any other
+// language's client hitting a MITM'd host (api.anthropic.com) fails TLS
+// verification, retries forever, and floods the log (11,665 lines measured
+// live). When bundlePath is empty — mitm.EnsureCABundle couldn't confidently
+// obtain this platform's system roots — none of the three are set: see the
+// package doc on mitm.EnsureCABundle for why that is the safe choice.
+func runEnv(cfg *config.Config, pemPath, bundlePath string) []string {
 	proxy := "http://" + net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))
 	env := append(os.Environ(),
 		"HTTPS_PROXY="+proxy,
@@ -46,6 +58,13 @@ func runEnv(cfg *config.Config, pemPath string) []string {
 		"NO_PROXY=localhost,127.0.0.1,::1",
 		"NODE_EXTRA_CA_CERTS="+pemPath,
 	)
+	if bundlePath != "" {
+		env = append(env,
+			"SSL_CERT_FILE="+bundlePath,
+			"REQUESTS_CA_BUNDLE="+bundlePath,
+			"CURL_CA_BUNDLE="+bundlePath,
+		)
+	}
 	for _, k := range stripEnv {
 		env = slices.DeleteFunc(env, func(e string) bool {
 			return strings.HasPrefix(e, k+"=")
@@ -97,9 +116,15 @@ func runClaude(args []string) error {
 	// real chain for its actual host set) to be up, so this call only
 	// ever needs to confirm the pem it's about to hand the spawned CLI via
 	// NODE_EXTRA_CA_CERTS actually exists — no hosts of its own to demand.
-	if _, err := mitm.EnsureCA(pemPath, nil, nil); err != nil {
+	ca, err := mitm.EnsureCA(pemPath, nil, nil)
+	if err != nil {
 		return fmt.Errorf("ensure MITM CA: %w", err)
 	}
+	// Best-effort (issue #64): a combined system-roots + spillway-CA bundle
+	// for non-Node subprocesses. bundlePath is "" when this platform's
+	// system roots can't be confidently found — runEnv then leaves
+	// SSL_CERT_FILE/REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE unset, same as today.
+	bundlePath, _ := mitm.EnsureCABundle(pemPath, ca.CertPEM(), nil)
 
 	// Strip a leading "--" separator.
 	if len(args) > 0 && args[0] == "--" {
@@ -118,7 +143,7 @@ func runClaude(args []string) error {
 			fmt.Fprintln(os.Stderr, "spillway: set SPILLWAY_ALLOW_UNTESTED_CLIENT=1 to silence this")
 		}
 	}
-	return spawnCLI(bin, args, runEnv(cfg, pemPath))
+	return spawnCLI(bin, args, runEnv(cfg, pemPath, bundlePath))
 }
 
 // claudeVersion asks the CLI what it is. Best-effort: an empty answer means
