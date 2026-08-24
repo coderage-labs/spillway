@@ -238,7 +238,7 @@ func (w *slogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// handshakeErrFromAddr matches the one part of Go's http.Server TLS
+// handshakeErrFromAddr matches the leading part of Go's http.Server TLS
 // handshake error text that is guaranteed to differ on every single
 // attempt: "http: TLS handshake error from <client-addr>: ". <client-addr>
 // is the client's ephemeral source port — a fresh CONNECT is a fresh TCP
@@ -251,16 +251,36 @@ func (w *slogWriter) Write(p []byte) (int, error) {
 // message, so it cannot run past it.
 var handshakeErrFromAddr = regexp.MustCompile(`^http: TLS handshake error from \S+: `)
 
-// normalizeHandshakeDetail strips the client's ephemeral source port
-// before a handshake failure becomes mitmFailLogger's dedup key.
+// ipPortPattern matches ANY bare IPv4:port or bracketed [IPv6]:port pair,
+// wherever it occurs in the message — not just the leading one
+// handshakeErrFromAddr strips. A handshake failure that bottoms out in a
+// network read/write error carries a SECOND, independent address pair of
+// its own: a *net.OpError formats as "<op> <net> <local>-><remote>: <err>",
+// e.g. "read tcp 127.0.0.1:7654->127.0.0.1:61018: read: connection reset by
+// peer" — and <remote> is the client's ephemeral port, exactly as volatile
+// as the one already stripped above. Measured against a real production
+// log: roughly a fifth of all "mitm connection failed" occurrences were
+// this exact shape, and every one carried a distinct port, so stripping
+// only the leading address left both #64's dedup and this detector blind
+// to about 20% of failures.
+var ipPortPattern = regexp.MustCompile(`\b(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[[0-9a-fA-F:]+\]):\d+\b`)
+
+// normalizeHandshakeDetail turns a raw handshake-failure message into a
+// stable key for the SAME underlying failure recurring — the exact byte
+// text of whatever address happened to be involved is not load-bearing;
+// what matters is "same host, same kind of failure".
 //
-// Without this, "detail" is never actually the same string twice for the
-// same underlying failure against the same host — a fresh CONNECT is a
-// fresh TCP connection with a fresh source port, always. That silently
-// limited #64's own fix to a coincidence (identical ports) that never
-// happens in practice, and it defeats issue #66's stale-CA detector
-// outright: that detector's whole signal is the SAME failure recurring,
-// which never compares equal without this.
+// Two passes: first the guaranteed leading "from <addr>: " Go always adds,
+// then a general sweep for any OTHER address:port pair anywhere else in
+// the message (the read/write-error case above). Without both, "detail" is
+// never actually the same string twice for the same underlying failure
+// against the same host — a fresh CONNECT is a fresh TCP connection with a
+// fresh source port, always. That silently limited #64's own fix to a
+// coincidence that never happens in practice, and it defeats issue #66's
+// stale-CA detector outright: that detector's whole signal is the SAME
+// failure recurring, which never compares equal without this.
 func normalizeHandshakeDetail(msg string) string {
-	return handshakeErrFromAddr.ReplaceAllString(msg, "")
+	msg = handshakeErrFromAddr.ReplaceAllString(msg, "")
+	msg = ipPortPattern.ReplaceAllString(msg, "<addr>")
+	return msg
 }

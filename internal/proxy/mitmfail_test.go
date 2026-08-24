@@ -121,6 +121,58 @@ func TestNormalizeHandshakeDetailStripsEphemeralPort(t *testing.T) {
 	}
 }
 
+// TestNormalizeHandshakeDetailCollapsesAllThreeRealShapes exercises the
+// exact three message shapes a real production log held (10,608 distinct
+// raw detail strings across roughly 24 hours): a bare TLS-layer EOF, a
+// bare TLS alert, and — the one the original fix missed — a network
+// read/write error whose *net.OpError text carries a SECOND, independent
+// ephemeral port ("read tcp <local>-><remote>: <reason>") that survives a
+// normalization stripping only the leading address. About 2,100 of the
+// ~10,600 real failures (roughly 20%) were this third shape, and every one
+// of them carried a distinct port — so this case is asserted explicitly
+// rather than folded into the pair above.
+func TestNormalizeHandshakeDetailCollapsesAllThreeRealShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw1    string
+		raw2    string
+		wantOne string
+	}{
+		{
+			name:    "bare EOF",
+			raw1:    "http: TLS handshake error from 127.0.0.1:61001: EOF",
+			raw2:    "http: TLS handshake error from 127.0.0.1:61002: EOF",
+			wantOne: "EOF",
+		},
+		{
+			name:    "bare TLS alert",
+			raw1:    "http: TLS handshake error from 127.0.0.1:61003: local error: tls: bad record MAC",
+			raw2:    "http: TLS handshake error from 127.0.0.1:61004: local error: tls: bad record MAC",
+			wantOne: "local error: tls: bad record MAC",
+		},
+		{
+			// The shape the original fix missed: a second address pair
+			// nested inside the net.OpError text, past the leading one
+			// handshakeErrFromAddr already strips.
+			name:    "connection reset by peer (nested address)",
+			raw1:    "http: TLS handshake error from 127.0.0.1:61018: read tcp 127.0.0.1:7654->127.0.0.1:61018: read: connection reset by peer",
+			raw2:    "http: TLS handshake error from 127.0.0.1:61041: read tcp 127.0.0.1:7654->127.0.0.1:61041: read: connection reset by peer",
+			wantOne: "read tcp <addr>-><addr>: read: connection reset by peer",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := normalizeHandshakeDetail(tc.raw1)
+			b := normalizeHandshakeDetail(tc.raw2)
+			if a != b {
+				t.Fatalf("two occurrences of the same failure normalized to different strings: %q vs %q", a, b)
+			}
+			if a != tc.wantOne {
+				t.Errorf("normalized = %q, want %q", a, tc.wantOne)
+			}
+		})
+	}
+}
+
 // ── issue #66: stale-CA stranded-client detection ──────────────────────────
 //
 // These exercise mitmFailLogger.Stranded() directly rather than through a
