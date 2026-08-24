@@ -93,7 +93,11 @@ func runClaude(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := mitm.EnsureCA(openSecrets(), pemPath, nil); err != nil {
+	// probeListening above already requires the daemon (which mints the
+	// real chain for its actual host set) to be up, so this call only
+	// ever needs to confirm the pem it's about to hand the spawned CLI via
+	// NODE_EXTRA_CA_CERTS actually exists — no hosts of its own to demand.
+	if _, err := mitm.EnsureCA(pemPath, nil, nil); err != nil {
 		return fmt.Errorf("ensure MITM CA: %w", err)
 	}
 

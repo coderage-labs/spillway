@@ -18,8 +18,18 @@ import (
 	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/mitm"
 	"github.com/coderage-labs/spillway/internal/pool"
-	"github.com/coderage-labs/spillway/internal/secrets"
 )
+
+// mustHostname extracts the hostname EnsureCA needs to mint a leaf for,
+// from an httptest server's URL.
+func mustHostname(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", rawURL, err)
+	}
+	return u.Hostname()
+}
 
 // mitmRig is a TLS upstream + CA + MITM-enabled proxy front server.
 type mitmRig struct {
@@ -33,7 +43,8 @@ func newMITMRig(t *testing.T, upstreamHandler http.HandlerFunc) *mitmRig {
 	upstream := httptest.NewTLSServer(upstreamHandler)
 	t.Cleanup(upstream.Close)
 
-	ca, err := mitm.EnsureCA(secrets.NewFake(), filepath.Join(t.TempDir(), "ca.pem"), testLogger())
+	upstreamHost := mustHostname(t, upstream.URL)
+	ca, err := mitm.EnsureCA(filepath.Join(t.TempDir(), "ca.pem"), []string{upstreamHost}, testLogger())
 	if err != nil {
 		t.Fatalf("EnsureCA: %v", err)
 	}
@@ -129,7 +140,7 @@ func TestConnectMITMValidatesUpstream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	ca, err := mitm.EnsureCA(secrets.NewFake(), filepath.Join(t.TempDir(), "ca.pem"), testLogger())
+	ca, err := mitm.EnsureCA(filepath.Join(t.TempDir(), "ca.pem"), []string{mustHostname(t, upstream.URL)}, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

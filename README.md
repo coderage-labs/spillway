@@ -279,12 +279,47 @@ change any of this; a slash command is the one channel that travels.
 ## MITM mode
 
 The proxy listener also answers CONNECT: hosts of configured upstreams are
-terminated with a locally minted leaf and fed into the same pool pipeline;
-every other host is a blind TCP relay, so only configured vendor hosts are ever
-decrypted. The CA private key lives in the OS keychain (survives restarts,
-never touches disk); the CA cert is written to `~/.config/spillway-ca.pem`
-(0600) and trusted only by spawned CLIs via `NODE_EXTRA_CA_CERTS` — never the
-system store. Upstream TLS is always fully verified.
+terminated with a leaf minted for that exact host, and fed into the same pool
+pipeline; every other host is a blind TCP relay, so only configured vendor
+hosts are ever decrypted. Upstream TLS is always fully verified.
+
+**There is no CA private key at rest, anywhere — not in the OS keychain, not
+on disk (issue #69).** Earlier designs kept the key around so leaves could be
+minted on demand as new hosts appeared: first only in the keychain, then
+(briefly) on disk next to the cert. Both still had a key that had to be read
+from somewhere before anything could be signed, and a keychain read that
+failed ambiguously during a routine `brew upgrade` was indistinguishable from
+"no CA yet" — which either silently destroyed a working CA (the original
+bug) or, once that was fixed to fail loudly instead, left a daemon that would
+not start (still a live session stranded, just louder about it).
+
+On-demand signing turns out not to be needed: the full set of hosts spillway
+will ever terminate CONNECT for — the global upstream plus every configured
+account's upstream — is known before the first request, and nothing adds an
+account to a running pool — a config change needs a restart to take effect
+(the same reason a fresh login shows a restart notice). So at startup spillway
+generates the CA, mints a leaf for every one of those hosts up front, writes
+the CA cert (`spillway-ca.pem`) and the leaf certs+keys
+(`spillway-ca-leaves.json`, 0600 in the existing 0700 directory — only the
+leaf keys inside it are secret, but one file is simpler than two) to disk,
+and lets the CA private key fall out of scope. There is nothing left to fail
+to read on the next start, and no ambiguous keychain or disk error to
+mishandle, because the thing that used to be read no longer exists.
+
+A restart with an unchanged host set — the ordinary case, including the
+`brew upgrade` scenario that caused the original outage — reuses the stored
+CA cert and every leaf byte-for-byte: nothing a client already trusts
+changes. A host set that grew (a config change added an account or upstream)
+forces a full regeneration, which strands running clients exactly like any
+CA replacement — accepted, because it only follows a deliberate change that
+already needs a restart, never a plain upgrade. An install from before #69
+migrates the same way: it has an old pem but no leaf manifest, which is
+handled as ordinary regeneration rather than trying to read the now-orphaned
+keychain key forward — reading it would have to succeed at the moment of the
+very upgrade that installs this fix, i.e. exactly the situation the original
+incident occurred in, so it would keep the dependency this issue removes,
+just one release later. That old keychain entry is left in place, never read
+again.
 
 Identity-bound paths — `/v1/oauth/token`, `/v1/code/*`, `/v1/environments/*`,
 `/v1/sessions/*`, `/api/oauth/files/*`, `/api/oauth/file_upload`, and WebSocket
@@ -298,21 +333,14 @@ the CA changed can never be made to trust the new one — reconnecting doesn't
 help, and the failures look like plain network flakiness (`tls: bad record
 MAC`, `EOF`, connection resets) rather than a trust-anchor change. spillway
 logs a WARN naming the reason and the new CA's fingerprint whenever this
-happens, and says explicitly when a restart is required — that only happens
-when the CA's private key itself had to be replaced (the key was genuinely
-missing from the keychain, e.g. a fresh install or the entry was deleted).
-If only the certificate file was missing or corrupt, it's rewritten from the
-existing key and nothing needs restarting, since already-running clients
-validate leaves against the key, not the exact cert bytes on disk.
+happens, and says explicitly when a restart is required.
 
-**If the keychain is locked, denied, or unreachable at startup**, spillway
-never treats that as "no CA yet": it leaves the existing key and cert
-untouched and fails loudly instead (`server` degrades to base-URL mode,
-logging the failure; `run` refuses to launch the CLI). Silently minting a
-replacement key on an ambiguous read error is exactly what caused a prior
-outage — the same distinction the OS keychain section below draws for
-account credentials (a locked/denied keychain is a refusal, not permission
-to fall back).
+**A stored leaf chain that can't be read as a store entry (corrupt file, disk
+error) is never treated as "no CA yet"**: spillway leaves the existing pem
+and manifest untouched and fails loudly instead (`server` degrades to
+base-URL mode, logging the failure; `run` refuses to launch the CLI).
+Silently minting a replacement on an ambiguous read error is exactly what
+caused the original outage.
 
 ## Config
 

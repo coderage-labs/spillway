@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -161,6 +162,21 @@ func (h *Handler) SetMITM(ca caIssuer) {
 			h.allowedHosts[u.Hostname()] = true
 		}
 	}
+}
+
+// AllowedHosts returns the hostnames CONNECT termination covers right now
+// (the global upstream plus every account's upstream override), sorted.
+// Exported so the caller can size the CA's precomputed leaf set correctly
+// (issue #69): NewHandler already computes this via SetMITM(nil), so
+// calling this right after NewHandler and before mitm.EnsureCA hands the
+// full, real host set to EnsureCA before it mints anything.
+func (h *Handler) AllowedHosts() []string {
+	hosts := make([]string, 0, len(h.allowedHosts))
+	for host := range h.allowedHosts {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 // ServeHTTP implements http.Handler.
