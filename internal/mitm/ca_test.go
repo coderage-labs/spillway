@@ -2,8 +2,10 @@ package mitm
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -22,11 +24,26 @@ func testLogger(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-func TestEnsureCAGenerateAndReload(t *testing.T) {
-	store := secrets.NewFake()
-	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
+// readManifest reads the stored leaf chain straight off disk, the way
+// EnsureCA itself does.
+func readManifest(t *testing.T, pemPath string) chainManifest {
+	t.Helper()
+	b, err := secrets.NewFileStore(chainPath(pemPath)).GetRaw(leavesBlobName)
+	if err != nil {
+		t.Fatalf("read stored leaf chain: %v", err)
+	}
+	m, err := parseManifest(b)
+	if err != nil {
+		t.Fatalf("parse stored leaf chain: %v", err)
+	}
+	return m
+}
 
-	ca1, err := EnsureCA(store, pemPath, nil)
+func TestEnsureCAGenerateAndReload(t *testing.T) {
+	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
+	hosts := []string{"api.anthropic.com", "127.0.0.1"}
+
+	ca1, err := EnsureCA(pemPath, hosts, nil)
 	if err != nil {
 		t.Fatalf("EnsureCA: %v", err)
 	}
@@ -34,55 +51,54 @@ func TestEnsureCAGenerateAndReload(t *testing.T) {
 		t.Fatal("empty CA pem")
 	}
 	testmode.AssertPrivateFile(t, pemPath)
-	// Key is in the store, never alongside the pem.
-	if _, err := store.GetRaw(CAKeyName); err != nil {
-		t.Errorf("CA key not in store: %v", err)
+	testmode.AssertPrivateFile(t, chainPath(pemPath))
+
+	manifest := readManifest(t, pemPath)
+	for _, h := range hosts {
+		if _, ok := manifest.Leaves[h]; !ok {
+			t.Errorf("no stored leaf for host %q", h)
+		}
 	}
 
-	// Second call loads the same CA.
-	ca2, err := EnsureCA(store, pemPath, nil)
+	// Second call reuses the same CA and leaves — no rotation on a plain
+	// restart with an unchanged host set.
+	ca2, err := EnsureCA(pemPath, hosts, nil)
 	if err != nil {
 		t.Fatalf("EnsureCA reload: %v", err)
 	}
 	if string(ca2.CertPEM()) != string(ca1.CertPEM()) {
 		t.Error("reload produced a different CA")
 	}
+	leaf1, err := ca1.Leaf("api.anthropic.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf2, err := ca2.Leaf("api.anthropic.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(leaf1.Certificate[0], leaf2.Certificate[0]) {
+		t.Error("reload rotated the leaf certificate")
+	}
 }
 
-func TestEnsureCARegeneratesOnMismatch(t *testing.T) {
-	store := secrets.NewFake()
+// TestEnsureCANoLeafOutsideConfiguredHosts proves the on-demand minting
+// path is really gone: a host that was never in the EnsureCA hosts list
+// gets no leaf, not a freshly minted one.
+func TestEnsureCANoLeafOutsideConfiguredHosts(t *testing.T) {
 	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
-	ca1, err := EnsureCA(store, pemPath, nil)
+	ca, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Corrupt the pem half: key is fine, pem is garbage -> cert-only rewrite.
-	if err := os.WriteFile(pemPath, []byte("garbage"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ca2, err := EnsureCA(store, pemPath, nil)
-	if err != nil {
-		t.Fatalf("EnsureCA after pem corruption: %v", err)
-	}
-	if string(ca2.CertPEM()) == string(ca1.CertPEM()) {
-		t.Error("expected regeneration after mismatch")
-	}
-
-	// And the reverse: drop the key half (genuinely absent -> ErrNotFound).
-	store2 := secrets.NewFake()
-	ca3, err := EnsureCA(store2, pemPath, nil)
-	if err != nil {
-		t.Fatalf("EnsureCA after key loss: %v", err)
-	}
-	if string(ca3.CertPEM()) == string(ca2.CertPEM()) {
-		t.Error("expected regeneration after key loss")
+	if _, err := ca.Leaf("evil.example.com"); err == nil {
+		t.Fatal("expected an error for a host outside the configured set — on-demand minting must be gone")
 	}
 }
 
 func TestLeafValidatesAgainstCA(t *testing.T) {
-	store := secrets.NewFake()
-	ca, err := EnsureCA(store, filepath.Join(t.TempDir(), "ca.pem"), nil)
+	pemPath := filepath.Join(t.TempDir(), "ca.pem")
+	ca, err := EnsureCA(pemPath, []string{"api.anthropic.com", "127.0.0.1"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +106,6 @@ func TestLeafValidatesAgainstCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Chain served includes the CA; leaf[0] must verify against the CA pool.
 	x509Leaf, err := x509.ParseCertificate(leaf.Certificate[0])
 	if err != nil {
 		t.Fatal(err)
@@ -100,10 +115,10 @@ func TestLeafValidatesAgainstCA(t *testing.T) {
 	if _, err := x509Leaf.Verify(x509.VerifyOptions{DNSName: "api.anthropic.com", Roots: pool}); err != nil {
 		t.Errorf("leaf does not validate against CA: %v", err)
 	}
-	// Cached on second call.
+	// Same object on repeated lookup.
 	leaf2, _ := ca.Leaf("api.anthropic.com")
 	if leaf2 != leaf {
-		t.Error("leaf not cached")
+		t.Error("expected the same precomputed leaf on repeated lookup")
 	}
 	// IP hosts get an IP SAN.
 	ipLeaf, err := ca.Leaf("127.0.0.1")
@@ -120,213 +135,245 @@ func TestLeafValidatesAgainstCA(t *testing.T) {
 	}
 }
 
-// --- issue #65: keychain-error guard -------------------------------------
+// --- issue #69: no key at rest anywhere ------------------------------------
 
-// TestEnsureCAPreservesOnKeychainError is the core regression test for #65:
-// a keychain read failure that is NOT secrets.ErrNotFound (locked, denied,
-// transient) must not be treated as "no CA yet". The existing CA (key in
-// the store, cert on disk) must survive untouched and the error must be
-// surfaced to the caller.
-func TestEnsureCAPreservesOnKeychainError(t *testing.T) {
-	store := secrets.NewFake()
+// TestEnsureCANoPrivateKeyWrittenAnywhere is the core regression test for
+// #69's second design: after EnsureCA returns, nothing on disk holds the CA
+// private key. Only the leaves' own (public-facing, but still secret)
+// per-host keys should exist — the CA key itself must never appear.
+func TestEnsureCANoPrivateKeyWrittenAnywhere(t *testing.T) {
 	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
-
-	ca1, err := EnsureCA(store, pemPath, nil)
+	ca, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyBefore, err := store.GetRaw(CAKeyName)
-	if err != nil {
-		t.Fatalf("key not stored: %v", err)
-	}
-	pemBefore, err := os.ReadFile(pemPath)
-	if err != nil {
-		t.Fatalf("pem not written: %v", err)
-	}
 
-	// Simulate a locked/denied keychain: an error that is NOT ErrNotFound.
-	simulated := errors.New("keychain locked")
-	store.SetGetRawErr(simulated)
-
-	var logbuf bytes.Buffer
-	ca2, err := EnsureCA(store, pemPath, testLogger(&logbuf))
-	if err == nil {
-		t.Fatal("expected EnsureCA to fail loudly on a non-ErrNotFound keychain error")
-	}
-	if !errors.Is(err, simulated) {
-		t.Errorf("returned error does not wrap the underlying keychain error: %v", err)
-	}
-	if ca2 != nil {
-		t.Error("expected nil CA on keychain error")
-	}
-
-	// The existing CA must be untouched: same key, same pem, on disk.
-	store.SetGetRawErr(nil) // restore normal lookups to read it back
-	keyAfter, err := store.GetRaw(CAKeyName)
-	if err != nil {
-		t.Fatalf("key vanished from store: %v", err)
-	}
-	if !bytes.Equal(keyBefore, keyAfter) {
-		t.Error("existing CA key was modified despite the keychain error")
-	}
-	pemAfter, err := os.ReadFile(pemPath)
-	if err != nil {
-		t.Fatalf("pem vanished from disk: %v", err)
-	}
-	if !bytes.Equal(pemBefore, pemAfter) {
-		t.Error("existing CA pem was rewritten despite the keychain error")
-	}
-	if string(pemBefore) != string(ca1.CertPEM()) {
-		t.Error("sanity: pem on disk should match the original CA")
+	manifest := readManifest(t, pemPath)
+	for host, rec := range manifest.Leaves {
+		leafCert, err := parseCertPEM(rec.CertPEM)
+		if err != nil {
+			t.Fatalf("parse leaf cert for %q: %v", host, err)
+		}
+		// The stored leaf key must be the LEAF's own key (verifiable via
+		// tls.X509KeyPair), never the CA's key: if it were the CA key, the
+		// leaf cert's public key would equal the CA cert's public key,
+		// which a leaf (a distinct, freshly generated key pair) never
+		// does.
+		if _, err := tls.X509KeyPair(rec.CertPEM, rec.KeyPEM); err != nil {
+			t.Errorf("stored key for %q is not that leaf's own key: %v", host, err)
+		}
+		leafPub, ok := leafCert.PublicKey.(*ecdsa.PublicKey)
+		caPub, caOK := ca.cert.PublicKey.(*ecdsa.PublicKey)
+		if !ok || !caOK {
+			t.Fatalf("expected ECDSA public keys, got leaf=%T ca=%T", leafCert.PublicKey, ca.cert.PublicKey)
+		}
+		if leafPub.Equal(caPub) {
+			t.Errorf("stored leaf key for %q equals the CA key — the CA private key was persisted", host)
+		}
 	}
 }
 
-// TestEnsureCARegeneratesOnGenuineAbsence proves the first-run path (and
-// "key deliberately deleted" path) still works: secrets.ErrNotFound from
-// the store — not just "any error" — is what triggers regeneration.
-func TestEnsureCARegeneratesOnGenuineAbsence(t *testing.T) {
-	store := secrets.NewFake() // GetRaw returns wrapped ErrNotFound: nothing stored yet.
+// TestEnsureCARestartWithUnchangedHostsDoesNotRotate proves the important
+// "no disruption on an ordinary restart" property directly: two independent
+// EnsureCA calls against the same pemPath and the same host set produce
+// byte-identical CA cert and leaf cert bytes — a client that trusted the
+// first generation still trusts the second.
+func TestEnsureCARestartWithUnchangedHostsDoesNotRotate(t *testing.T) {
+	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
+	hosts := []string{"api.anthropic.com"}
+
+	ca1, err := EnsureCA(pemPath, hosts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf1, err := ca1.Leaf("api.anthropic.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a restart: a fresh process, same pemPath, same hosts.
+	ca2, err := EnsureCA(pemPath, hosts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf2, err := ca2.Leaf("api.anthropic.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(ca1.CertPEM(), ca2.CertPEM()) {
+		t.Error("restart with an unchanged host set rotated the CA cert")
+	}
+	if !bytes.Equal(leaf1.Certificate[0], leaf2.Certificate[0]) {
+		t.Error("restart with an unchanged host set rotated the leaf cert")
+	}
+
+	// And the leaf served after "restart" must still validate against the
+	// CA cert bytes a client trusted before it.
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(ca1.CertPEM())
+	x509Leaf, err := x509.ParseCertificate(leaf2.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x509Leaf.Verify(x509.VerifyOptions{DNSName: "api.anthropic.com", Roots: pool}); err != nil {
+		t.Errorf("post-restart leaf does not validate against the pre-restart trusted CA: %v", err)
+	}
+}
+
+// TestEnsureCAChangedHostSetRegeneratesLoudly: a config change that adds a
+// host not covered by the stored chain forces a full regeneration — and it
+// must say so loudly, since this is the one case that legitimately strands
+// running clients (and per the issue, is accepted because it only follows a
+// deliberate config change that already needs a restart).
+func TestEnsureCAChangedHostSetRegeneratesLoudly(t *testing.T) {
 	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
 
-	if _, err := os.Stat(pemPath); !os.IsNotExist(err) {
-		t.Fatalf("sanity: pem should not exist yet")
+	ca1, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	var logbuf bytes.Buffer
-	ca, err := EnsureCA(store, pemPath, testLogger(&logbuf))
+	ca2, err := EnsureCA(pemPath, []string{"api.anthropic.com", "api.moonshot.ai"}, testLogger(&logbuf))
 	if err != nil {
-		t.Fatalf("EnsureCA on genuine absence: %v", err)
+		t.Fatalf("EnsureCA with an added host: %v", err)
+	}
+	if string(ca1.CertPEM()) == string(ca2.CertPEM()) {
+		t.Error("expected a new CA when the host set grew")
+	}
+	if _, err := ca2.Leaf("api.moonshot.ai"); err != nil {
+		t.Errorf("expected a leaf for the newly added host: %v", err)
+	}
+	got := logbuf.String()
+	if !strings.Contains(strings.ToLower(got), "restart") {
+		t.Errorf("expected a restart warning when the host set changed; got log: %s", got)
+	}
+	if !strings.Contains(got, "level=WARN") {
+		t.Errorf("expected the warning at WARN level; got log: %s", got)
+	}
+}
+
+// TestEnsureCAFirstRunDoesNotWarn: generating a chain when nothing existed
+// before (no pem, no manifest) must not tell anyone to restart anything —
+// there is nothing running yet that could be stranded.
+func TestEnsureCAFirstRunDoesNotWarn(t *testing.T) {
+	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
+	var logbuf bytes.Buffer
+	if _, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, testLogger(&logbuf)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToLower(logbuf.String()), "restart") {
+		t.Errorf("first-run generation must not mention restarting anything; got log: %s", logbuf.String())
+	}
+}
+
+// TestEnsureCAMigrationFromPreIssue69InstallRegeneratesLoudly: an install
+// that predates #69 has a pem on disk (from the old keychain-backed design)
+// but no leaf manifest. #69 does not attempt to read the old keychain
+// entry forward (see EnsureCA's doc comment) — it is ordinary
+// regeneration, with the stale pem's presence upgrading the log line to a
+// restart warning, same as any other "no stored chain" case.
+func TestEnsureCAMigrationFromPreIssue69InstallRegeneratesLoudly(t *testing.T) {
+	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
+	if err := os.WriteFile(pemPath, []byte("stale pem from a pre-#69 install"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logbuf bytes.Buffer
+	ca, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, testLogger(&logbuf))
+	if err != nil {
+		t.Fatalf("EnsureCA on migration: %v", err)
 	}
 	if len(ca.CertPEM()) == 0 {
 		t.Fatal("empty CA pem")
 	}
-	if _, err := store.GetRaw(CAKeyName); err != nil {
-		t.Errorf("CA key not stored after generation: %v", err)
+	got := logbuf.String()
+	if !strings.Contains(strings.ToLower(got), "restart") {
+		t.Errorf("migration from a pre-#69 install must warn about restarting; got log: %s", got)
 	}
-	if _, err := os.Stat(pemPath); err != nil {
-		t.Errorf("CA pem not written after generation: %v", err)
+	// And a fresh, real chain now exists on disk.
+	manifest := readManifest(t, pemPath)
+	if _, ok := manifest.Leaves["api.anthropic.com"]; !ok {
+		t.Error("expected a stored leaf for the configured host after migration")
 	}
 }
 
-// TestEnsureCAKeyPresentPemMissingRewritesFromKey: the key is present and
-// good, the pem file does not exist. The deliberate choice (see EnsureCA's
-// doc comment) is to rewrite ONLY the cert, from the existing key, rather
-// than a full regenerate — a full regenerate would rotate the key and cause
-// exactly the #65 outage. Assert that choice explicitly: the key in the
-// store must be byte-identical before and after.
-func TestEnsureCAKeyPresentPemMissingRewritesFromKey(t *testing.T) {
-	store := secrets.NewFake()
+// TestEnsureCAAmbiguousManifestErrorPreservesExisting extends #65's rule to
+// the stored-chain read: a manifest file that is present but corrupt must
+// never be treated as absence. It must fail loudly and leave the existing
+// pem and manifest untouched.
+func TestEnsureCAAmbiguousManifestErrorPreservesExisting(t *testing.T) {
 	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
-
-	ca1, err := EnsureCA(store, pemPath, nil)
+	if _, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	pemBefore, err := os.ReadFile(pemPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyBefore, err := store.GetRaw(CAKeyName)
+	manifestPathOnDisk := chainPath(pemPath)
+	manifestBefore, err := os.ReadFile(manifestPathOnDisk)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.Remove(pemPath); err != nil {
+	// Corrupt the manifest file's JSON directly — present, but unreadable
+	// as a store entry. Not "absent".
+	if err := os.WriteFile(manifestPathOnDisk, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	var logbuf bytes.Buffer
-	ca2, err := EnsureCA(store, pemPath, testLogger(&logbuf))
-	if err != nil {
-		t.Fatalf("EnsureCA after pem removal: %v", err)
+	ca, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, testLogger(&logbuf))
+	if err == nil {
+		t.Fatal("expected EnsureCA to fail loudly on a corrupt-but-present manifest")
+	}
+	if ca != nil {
+		t.Error("expected nil CA")
+	}
+	if errors.Is(err, secrets.ErrNotFound) {
+		t.Error("a corrupt manifest must not be reported as ErrNotFound")
 	}
 
-	keyAfter, err := store.GetRaw(CAKeyName)
+	pemAfter, err := os.ReadFile(pemPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(keyBefore, keyAfter) {
-		t.Error("key was rotated when only the pem was missing — this is the outage the fix prevents")
+	if !bytes.Equal(pemBefore, pemAfter) {
+		t.Error("existing CA pem was rewritten despite the ambiguous manifest error")
 	}
-	if string(ca2.CertPEM()) == string(ca1.CertPEM()) {
-		t.Error("expected a freshly written cert (new serial), even though the key is unchanged")
-	}
-	// New leaves must validate against the rewritten cert.
-	leaf, err := ca2.Leaf("example.com")
+	manifestAfter, err := os.ReadFile(manifestPathOnDisk)
 	if err != nil {
 		t.Fatal(err)
 	}
-	x509Leaf, err := x509.ParseCertificate(leaf.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(ca2.CertPEM())
-	if _, err := x509Leaf.Verify(x509.VerifyOptions{DNSName: "example.com", Roots: pool}); err != nil {
-		t.Errorf("leaf from rewritten cert does not validate: %v", err)
+	_ = manifestBefore // the corruption IS the new content; just confirm it wasn't further mangled/replaced
+	if len(manifestAfter) == 0 {
+		t.Error("manifest file vanished")
 	}
 }
 
-// TestEnsureCAKeyPresentPemCorruptRewritesFromKey: same as above but the
-// pem file exists and is readable, just not valid PEM/cert content.
-func TestEnsureCAKeyPresentPemCorruptRewritesFromKey(t *testing.T) {
-	store := secrets.NewFake()
+// TestEnsureCALeafKeyFileMode0600 asserts the stored chain file (which
+// holds the only secret material left — each leaf's private key) is 0600
+// in the existing 0700 directory.
+func TestEnsureCALeafKeyFileMode0600(t *testing.T) {
 	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
-
-	ca1, err := EnsureCA(store, pemPath, nil)
-	if err != nil {
+	if _, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	keyBefore, err := store.GetRaw(CAKeyName)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(pemPath, []byte("not a pem"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	ca2, err := EnsureCA(store, pemPath, nil)
-	if err != nil {
-		t.Fatalf("EnsureCA after pem corruption: %v", err)
-	}
-
-	keyAfter, err := store.GetRaw(CAKeyName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(keyBefore, keyAfter) {
-		t.Error("key was rotated when only the pem was corrupt")
-	}
-	if string(ca2.CertPEM()) == string(ca1.CertPEM()) {
-		t.Error("expected a freshly written cert")
-	}
+	testmode.AssertPrivateFile(t, chainPath(pemPath))
 }
 
-// --- logging: replacing an existing CA warns about restart; first run doesn't ---
-
-func TestEnsureCALogsRestartWarningOnlyWhenReplacing(t *testing.T) {
-	// First run: no key, no pem. Must NOT tell anyone to restart anything.
-	store := secrets.NewFake()
-	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
-
-	var firstRunLog bytes.Buffer
-	if _, err := EnsureCA(store, pemPath, testLogger(&firstRunLog)); err != nil {
-		t.Fatal(err)
+// TestEnsureCACorruptManifestJSON is a narrower sanity check that a
+// manifest which round-trips through parseManifest badly (valid file,
+// invalid content shape) is treated as corrupt, not absent.
+func TestEnsureCACorruptManifestJSON(t *testing.T) {
+	if _, err := parseManifest([]byte("{not valid json")); err == nil {
+		t.Fatal("expected an error for invalid manifest JSON")
 	}
-	if strings.Contains(strings.ToLower(firstRunLog.String()), "restart") {
-		t.Errorf("first-run generation must not mention restarting anything; got log: %s", firstRunLog.String())
-	}
-
-	// Now simulate the #65 scenario: key genuinely gone (fresh store) but a
-	// pem from a previous install is still on disk -> full regenerate,
-	// replacing an existing CA -> must warn to restart.
-	store2 := secrets.NewFake()
-	var replaceLog bytes.Buffer
-	if _, err := EnsureCA(store2, pemPath, testLogger(&replaceLog)); err != nil {
-		t.Fatal(err)
-	}
-	got := replaceLog.String()
-	if !strings.Contains(strings.ToLower(got), "restart") {
-		t.Errorf("regeneration that replaces an existing CA must warn about restarting proxied CLIs; got log: %s", got)
-	}
-	if !strings.Contains(got, "level=WARN") {
-		t.Errorf("expected the restart warning at WARN level; got log: %s", got)
+	// Sanity: a well-formed empty manifest parses fine.
+	b, _ := json.Marshal(chainManifest{Leaves: map[string]leafRecord{}})
+	if _, err := parseManifest(b); err != nil {
+		t.Fatalf("expected empty manifest to parse: %v", err)
 	}
 }

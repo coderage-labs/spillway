@@ -344,13 +344,17 @@ func runServer(args []string) error {
 		}
 	}()
 
-	// MITM mode: CA key lives in the keychain, cert pem next to the config.
-	// Failure degrades to base-URL mode only — loudly.
+	// MITM mode: the CA and a leaf for every configured upstream host are
+	// minted once, up front, and the CA private key is discarded — no key
+	// at rest anywhere, in the keychain or on disk (issue #69; see
+	// internal/mitm/ca.go's package doc for why). handler.AllowedHosts()
+	// is the full host set NewHandler already computed from cfg + the
+	// pool's accounts. Failure degrades to base-URL mode only — loudly.
 	pemPath, err := caPEMPath()
 	if err != nil {
 		return err
 	}
-	if ca, err := mitm.EnsureCA(openSecrets(), pemPath, logger); err != nil {
+	if ca, err := mitm.EnsureCA(pemPath, handler.AllowedHosts(), logger); err != nil {
 		logger.Error("MITM CA unavailable — CONNECT termination disabled, base-URL mode still works", "err", err)
 	} else {
 		handler.SetMITM(ca)
