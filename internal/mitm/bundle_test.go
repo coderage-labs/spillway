@@ -153,8 +153,12 @@ func TestValidRootBundle(t *testing.T) {
 }
 
 func TestBundlePathFor(t *testing.T) {
-	got := bundlePathFor("/home/u/.config/spillway/spillway-ca.pem")
-	want := "/home/u/.config/spillway/spillway-ca-bundle.pem"
+	// Build both sides with filepath so this asserts the naming rule rather
+	// than the host's separator — hardcoding "/" failed on Windows CI, where
+	// filepath.Join yields backslashes.
+	dir := filepath.Join("home", "u", ".config", "spillway")
+	got := bundlePathFor(filepath.Join(dir, "spillway-ca.pem"))
+	want := filepath.Join(dir, "spillway-ca-bundle.pem")
 	if got != want {
 		t.Errorf("bundlePathFor = %q, want %q", got, want)
 	}
