@@ -714,6 +714,38 @@ function el(tag, attrs, text) {
   return n;
 }
 
+// packLabels arranges y-sorted items (each an {y, ...}) so consecutive ones
+// are at least `gap` apart, without letting the set escape [top, bottom].
+// A forward-only cascade (push each label below the one before it) can run
+// the last label past `bottom`; naively shifting the whole block back up by
+// the overflow — the previous approach — just as easily runs the first
+// label past `top`, because that correction only ever looked at the last
+// label (spillway#75). Instead: cascade forward, clamp the tail to
+// `bottom` and let that ripple backward (each label pulled down no further
+// than gap above its successor), then, only if that pull dragged the head
+// above `top`, clamp the head and cascade forward again. Mutates in place.
+// Returns false if the set does not fit in [top, bottom] even ideally
+// spaced at `gap` — the caller's cue to degrade rather than trust the
+// result.
+function packLabels(items, gap, top, bottom) {
+  if (!items.length) return true;
+  for (let i = 1; i < items.length; i++) {
+    if (items[i].y - items[i - 1].y < gap) items[i].y = items[i - 1].y + gap;
+  }
+  const last = items.length - 1;
+  if (items[last].y > bottom) items[last].y = bottom;
+  for (let i = last - 1; i >= 0; i--) {
+    items[i].y = Math.min(items[i].y, items[i + 1].y - gap);
+  }
+  if (items[0].y < top) {
+    items[0].y = top;
+    for (let i = 1; i < items.length; i++) {
+      items[i].y = Math.max(items[i].y, items[i - 1].y + gap);
+    }
+  }
+  return items[last].y <= bottom + 0.01;
+}
+
 function drawHeadroom(list) {
   const svg = document.getElementById("headroom");
   const legend = document.getElementById("legend");
@@ -761,15 +793,36 @@ function drawHeadroom(list) {
     labels.push({ x: Math.min(lx + 7, W - R + 6), y: ly, colour,
                   text: clip(short(s.account), 11) + " " + s.window });
   }
-  // Series ends cluster; nudge the labels apart so none is unreadable.
+  // Series ends cluster; nudge the labels apart so none is unreadable, and
+  // never at the cost of one rendering outside the plot (spillway#75).
   labels.sort((a, b) => a.y - b.y);
-  const GAP = 13;
-  for (let i = 1; i < labels.length; i++) {
-    if (labels[i].y - labels[i - 1].y < GAP) labels[i].y = labels[i - 1].y + GAP;
+  const GAP = 13, MIN_GAP = 9, top = T, bottom = H - B;
+  let shown = labels;
+  if (!packLabels(shown, GAP, top, bottom)) {
+    // Doesn't fit even ideally spaced at the normal gap: tighten first...
+    const tight = Math.max(MIN_GAP, (bottom - top) / Math.max(1, shown.length - 1));
+    if (!packLabels(shown, tight, top, bottom)) {
+      // ...and if it still won't seat everyone at the floor gap, there are
+      // too many labels for the space, not too little gap between them.
+      // Drop interior series, keeping the extremes — the highest and
+      // lowest headroom are the informative ends — plus an even spread of
+      // the rest. A dropped series is still identifiable: its dot is
+      // still plotted, and the legend above already maps its colour to
+      // its account name.
+      const fit = Math.max(2, Math.floor((bottom - top) / MIN_GAP) + 1);
+      const mid = shown.slice(1, -1);
+      const step = mid.length / Math.max(1, fit - 2);
+      const kept = [shown[0]];
+      for (let i = 0; i < fit - 2; i++) kept.push(mid[Math.min(mid.length - 1, Math.round(i * step))]);
+      kept.push(shown[shown.length - 1]);
+      shown = kept;
+      packLabels(shown, MIN_GAP, top, bottom);
+    }
   }
-  const overflow = labels.length ? labels[labels.length - 1].y - (H - B) : 0;
-  if (overflow > 0) for (const l of labels) l.y -= overflow;
-  for (const l of labels) {
+  // Belt and braces: whatever the packing above intended, no label ever
+  // renders outside the plot.
+  for (const l of shown) l.y = Math.min(bottom, Math.max(top, l.y));
+  for (const l of shown) {
     svg.appendChild(el("text", { x: l.x, y: l.y + 3, class: "lbl", fill: l.colour }, l.text));
   }
   const seen = new Set();

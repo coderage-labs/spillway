@@ -172,16 +172,20 @@ func buildAccounts(now time.Time, hold bool) (work, labs, side, kimi *pool.Accou
 			Reason:      "extra usage exhausted for this billing period",
 			ResetAt:     now.Add(3 * 24 * time.Hour),
 		})
-		// Kept closer to the Claude cluster than the healthy scenario's
-		// Kimi figures (0.31/0.47 there): the chart's own label-collision
-		// bug (index.html's drawHeadroom, ~line 762 — reported upstream,
-		// not fixed here) pushes an isolated high-headroom label off the
-		// plot's top edge when several other series are bunched at zero.
-		// Still comfortably "ok" (nowhere near the 0.98 threshold) and
-		// still the healthiest account in the pool.
+		// Deliberately far from the Claude cluster: seven windows above are
+		// all bunched at 0-9% headroom, and Kimi sits alone up at 52-67%.
+		// That combination — a tight low cluster plus a distant healthy
+		// outlier — is the exact trigger for spillway#75 (the headroom
+		// chart's anti-overlap pass could push the outlier's label off the
+		// plot's top edge). An earlier version of this demo narrowed these
+		// figures to 0.45/0.35 specifically to dodge that bug; now that
+		// drawHeadroom clamps symmetrically, they're restored to the
+		// original values so `-hold` doubles as a standing regression
+		// check — this state is still comfortably "ok" (nowhere near the
+		// 0.98 threshold) and still the healthiest account in the pool.
 		kimi.SetQuotaWindows([]pool.QuotaWindow{
-			{Name: "5h", Limit: 1, Used: 0.55, Source: "poll", ResetAt: now.Add(3*time.Hour + 20*time.Minute), FetchedAt: now},
-			{Name: "7d", Limit: 1, Used: 0.65, Source: "poll", ResetAt: now.Add(4*24*time.Hour + 9*time.Hour), FetchedAt: now},
+			{Name: "5h", Limit: 1, Used: 0.33, Source: "poll", ResetAt: now.Add(3*time.Hour + 20*time.Minute), FetchedAt: now},
+			{Name: "7d", Limit: 1, Used: 0.48, Source: "poll", ResetAt: now.Add(4*24*time.Hour + 9*time.Hour), FetchedAt: now},
 		})
 		return
 	}
