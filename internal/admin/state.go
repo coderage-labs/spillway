@@ -64,6 +64,14 @@ type stateJSON struct {
 	// can I work again". A reserve account still serves, so it does not
 	// count as dry.
 	NextReset *time.Time `json:"nextReset,omitempty"`
+	// StaleCA is true once a genuine MITM CA regeneration this run
+	// performed has left at least one client looking stuck trusting the
+	// old anchor (issue #66) — see internal/proxy's stranded-client
+	// detector, wired in via SetCAWarning. Always false when nothing
+	// wired it up (e.g. base-URL-only setups, or tests that don't
+	// exercise MITM), and it decays back to false on its own once the
+	// symptom stops recurring — it is not meant to latch forever.
+	StaleCA bool `json:"staleCA,omitempty"`
 }
 
 func (s *Server) state() stateJSON {
@@ -95,6 +103,9 @@ func (s *Server) state() stateJSON {
 	st.Threshold = s.pool.Threshold()
 	if n, until := s.pool.Holds(); n > 0 {
 		st.Holding = &holdJSON{Count: n, Until: until}
+	}
+	if s.caWarning != nil {
+		st.StaleCA = s.caWarning()
 	}
 	if st.Usable == 0 && st.Reserve == 0 && st.Overage == 0 {
 		if reset, ok := s.pool.EarliestReset(); ok {

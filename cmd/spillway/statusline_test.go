@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -219,6 +221,44 @@ func TestRenderNamesAccountsNeedingAttention(t *testing.T) {
 	}
 }
 
+// Issue #66: a genuine MITM CA regeneration that has left a client stranded
+// must show a warning that names the fix outright — there is nothing else
+// to say ("restart this session" is the whole remedy).
+func TestRenderShowsStaleCAWarning(t *testing.T) {
+	st := slState{Total: 1, Usable: 1, StaleCA: true}
+	got := render(noColour, []slAccount{okAccount()}, st, time.Now())
+	for _, want := range []string{"stale CA", "restart"} {
+		if !strings.Contains(strings.ToLower(got), strings.ToLower(want)) {
+			t.Errorf("%q does not mention %q", got, want)
+		}
+	}
+}
+
+// The commonest case by far — no regeneration has ever happened, or it
+// happened but decayed back to healthy — must stay exactly as quiet as any
+// other healthy pool.
+func TestRenderOmitsStaleCAWarningWhenFalse(t *testing.T) {
+	got := render(noColour, []slAccount{okAccount()}, slState{Total: 1, Usable: 1, StaleCA: false}, time.Now())
+	if strings.Contains(strings.ToLower(got), "stale") {
+		t.Errorf("%q mentions a stale CA warning with StaleCA=false", got)
+	}
+}
+
+// The warning must show on every branch render() has — held, dry, and the
+// ordinary account line — not just the common case, since a regeneration
+// can strand a session regardless of what else the pool is doing.
+func TestRenderShowsStaleCAWarningOnEveryBranch(t *testing.T) {
+	now := time.Now()
+	holding := render(noColour, nil, slState{StaleCA: true, Holding: &slHold{Count: 1, Until: now.Add(time.Minute)}}, now)
+	dry := render(noColour, []slAccount{}, slState{StaleCA: true}, now)
+	ordinary := render(noColour, []slAccount{okAccount()}, slState{Total: 1, Usable: 1, StaleCA: true}, now)
+	for name, line := range map[string]string{"holding": holding, "dry": dry, "ordinary": ordinary} {
+		if !strings.Contains(strings.ToLower(line), "stale") {
+			t.Errorf("%s branch %q does not show the stale-CA warning", name, line)
+		}
+	}
+}
+
 // Once a window is nearly gone the percentage stops being the useful number.
 func TestRenderShowsResetCountdownOnlyWhenLow(t *testing.T) {
 	low := okAccount()
@@ -316,6 +356,38 @@ func TestStatuslineDecodesTheRealStateResponse(t *testing.T) {
 	line := render(noColour, accts, st, time.Now())
 	if !strings.Contains(line, "held") || !strings.Contains(line, "1 paused") {
 		t.Errorf("line = %q, want the hold and the paused account", line)
+	}
+}
+
+// TestStatuslineDecodesStaleCAFromTheRealAdminServer: issue #66's staleCA
+// field, wired the way main.go wires it (admin.Server.SetCAWarning), round
+// trips through the real /api/state JSON encoding — not just a hand-built
+// fixture — and shows up in the rendered line.
+func TestStatuslineDecodesStaleCAFromTheRealAdminServer(t *testing.T) {
+	healthy := pool.NewAccount("healthy", pool.SourceYAML, "tok", "", 0, "")
+	p := pool.New([]*pool.Account{healthy}, time.Now())
+
+	adminSrv := admin.New(p, nil, events.New(), "")
+	adminSrv.SetCAWarning(func() bool { return true })
+	srv := httptest.NewServer(adminSrv)
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	var st slState
+	if err := getJSON(addr, "", "/api/state", &st); err != nil {
+		t.Fatal(err)
+	}
+	if !st.StaleCA {
+		t.Fatal("staleCA did not decode as true from the real admin server")
+	}
+
+	var accts []slAccount
+	if err := getJSON(addr, "", "/api/accounts", &accts); err != nil {
+		t.Fatal(err)
+	}
+	line := render(noColour, accts, st, time.Now())
+	if !strings.Contains(strings.ToLower(line), "stale") {
+		t.Errorf("line = %q, want the stale-CA warning", line)
 	}
 }
 
@@ -491,5 +563,79 @@ func TestStatuslineFlagIsNotASubcommand(t *testing.T) {
 	}
 	if err := runStatusline([]string{"instal"}); err == nil {
 		t.Error("a mistyped subcommand should still be an error")
+	}
+}
+
+// Issue #66's stale-CA warning must obey the statusline's existing rules
+// exactly like every other signal on it: nothing for an unproxied session,
+// and nothing when the daemon can't be reached — even while the warning
+// itself is actively true. A hot warning must never be the thing that
+// breaks those two silences.
+
+// TestStatuslinePrintsNothingForUnproxiedSessionEvenWithStaleCA: the daemon
+// is up and genuinely reporting staleCA=true, but this process's own
+// environment says it isn't going through spillway. The statusline must
+// still print nothing at all — reporting a warning that belongs to traffic
+// this session isn't part of would be worse than the missing HTTPS_PROXY
+// case ordinary rendering already guards against.
+func TestStatuslinePrintsNothingForUnproxiedSessionEvenWithStaleCA(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/state":
+			io.WriteString(w, `{"usable":1,"total":1,"staleCA":true}`)
+		case "/api/accounts":
+			io.WriteString(w, `[{"name":"a","state":"ok"}]`)
+		}
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "spillway.yaml")
+	if err := os.WriteFile(cfgPath, []byte("admin:\n  addr: "+addr+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SPILLWAY_CONFIG", cfgPath)
+	// Deliberately NOT proxied: nothing points at spillway's proxy address.
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ANTHROPIC_BASE_URL"} {
+		t.Setenv(k, "")
+	}
+
+	got := captureStdout(t, func() {
+		if err := runStatusline(nil); err != nil {
+			t.Errorf("runStatusline: %v", err)
+		}
+	})
+	if got != "" {
+		t.Errorf("unproxied session printed %q, want nothing even though the daemon reports staleCA=true", got)
+	}
+}
+
+// TestStatuslinePrintsNothingWhenDaemonUnreachable: the session IS attached
+// to spillway (HTTPS_PROXY matches the configured proxy address), but the
+// admin listener it would ask about staleCA is down. This must degrade the
+// same as every other signal already does — silently, not with a stale or
+// half-rendered line.
+func TestStatuslinePrintsNothingWhenDaemonUnreachable(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "spillway.yaml")
+	// admin.addr deliberately names nothing listening; proxy.port is the
+	// one attachedToSpillway checks HTTPS_PROXY against.
+	if err := os.WriteFile(cfgPath, []byte(
+		"admin:\n  addr: 127.0.0.1:1\nproxy:\n  host: 127.0.0.1\n  port: 61987\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SPILLWAY_CONFIG", cfgPath)
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:61987")
+	t.Setenv("https_proxy", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+
+	got := captureStdout(t, func() {
+		if err := runStatusline(nil); err != nil {
+			t.Errorf("runStatusline: %v", err)
+		}
+	})
+	if got != "" {
+		t.Errorf("unreachable daemon printed %q, want nothing", got)
 	}
 }

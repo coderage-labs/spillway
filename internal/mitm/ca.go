@@ -82,6 +82,15 @@ type CA struct {
 	cert    *x509.Certificate
 	certPEM []byte
 	leaves  map[string]*tls.Certificate // fixed after construction; read-only
+	// Regenerated is true only when this call to EnsureCA actually minted a
+	// new CA in place of one that already existed — never on the
+	// stored-chain-reused happy path (an ordinary restart, #70's fix) and
+	// never on a true first-ever install (nothing existed to strand). It is
+	// the single fact issue #66's stale-CA warning is built on: only a
+	// caller told Regenerated=true may treat a later recurring MITM
+	// handshake failure as evidence of a stranded client (see
+	// internal/proxy's mitmFailLogger).
+	Regenerated bool
 }
 
 // CertPEM returns the CA certificate in PEM form (what clients trust via
@@ -373,7 +382,10 @@ func generateChain(store *secrets.FileStore, pemPath string, wanted []string, pe
 	} else {
 		logger.Info("mitm: generated install CA", "fingerprint", fingerprint(cert), "hosts", wanted)
 	}
-	return &CA{cert: cert, certPEM: certPEM, leaves: leaves}, nil
+	// pemExisted is exactly "something was already there to strand" — the
+	// same test the log line above branches on (see the doc comment on the
+	// Regenerated field).
+	return &CA{cert: cert, certPEM: certPEM, leaves: leaves, Regenerated: pemExisted}, nil
 }
 
 // mintLeaf signs one host's leaf under caCert/caKey. Called only from

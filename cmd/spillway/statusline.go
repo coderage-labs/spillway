@@ -176,6 +176,11 @@ type slState struct {
 	Disabled  int        `json:"disabled"`
 	InFlight  int        `json:"inFlight"`
 	NextReset *time.Time `json:"nextReset"`
+	// StaleCA mirrors /api/state's staleCA (issue #66): true while a MITM
+	// CA regeneration this daemon run performed looks like it has left a
+	// client stuck trusting the old anchor. See degraded() for how it's
+	// shown.
+	StaleCA bool `json:"staleCA"`
 }
 
 // getJSON is the one HTTP shape this command needs: short timeout, optional
@@ -426,6 +431,13 @@ func degraded(p palette, st slState) string {
 	}
 	if st.Disabled > 0 {
 		b.WriteString("  " + p.paint(gradeFor(0), fmt.Sprintf("⚠ %d needs login", st.Disabled)))
+	}
+	// A replaced MITM CA (issue #66): this session may be one of the ones
+	// it stranded. Restarting is the only fix (NODE_EXTRA_CA_CERTS is read
+	// once, at process start), so the warning names it outright rather
+	// than describing the symptom.
+	if st.StaleCA {
+		b.WriteString("  " + p.paint(gradeFor(0), "⚠ stale CA — restart this session"))
 	}
 	// The only state that costs money. It is deliberately the last thing on
 	// the line and the only one that names a currency: everything else here

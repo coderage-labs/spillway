@@ -306,6 +306,12 @@ func runServer(args []string) error {
 	}
 	adminSrv := &http.Server{Handler: nil}
 	adminHandler := admin.New(p, rl, broker, token)
+	// Issue #66: expose whether a MITM CA regeneration this run performed
+	// has left a client stranded on the old anchor. handler.StaleCAWarning
+	// is read fresh on every /api/state request, so it reflects
+	// NotifyCARegenerated below (called later, once EnsureCA reports
+	// whether it actually regenerated) without any ordering dependency here.
+	adminHandler.SetCAWarning(handler.StaleCAWarning)
 	if !loopback {
 		adminHandler.RequireToken()
 		if err := admin.WriteTokenFile(tokenPath, token); err != nil {
@@ -359,6 +365,14 @@ func runServer(args []string) error {
 	} else {
 		handler.SetMITM(ca)
 		logger.Info("MITM CA ready", "pem", pemPath)
+		// A genuine replacement (never a restart that reused the stored
+		// chain, never a first-ever install — see mitm.CA.Regenerated) can
+		// strand any already-running proxied CLI (issue #66). Arm the
+		// stale-CA warning above and raise the one desktop notification
+		// while the reason is fresh.
+		if ca.Regenerated {
+			handler.NotifyCARegenerated()
+		}
 	}
 
 	addr := net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))

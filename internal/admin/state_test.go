@@ -142,3 +142,38 @@ func TestStateSeparatesReserveFromUsable(t *testing.T) {
 		t.Error("nextReset reported while a reserve account can still serve")
 	}
 }
+
+// TestStateOmitsStaleCAWhenNoWarningSourceWired: most callers (every test
+// above, and any daemon build without MITM wired up) never call
+// SetCAWarning at all. /api/state must report false in that case, not
+// error or panic — issue #66's warning is opt-in infrastructure, not a
+// required wire.
+func TestStateOmitsStaleCAWhenNoWarningSourceWired(t *testing.T) {
+	s, _ := newTestServer(t)
+	st := fetchState(t, s)
+	if st.StaleCA {
+		t.Error("staleCA = true with no warning source ever wired via SetCAWarning")
+	}
+}
+
+// TestStateReflectsCAWarningSource: /api/state must read the wired source
+// fresh on every request — both while it reports true and after it flips
+// back to false — never cache a snapshot from whenever SetCAWarning was
+// called.
+func TestStateReflectsCAWarningSource(t *testing.T) {
+	s, _ := newTestServer(t)
+	warn := true
+	s.SetCAWarning(func() bool { return warn })
+
+	if st := fetchState(t, s); !st.StaleCA {
+		t.Error("staleCA = false while the wired source reports true")
+	}
+
+	// The detector this wires to (internal/proxy) decays on its own once
+	// the symptom stops recurring — /api/state must follow it back down,
+	// not latch at the first true it ever saw.
+	warn = false
+	if st := fetchState(t, s); st.StaleCA {
+		t.Error("staleCA = true after the wired source flipped back to false — /api/state must not cache a stale reading")
+	}
+}

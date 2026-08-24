@@ -339,6 +339,34 @@ MAC`, `EOF`, connection resets) rather than a trust-anchor change. spillway
 logs a WARN naming the reason and the new CA's fingerprint whenever this
 happens, and says explicitly when a restart is required.
 
+**A running session is warned directly, not just logged at (issue #66).**
+The trigger left after #69/#70 is narrow — only a deliberate config change
+that adds a new upstream host forces a regeneration; a plain restart with an
+unchanged host set reuses the stored chain untouched. But that one case
+still strands whatever else is running, and knowing you just ran
+`spillway login` is not the same as realising three other sessions are now
+silently broken. So:
+
+- One desktop notification fires the moment a genuine regeneration happens
+  (never on the ordinary restart-reuses-the-chain path), saying other
+  sessions may need restarting.
+- The daemon then watches for the actual symptom, not just the fact of the
+  regeneration: the same MITM handshake failure (host + reason, with the
+  client's ephemeral port stripped out) recurring within about two minutes.
+  A single handshake failure is ordinary churn — a client walking away
+  mid-handshake, see the CONNECT-handling comment above — so it never counts
+  alone, and a failure has to actually recur to look like a client stuck
+  retrying against an anchor that will never verify again. Failures before
+  the regeneration never count either.
+- While that symptom is live, `/api/state` reports `staleCA: true` and
+  `spillway statusline` shows `⚠ stale CA — restart this session` — scoped
+  to a proxied session exactly like every other statusline signal, and
+  never fabricated into a proxied API response (§4).
+- The warning decays on its own about 15 minutes after the last recurring
+  failure. Once every affected session has actually restarted, the failures
+  stop, and a warning that stayed on forever after a single regeneration
+  would just be a different false positive.
+
 **A stored leaf chain that can't be read as a store entry (corrupt file, disk
 error) is never treated as "no CA yet"**: spillway leaves the existing pem
 and manifest untouched and fails loudly instead (`server` degrades to
@@ -409,6 +437,16 @@ each. This exists independently of the bundle above — it is what let the
 11,665-line loop bury an unrelated Remote Control failure in noise for
 hours, and a client stuck in some other permanent failure mode would do the
 same regardless of what the bundle does or doesn't fix.
+
+The failure detail this dedupes on has the client's ephemeral source port
+stripped out first — Go's http.Server prepends `http: TLS handshake error
+from <client-addr>: ` to every one of these, and a fresh CONNECT is a fresh
+TCP connection with a fresh port every single time. Without stripping it,
+two occurrences of the exact same underlying failure against the same host
+never actually compare equal, which would have silently limited the dedup
+above to a coincidence that never happens in practice — and separately, it
+is the one piece issue #66's stale-CA detector needs to recognise the same
+failure recurring.
 
 ## Config
 
@@ -822,6 +860,9 @@ not supply one, and fails closed if it is required but missing.
   selection to one account, or release it. `409` is a refusal `force` can
   override (would bill, or crosses provider); `400` is not. `GET /api/state`
   reports the current pin.
+- `GET /api/state`'s `staleCA` is issue #66's stale-CA warning (see "MITM
+  mode" above) — true while a genuine CA regeneration looks like it has
+  stranded at least one client; the statusline is what actually shows it.
 
 <p align="center">
   <img src="docs/images/dashboard-hold.png" alt="spillway admin dashboard showing a request held: every Claude account is dry, including paid extra usage, while a Kimi account sits healthy because cross-provider rotation is off" width="720">
