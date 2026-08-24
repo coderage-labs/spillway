@@ -9,6 +9,17 @@
   so a session doesn't stop at a 429.
 </p>
 
+<p align="center">
+  <img src="docs/images/dashboard-healthy.png" alt="spillway admin dashboard: four pooled accounts across Claude and Kimi, one pinned, one on paid extra usage, a headroom-over-time chart, and per-window exact figures" width="720">
+</p>
+
+The dashboard above (`internal/admin/demo` serves it over mock data —
+`go run ./internal/admin/demo`): four accounts across two providers, one
+pinned to keep a piece of work off the others, one drawing on paid extra
+usage once its subscription quota is gone, and a headroom curve per quota
+window with a burn-rate projection. See [Admin API + web UI](#admin-api--web-ui)
+below for what happens when the pool actually runs dry.
+
 Local, single-user daemon that proxies official AI CLIs (Claude Code, and any
 Anthropic-shaped endpoint) and rotates requests across a pool of **your own**
 subscription accounts, so a session doesn't stop at a 429.
@@ -754,6 +765,16 @@ not supply one, and fails closed if it is required but missing.
   selection to one account, or release it. `409` is a refusal `force` can
   override (would bill, or crosses provider); `400` is not. `GET /api/state`
   reports the current pin.
+
+<p align="center">
+  <img src="docs/images/dashboard-hold.png" alt="spillway admin dashboard showing a request held: every Claude account is dry, including paid extra usage, while a Kimi account sits healthy because cross-provider rotation is off" width="720">
+</p>
+
+The banner above is the state `internal/admin/demo -hold` exists to produce:
+every Claude account spent, including side's paid extra usage, with a
+request parked rather than failed. Kimi stays healthy in the corner —
+cross-provider rotation is off in this config, so its headroom does not
+rescue a Claude request.
 
 The request log is SQLite at `~/.config/spillway-requests.db` (0600) and stores
 **metadata only** — never headers or bodies. A schema test asserts the exact
