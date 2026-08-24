@@ -75,6 +75,10 @@ type Handler struct {
 	// claims observes the Representative-Claim header against #24's static
 	// guess (issue #53). Never touches selection/rotation/eligibility.
 	claims *representativeClaimObserver
+	// mitmFails rate-limits the "mitm connection failed" warning (issue
+	// #64): a client stuck retrying a MITM'd host forever must not be able
+	// to flood the log with one line per attempt.
+	mitmFails *mitmFailLogger
 }
 
 // Hooks are optional observability sinks wired by the daemon.
@@ -143,6 +147,7 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, p *pool.Pool) (*Handler
 		exhaustedMode: cfg.Pool.ExhaustedMode,
 		holdMax:       cfg.PoolHoldMax(),
 		claims:        newRepresentativeClaimObserver(),
+		mitmFails:     newMitmFailLogger(logger),
 	}
 	h.SetMITM(nil)
 	return h, nil
@@ -199,9 +204,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		"bytes", lw.bytes,
 		"account", oc.account,
 		"event", oc.event,
+		"user_agent", r.Header.Get("User-Agent"),
 	)
 	if h.hooks.Log != nil {
-		// Metadata only — never headers or bodies (§5 redaction).
+		// Metadata only — never headers or bodies (§5 redaction), except
+		// User-Agent: a single identifying header, kept so a request that
+		// didn't come from the CLI (issue #64: an MCP server's own call,
+		// once a combined CA bundle lets it verify a MITM'd host) can be
+		// told apart after the fact. A hint only — most non-CLI clients
+		// don't send a distinctive one either.
 		_ = h.hooks.Log.Record(reqlog.Entry{
 			Account:    oc.account,
 			Path:       r.URL.Path,
@@ -212,6 +223,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 			// What the client asked for vs what actually went upstream.
 			ModelAsked:  oc.modelAsked,
 			ModelServed: oc.modelServed,
+			UserAgent:   r.Header.Get("User-Agent"),
 		})
 	}
 }

@@ -19,7 +19,8 @@ func TestRoundTrip(t *testing.T) {
 
 	for i, e := range []Entry{
 		{Account: "work", Path: "/v1/messages", Status: 200, DurationMs: 1200, Bytes: 4096, Event: EventServed},
-		{Account: "kimi", Path: "/v1/messages", Status: 200, DurationMs: 800, Bytes: 1024, Event: EventRotatedQuota},
+		{Account: "kimi", Path: "/v1/messages", Status: 200, DurationMs: 800, Bytes: 1024, Event: EventRotatedQuota,
+			UserAgent: "python-requests/2.32.0"},
 	} {
 		if err := l.Record(e); err != nil {
 			t.Fatalf("Record %d: %v", i, err)
@@ -36,6 +37,12 @@ func TestRoundTrip(t *testing.T) {
 	// Newest first.
 	if got[0].Account != "kimi" || got[0].Event != EventRotatedQuota || got[0].Status != 200 || got[0].Bytes != 1024 {
 		t.Errorf("entry[0] = %+v", got[0])
+	}
+	// UserAgent (issue #64): a request log that can't tell a CLI request
+	// apart from anything else calling through the pool is a request log
+	// that can't show the quota-consumption consequence of that issue.
+	if got[0].UserAgent != "python-requests/2.32.0" {
+		t.Errorf("UserAgent = %q, want round-tripped value", got[0].UserAgent)
 	}
 	if got[0].Ts.IsZero() {
 		t.Error("ts not populated")
@@ -72,12 +79,15 @@ func TestRedactionBySchema(t *testing.T) {
 	}
 	// Every column here is a deliberate choice. model_asked/model_served were
 	// added for doc §6.18 (the served model is invisible otherwise); model
-	// names are not credentials. Anything new must be justified the same way,
-	// which is the point of asserting the exact set.
+	// names are not credentials. user_agent was added for issue #64 (telling
+	// a non-CLI caller apart after the fact); a User-Agent string is
+	// identifying metadata, same tier as a model name, never a credential.
+	// Anything new must be justified the same way, which is the point of
+	// asserting the exact set.
 	want := map[string]bool{
 		"ts": true, "account": true, "path": true, "status": true,
 		"duration_ms": true, "bytes": true, "event": true,
-		"model_asked": true, "model_served": true,
+		"model_asked": true, "model_served": true, "user_agent": true,
 	}
 	if len(cols) != len(want) {
 		t.Errorf("columns = %v", cols)

@@ -11,7 +11,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -138,8 +137,8 @@ func (h *Handler) terminateConnect(w http.ResponseWriter, r *http.Request, host 
 		// "TLS handshake error from 127.0.0.1:PORT" — no host, no SNI, and no
 		// way to tell which upstream the client gave up on.
 		srv.ErrorLog = log.New(&slogWriter{
-			log:  h.logger,
-			host: host,
+			limiter: h.mitmFails,
+			host:    host,
 		}, "", 0)
 		_ = http2.ConfigureServer(srv, &http2.Server{})
 		// One shot: Accept yields the tunnel conn once, then EOF, and Serve
@@ -222,15 +221,18 @@ func (l *oneConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 // slogWriter adapts http.Server's ErrorLog to slog, keeping the CONNECT host
 // alongside the message.
 type slogWriter struct {
-	log  *slog.Logger
-	host string
+	limiter *mitmFailLogger
+	host    string
 }
 
 func (w *slogWriter) Write(p []byte) (int, error) {
 	msg := strings.TrimSpace(string(p))
 	// A client that walks away mid-handshake is ordinary — a cancelled
 	// request, a closed tab — so this is a warning about the host, not an
-	// error about the proxy.
-	w.log.Warn("mitm connection failed", "host", w.host, "detail", msg)
+	// error about the proxy. Routed through mitmFailLogger (issue #64)
+	// rather than logged directly: a client stuck retrying a MITM'd host it
+	// doesn't trust produces this same (host, detail) pair every attempt,
+	// forever, and did once produce 11,665 lines in a single afternoon.
+	w.limiter.log(w.host, msg)
 	return len(p), nil
 }
