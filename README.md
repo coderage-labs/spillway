@@ -13,14 +13,6 @@
   <img src="docs/images/dashboard-healthy.png" alt="spillway admin dashboard: four pooled accounts across Claude and Kimi, one pinned, one permitted paid extra usage, and a headroom-over-time chart with a burn-rate projection" width="720">
 </p>
 
-The dashboard above (`internal/admin/demo` serves it over mock data —
-`go run ./internal/admin/demo`): four accounts across two providers, one
-pinned to keep a piece of work off the others, one permitted to draw on
-paid extra usage if its subscription quota ever runs out, and a headroom
-curve per quota window with a burn-rate projection. See
-[Admin API + web UI](#admin-api--web-ui) below for what the same pool looks
-like once it actually runs dry.
-
 Local, single-user daemon that proxies official AI CLIs (Claude Code, and any
 Anthropic-shaped endpoint) and rotates requests across a pool of **your own**
 subscription accounts, so a session doesn't stop at a 429.
