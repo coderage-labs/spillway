@@ -54,6 +54,11 @@ type Server struct {
 	// that only exercise the read-only API.
 	configPath string
 	onSettings func(*config.Config)
+	// caWarning, when set, reports whether issue #66's stale-CA warning
+	// should be shown on /api/state — typically (*proxy.Handler).StaleCAWarning.
+	// Not a constructor parameter, for the same reason EnableSettings isn't:
+	// tests exercising the read-only API do not need MITM wired up at all.
+	caWarning func() bool
 }
 
 // EnableSettings turns on the editable-config endpoint. apply is called with
@@ -62,6 +67,14 @@ type Server struct {
 func (s *Server) EnableSettings(configPath string, apply func(*config.Config)) {
 	s.configPath = configPath
 	s.onSettings = apply
+}
+
+// SetCAWarning wires the source for issue #66's stale-CA warning into
+// /api/state. f is read fresh on every /api/state request — never cached —
+// so the warning appears and decays live as the underlying detector's state
+// changes.
+func (s *Server) SetCAWarning(f func() bool) {
+	s.caWarning = f
 }
 
 // New builds the admin handler. An empty token means the listener is

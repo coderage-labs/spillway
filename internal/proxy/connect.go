@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -233,6 +234,33 @@ func (w *slogWriter) Write(p []byte) (int, error) {
 	// rather than logged directly: a client stuck retrying a MITM'd host it
 	// doesn't trust produces this same (host, detail) pair every attempt,
 	// forever, and did once produce 11,665 lines in a single afternoon.
-	w.limiter.log(w.host, msg)
+	w.limiter.log(w.host, normalizeHandshakeDetail(msg))
 	return len(p), nil
+}
+
+// handshakeErrFromAddr matches the one part of Go's http.Server TLS
+// handshake error text that is guaranteed to differ on every single
+// attempt: "http: TLS handshake error from <client-addr>: ". <client-addr>
+// is the client's ephemeral source port — a fresh CONNECT is a fresh TCP
+// connection with a fresh port every time, whether it is one client
+// retrying forever or a hundred different ones failing once each.
+//
+// \S+ (rather than trying to parse an IPv4/IPv6/port triple) is deliberate:
+// it matches either address form, since neither contains a space, and it is
+// anchored by the literal ": " that always follows the address in this
+// message, so it cannot run past it.
+var handshakeErrFromAddr = regexp.MustCompile(`^http: TLS handshake error from \S+: `)
+
+// normalizeHandshakeDetail strips the client's ephemeral source port
+// before a handshake failure becomes mitmFailLogger's dedup key.
+//
+// Without this, "detail" is never actually the same string twice for the
+// same underlying failure against the same host — a fresh CONNECT is a
+// fresh TCP connection with a fresh source port, always. That silently
+// limited #64's own fix to a coincidence (identical ports) that never
+// happens in practice, and it defeats issue #66's stale-CA detector
+// outright: that detector's whole signal is the SAME failure recurring,
+// which never compares equal without this.
+func normalizeHandshakeDetail(msg string) string {
+	return handshakeErrFromAddr.ReplaceAllString(msg, "")
 }

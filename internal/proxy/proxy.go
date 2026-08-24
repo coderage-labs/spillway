@@ -90,6 +90,36 @@ type Hooks struct {
 // SetHooks wires observability sinks. nil-safe to leave unset (tests).
 func (h *Handler) SetHooks(hooks Hooks) { h.hooks = hooks }
 
+// NotifyCARegenerated tells this Handler that mitm.EnsureCA just replaced
+// the MITM CA in place — mitm.CA.Regenerated was true, never on an ordinary
+// restart with an unchanged host set (#70) or a first-ever install. Call
+// this exactly once, right after SetMITM, only in that case.
+//
+// It does two things (issue #66): arms the stale-CA detector, so a later
+// recurring MITM handshake failure on h.mitmFails can be treated as
+// evidence a client is stuck trusting the old CA rather than ordinary churn
+// (see mitmfail.go); and raises the one desktop notification the issue asks
+// for at the moment of replacement, since whoever runs the config change
+// that triggered this may not be looking at any statusline right then.
+func (h *Handler) NotifyCARegenerated() {
+	h.mitmFails.activate()
+	if h.notifier != nil {
+		h.notifier.Notify("mitm-ca-regenerated", "spillway: MITM certificate replaced",
+			"Any other Claude Code session already running through spillway will fail every "+
+				"request from now on — restart it.")
+	}
+}
+
+// StaleCAWarning reports whether at least one client currently looks stuck
+// trusting a CA this run replaced (issue #66) — see mitmfail.go's
+// stranded-client detector. Always false unless NotifyCARegenerated was
+// called this run. Read by admin's /api/state so the statusline can warn
+// while it is true, and it decays back to false on its own once the
+// failures stop.
+func (h *Handler) StaleCAWarning() bool {
+	return h.mitmFails.Stranded()
+}
+
 // publish fires a broker event when one is wired.
 func (h *Handler) publish(e events.Event) {
 	if h.hooks.Events != nil {

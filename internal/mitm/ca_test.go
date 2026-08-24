@@ -201,6 +201,13 @@ func TestEnsureCARestartWithUnchangedHostsDoesNotRotate(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Issue #66's stale-CA warning is built entirely on this bit: a restart
+	// that reused the stored chain must never look like a regeneration to
+	// anything downstream.
+	if ca2.Regenerated {
+		t.Error("a restart with an unchanged host set must not report Regenerated")
+	}
+
 	if !bytes.Equal(ca1.CertPEM(), ca2.CertPEM()) {
 		t.Error("restart with an unchanged host set rotated the CA cert")
 	}
@@ -233,11 +240,17 @@ func TestEnsureCAChangedHostSetRegeneratesLoudly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ca1.Regenerated {
+		t.Error("first-ever install must not report Regenerated — nothing existed to strand")
+	}
 
 	var logbuf bytes.Buffer
 	ca2, err := EnsureCA(pemPath, []string{"api.anthropic.com", "api.moonshot.ai"}, testLogger(&logbuf))
 	if err != nil {
 		t.Fatalf("EnsureCA with an added host: %v", err)
+	}
+	if !ca2.Regenerated {
+		t.Error("a config change that added a host must report Regenerated — this is the one case issue #66 warns about")
 	}
 	if string(ca1.CertPEM()) == string(ca2.CertPEM()) {
 		t.Error("expected a new CA when the host set grew")
@@ -260,11 +273,18 @@ func TestEnsureCAChangedHostSetRegeneratesLoudly(t *testing.T) {
 func TestEnsureCAFirstRunDoesNotWarn(t *testing.T) {
 	pemPath := filepath.Join(t.TempDir(), "spillway-ca.pem")
 	var logbuf bytes.Buffer
-	if _, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, testLogger(&logbuf)); err != nil {
+	ca, err := EnsureCA(pemPath, []string{"api.anthropic.com"}, testLogger(&logbuf))
+	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.ToLower(logbuf.String()), "restart") {
 		t.Errorf("first-run generation must not mention restarting anything; got log: %s", logbuf.String())
+	}
+	// Issue #66: a caller (main.go) arms the stale-CA warning and fires the
+	// desktop notification only when Regenerated is true. First-run
+	// generation must never set it.
+	if ca.Regenerated {
+		t.Error("first-run generation must not report Regenerated")
 	}
 }
 
@@ -287,6 +307,9 @@ func TestEnsureCAMigrationFromPreIssue69InstallRegeneratesLoudly(t *testing.T) {
 	}
 	if len(ca.CertPEM()) == 0 {
 		t.Fatal("empty CA pem")
+	}
+	if !ca.Regenerated {
+		t.Error("migration from a pre-#69 install must report Regenerated — a pem was already there to strand")
 	}
 	got := logbuf.String()
 	if !strings.Contains(strings.ToLower(got), "restart") {
