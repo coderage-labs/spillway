@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.1](https://github.com/coderage-labs/spillway/compare/v0.12.0...v0.12.1) (2026-08-24)
+
+
+### Fixes
+
+* don't regenerate the MITM CA on an ambiguous keychain error ([#65](https://github.com/coderage-labs/spillway/issues/65)) ([03fe65d](https://github.com/coderage-labs/spillway/commit/03fe65d531468bb04f7ddb21f73a3acb59e03162))
+* mint every leaf up front and discard the CA private key ([#69](https://github.com/coderage-labs/spillway/issues/69)) ([5600a5f](https://github.com/coderage-labs/spillway/commit/5600a5f0ad6c443de974e778bf749ac6a2e87302))
+
 ## [0.12.0](https://github.com/coderage-labs/spillway/compare/v0.11.0...v0.12.0) (2026-08-23)
 
 
