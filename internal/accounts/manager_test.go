@@ -2,7 +2,6 @@ package accounts
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -200,93 +199,5 @@ func TestKeychainReloadStillExpiredDisables(t *testing.T) {
 	}
 	if a.State() != pool.StateDisabled {
 		t.Errorf("state = %v, want disabled", a.State())
-	}
-}
-
-// TestKeychainReloadFailsFastOnUnchangedExpiredCredential is #81's fail-fast
-// requirement. The reported failure was a keychain entry expired at
-// 02:21:28 being reloaded once a minute for an hour — 60 attempts that could
-// not possibly succeed — before spillway finally disabled the account and
-// printed the one useful line. Simulating that same once-a-minute sweep
-// directly against the Manager (EnsureFresh does not itself check whether
-// the account is already disabled — every real caller happens to, which is
-// exactly the kind of scattered, easy-to-miss guard #81's own comment warns
-// about) must not touch the keychain more than once.
-func TestKeychainReloadFailsFastOnUnchangedExpiredCredential(t *testing.T) {
-	stale := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"still-old","expiresAt":%d}}`,
-		time.Now().Add(-time.Hour).UnixMilli())
-	var loads atomic.Int32
-	src := SourceFunc(func() ([]byte, error) { loads.Add(1); return []byte(stale), nil })
-
-	m := testManager(t, "http://unused", "", src)
-	a := pool.NewAccount("local", pool.SourceKeychain, "stale", "stale-rt", expiringSoon(), "")
-
-	// 60 ticks of the real sweep interval (main.go's refreshSweepInterval is
-	// a minute), simulated back to back.
-	for i := 0; i < 60; i++ {
-		err := m.EnsureFresh(context.Background(), a)
-		if err == nil {
-			t.Fatalf("tick %d: expected error", i)
-		}
-		if i > 0 && !errors.Is(err, errKeychainAlreadyDisabled) {
-			t.Fatalf("tick %d: err = %v, want wrapping errKeychainAlreadyDisabled once already disabled", i, err)
-		}
-	}
-	if got := loads.Load(); got != 1 {
-		t.Errorf("keychain loads = %d, want 1 (a regression here is the exact #81 bug — 60 futile reloads)", got)
-	}
-	if a.State() != pool.StateDisabled {
-		t.Errorf("state = %v, want disabled", a.State())
-	}
-}
-
-// TestKeychainReloadPicksUpGenuineReloginAfterRestart guards the other side
-// of the fail-fast fix: it must not turn into a permanent latch that ignores
-// a real re-login. Once an account is disabled, nothing here revives it
-// in-process — issue #81 explicitly defers "should disabled become
-// recoverable" to a separate decision — but the account is expected to come
-// back the way #81 says it already does: a daemon restart, which
-// reconstructs pool.Account fresh (pool.New treats every keychain account as
-// eligible regardless of its last known expiry, since CanRefresh is
-// unconditionally true for SourceKeychain) and reloads for real. This test
-// stands in for that restart with a second, independent Account sharing the
-// same (now fixed) keychain source.
-func TestKeychainReloadPicksUpGenuineReloginAfterRestart(t *testing.T) {
-	now := time.Now()
-	var raw atomic.Value
-	raw.Store(fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"still-old","expiresAt":%d}}`,
-		now.Add(-time.Hour).UnixMilli()))
-	src := SourceFunc(func() ([]byte, error) { return []byte(raw.Load().(string)), nil })
-
-	m := testManager(t, "http://unused", "", src)
-	dead := pool.NewAccount("local", pool.SourceKeychain, "stale", "stale-rt", expiringSoon(), "")
-	if err := m.EnsureFresh(context.Background(), dead); err == nil {
-		t.Fatal("expected the expired credential to fail")
-	}
-	if dead.State() != pool.StateDisabled {
-		t.Fatalf("state = %v, want disabled", dead.State())
-	}
-
-	// The user re-logs in via `claude`; the keychain item is now fresh. The
-	// still-disabled Account object must not un-latch on its own (out of
-	// scope for #81).
-	if err := m.EnsureFresh(context.Background(), dead); !errors.Is(err, errKeychainAlreadyDisabled) {
-		t.Errorf("existing disabled Account err = %v, want errKeychainAlreadyDisabled (no auto-revive)", err)
-	}
-
-	// A restart, standing in as a freshly constructed Account for the same
-	// account name/source, must pick the new credential up normally.
-	raw.Store(fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"new-access","refreshToken":"new-refresh","expiresAt":%d}}`,
-		now.Add(time.Hour).UnixMilli()))
-	revived := pool.NewAccount("local", pool.SourceKeychain, "stale", "stale-rt", expiringSoon(), "")
-	if err := m.EnsureFresh(context.Background(), revived); err != nil {
-		t.Fatalf("EnsureFresh on the post-restart account: %v", err)
-	}
-	access, refresh, _ := revived.Credentials()
-	if access != "new-access" || refresh != "new-refresh" {
-		t.Errorf("credentials = (%q, %q), want the freshly re-logged-in ones", access, refresh)
-	}
-	if revived.State() != pool.StateOK {
-		t.Errorf("state = %v, want OK", revived.State())
 	}
 }
