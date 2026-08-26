@@ -158,6 +158,24 @@ func mergeLoginUpdate(existing, acct AccountConfig) AccountConfig {
 	// daemon down would otherwise keep a plaintext token on disk.
 	merged.AccessToken = ""
 	merged.RefreshToken = ""
+	// Source is the second exception (#81), same shape as the one above: a
+	// successful login means spillway now holds its own OAuth grant for this
+	// account, which is the literal definition of "not borrowed" —
+	// source: keychain must not survive it. The login payload never sets
+	// Source (it is not something OAuth exchange learns), so relying on
+	// non-zero-copy would leave a stale "keychain" entry silently routing
+	// around the credential login just wrote — the exact bug reported in
+	// #81's comment: a fresh spillway-owned grant sitting unused while the
+	// account keeps borrowing (and eventually loses) the CLI's own token.
+	//
+	// Audited the rest of AccountConfig for the same shape while here, per
+	// #81's ask (this is the third bug of this class, after #50/#45): Label,
+	// Disabled, Priority, AllowOverage, Upstream and ModelMap are all
+	// genuinely fine to preserve — none of them are things a login flow
+	// learns or invalidates, so the zero-value-means-untouched default is
+	// correct for all of them. Only credential-shaped fields (token
+	// material, and now Source) need an exception.
+	merged.Source = ""
 	return merged
 }
 

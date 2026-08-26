@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -185,11 +186,21 @@ func (m *Manager) refreshOne(ctx context.Context, a *pool.Account) error {
 	return nil
 }
 
+// KeychainRemedy is the one line every keychain-reload failure and every
+// startup warning should point at. Once #81's login fix has shipped,
+// re-authenticating is the whole fix: UpsertAccount now clears Source on a
+// successful login, so this single command both gives the account its own
+// credential and drops it out of the broken borrowed-token path.
+func KeychainRemedy(name string) string {
+	return fmt.Sprintf("run `spillway login claude %s` to give it its own credential "+
+		"(this also drops source: keychain from the config), then restart spillway", name)
+}
+
 func (m *Manager) reloadKeychain(a *pool.Account) error {
 	o, err := LoadClaude(m.Keychain, m.now())
 	if err != nil {
 		a.Disable()
-		m.log().Error("keychain reload failed, account disabled — re-login via `claude`",
+		m.log().Error("keychain reload failed, account disabled — "+KeychainRemedy(a.Name),
 			"account", a.Name, "err", err)
 		return err
 	}
