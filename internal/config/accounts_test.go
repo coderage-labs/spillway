@@ -235,6 +235,19 @@ var loginOwnedFields = map[string]bool{
 	"AccountUUID": true,
 }
 
+// clearedOnLoginFields are AccountConfig fields mergeLoginUpdate deliberately
+// zeroes rather than preserves, because leaving them set would be wrong even
+// though the login payload never sets them (so the default non-zero-copy
+// rule would otherwise preserve whatever was there before). Token material
+// (#45) and Source (#81) are the only two: both describe where a credential
+// lives, and a successful login always changes that answer to "spillway
+// holds it now".
+var clearedOnLoginFields = map[string]bool{
+	"AccessToken":  true,
+	"RefreshToken": true,
+	"Source":       true,
+}
+
 // fillWithSentinels sets every AccountConfig field to a distinctive non-zero
 // value, keyed by the field's kind rather than its name, so a field added to
 // the struct in the future is picked up automatically. An unhandled kind
@@ -332,12 +345,13 @@ func TestUpsertAccountPreservesUserSettingsOnRelogin(t *testing.T) {
 		name := rt.Field(i).Name
 		t.Run(name, func(t *testing.T) {
 			gotVal := gv.Field(i).Interface()
-			// Token material is neither login-owned nor preserved: §5 keeps
-			// the config to metadata only, so a re-login clears it. See
-			// TestUpsertAccountClearsInlineTokenMaterial.
-			if name == "AccessToken" || name == "RefreshToken" {
+			// Token material, and Source (#81), are neither login-owned nor
+			// preserved: a re-login clears them outright. See
+			// TestUpsertAccountClearsInlineTokenMaterial and
+			// TestUpsertAccountClearsKeychainSourceOnRelogin.
+			if clearedOnLoginFields[name] {
 				if gotVal != interface{}("") {
-					t.Errorf("%s = %#v, want cleared — token material must not survive in the yaml", name, gotVal)
+					t.Errorf("%s = %#v, want cleared — must not survive a re-login", name, gotVal)
 				}
 				return
 			}
@@ -406,5 +420,60 @@ func TestUpsertAccountClearsInlineTokenMaterial(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "inline-access") || strings.Contains(string(raw), "inline-refresh") {
 		t.Error("the yaml on disk still contains token material")
+	}
+}
+
+// TestUpsertAccountClearsKeychainSourceOnRelogin is #81's headline fix. An
+// account configured source: keychain borrows whatever credential the
+// `claude` CLI itself is logged into — spillway never refreshes it, so it
+// dies at expiry. Re-authenticating with `spillway login claude <name>`
+// gives the account its own OAuth grant, which is the definition of no
+// longer borrowed, but the login payload never sets Source (OAuth exchange
+// has no opinion on it) — so the default non-zero-copy merge left the old
+// "keychain" entry in place, silently routing straight past the fresh grant
+// login just wrote. The only recovery used to be a hand-edit of the yaml.
+//
+// Asserting the field is gone (not merely that login succeeded, and not via
+// the exhaustive per-field sweep above) is the point: this is the exact
+// regression #81 reported.
+func TestUpsertAccountClearsKeychainSourceOnRelogin(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spillway.yaml")
+
+	if err := UpsertAccount(path, AccountConfig{
+		Name: "ckitch", Type: "claude-oauth", Source: "keychain",
+		Label: "personal", Priority: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Shaped exactly like runLoginClaude's payload: no Source.
+	if err := UpsertAccount(path, AccountConfig{
+		Name: "ckitch", Type: "claude-oauth", ExpiresAt: 555, AccountUUID: "u-2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	accts, err := ListAccountConfigs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got AccountConfig
+	found := false
+	for _, a := range accts {
+		if a.Name == "ckitch" {
+			got, found = a, true
+		}
+	}
+	if !found {
+		t.Fatalf("account %q not found after relogin", "ckitch")
+	}
+	if got.Source != "" {
+		t.Errorf("Source = %q, want empty — a successful login means spillway owns the credential now, "+
+			"not the claude CLI's keychain entry", got.Source)
+	}
+	// #50's behaviour must not regress alongside this fix.
+	if got.Label != "personal" || got.Priority != 2 {
+		t.Errorf("user settings lost: label=%q priority=%d", got.Label, got.Priority)
 	}
 }

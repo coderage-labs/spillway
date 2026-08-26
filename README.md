@@ -481,8 +481,7 @@ log:
 accounts:
   - name: you@example.com
     label: work             # what the dashboard and status line show
-    type: claude-oauth
-    source: keychain        # the claude CLI's own login (see below)
+    type: claude-oauth       # written by `spillway login claude you@example.com`
     priority: 0             # lower is preferred; ties break on load
   - name: kimi
     type: kimi-oauth
@@ -512,16 +511,48 @@ token becomes mandatory, and a missing one fails closed.)
 ## Credentials
 
 **One credential, one refresher.** Refresh tokens rotate on use, so two
-processes refreshing the same account will invalidate each other.
+processes refreshing the same account will invalidate each other. Every
+pooled account should be added with `spillway login claude <name>` (or
+`spillway login kimi <name>`) — that gives it its own OAuth grant, held in
+the keychain under spillway's own service, refreshed by the daemon and by
+nothing else.
 
-- The account the `claude` CLI is logged into must be `source: keychain`.
-  spillway reads it and never refreshes it — the CLI owns it. Note this
-  follows the CLI's *current* login: if you `/login` as someone else, that
-  entry silently becomes the other account.
-- Every other account is spillway's alone: tokens in the keychain under
-  spillway's own service, refreshed by the daemon and by nothing else.
 - A background sweep refreshes any token within 5 minutes of expiry,
   regardless of traffic — an idle account has nothing else to trigger one.
+- `spillway login` on an account name that already exists re-authenticates
+  it in place: it writes a fresh grant and clears anything that would make
+  spillway ignore it, without touching the label, priority, `allowOverage` or
+  model map you already set.
+
+### `source: keychain` is deprecated — do not use it for pooling
+
+An account configured `source: keychain` **borrows** whatever credential the
+`claude` CLI itself is currently logged into, instead of holding its own
+grant. It is not a lightweight variant of the mode above — it is a different
+and structurally broken one:
+
+- spillway reads that keychain item but **never refreshes it**; the `claude`
+  CLI owns it and refreshes it on its own schedule.
+- It cannot be made to refresh safely, either. Refresh tokens rotate on use,
+  so if spillway refreshed it too, the two processes would invalidate each
+  other's login — breaking `claude` or being broken by it, unpredictably.
+- The result: the account works until the CLI's own token expires, then
+  fails permanently. Nothing in spillway can revive it — not a `claude`
+  re-login, not time passing — until the daemon is restarted. spillway now
+  warns about this loudly at every startup, naming the account and the fix.
+
+**The fix is `spillway login claude <name>` on that same account name.** As
+of this fix it also clears `source: keychain` from the config automatically,
+so nothing needs a manual yaml edit. If you are on an older config with
+`source: keychain` still set by hand, delete that line, or just re-run
+`spillway login` — it clears the line for you.
+
+This mode is not being removed outright, only deprecated: existing configs
+keep working (with the startup warning) until you re-authenticate. Reading
+the `claude` CLI's own login is still useful for *discovering* an account
+worth adding — spillway's bootstrap fallback (running with zero accounts
+configured) reads it as a convenience for quick, single-account use — but
+that is a one-account passthrough, not a way to add an account to the pool.
 
 ### Where they are kept
 

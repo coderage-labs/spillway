@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -185,11 +186,46 @@ func (m *Manager) refreshOne(ctx context.Context, a *pool.Account) error {
 	return nil
 }
 
+// KeychainRemedy is the one line every keychain-reload failure and every
+// startup warning should point at. Once #81's login fix has shipped,
+// re-authenticating is the whole fix: UpsertAccount now clears Source on a
+// successful login, so this single command both gives the account its own
+// credential and drops it out of the broken borrowed-token path.
+func KeychainRemedy(name string) string {
+	return fmt.Sprintf("run `spillway login claude %s` to give it its own credential "+
+		"(this also drops source: keychain from the config), then restart spillway", name)
+}
+
+// errKeychainAlreadyDisabled is returned by reloadKeychain without touching
+// the keychain at all when the account is already disabled from a previous
+// reload of this exact kind (#81). A borrowed credential that has already
+// failed cannot pass just because we ask again a minute later — Anthropic
+// rotates refresh tokens, so spillway does not, and never will, write back
+// to this keychain item, meaning nothing changes it out from under us except
+// a fresh `claude` login. Detecting "already gave up on this" and stopping
+// avoids the exact failure #81 reported: the same dead entry reloaded once a
+// minute for an hour, 60 attempts that could not possibly succeed, before
+// the one useful line finally printed.
+//
+// This deliberately does NOT re-read the keychain to check whether the
+// material changed and, if so, revive the account — that would be building
+// "disabled becomes recoverable automatically", which #81 explicitly defers
+// to a separate decision (see the design note in the PR description). A
+// genuine re-login is still picked up normally by the ordinary path below,
+// for any account that has not yet been disabled — e.g. right after a daemon
+// restart, when pool.New reconstructs every keychain account as eligible
+// regardless of the credential's last known expiry (keychain accounts are
+// always "CanRefresh") and this function runs for real again.
+var errKeychainAlreadyDisabled = errors.New("keychain credential already disabled")
+
 func (m *Manager) reloadKeychain(a *pool.Account) error {
+	if a.State() == pool.StateDisabled {
+		return fmt.Errorf("account %q: %w — %s", a.Name, errKeychainAlreadyDisabled, KeychainRemedy(a.Name))
+	}
 	o, err := LoadClaude(m.Keychain, m.now())
 	if err != nil {
 		a.Disable()
-		m.log().Error("keychain reload failed, account disabled — re-login via `claude`",
+		m.log().Error("keychain reload failed, account disabled — "+KeychainRemedy(a.Name),
 			"account", a.Name, "err", err)
 		return err
 	}

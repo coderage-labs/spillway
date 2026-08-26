@@ -174,6 +174,8 @@ func runServer(args []string) error {
 		return err
 	}
 
+	warnDeprecatedKeychainAccounts(cfg, logger)
+
 	p, err := buildPool(cfg, store, logger, time.Now())
 	if err != nil {
 		return err
@@ -410,6 +412,33 @@ func runServer(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// warnDeprecatedKeychainAccounts logs one line per configured account still
+// on source: keychain (#81). Borrowing the claude CLI's own login cannot be
+// refreshed by spillway — Anthropic rotates refresh tokens, so two
+// independent holders of the same one invalidate each other — so this mode
+// is guaranteed to fail within hours of the CLI's token expiring and cannot
+// recover itself; see LoadClaude and Manager.reloadKeychain. This warns
+// rather than refuses: refusing to start would break a setup that currently
+// limps along, and the whole point of a startup warning is to say so before
+// that failure, not instead of letting the account keep working until it
+// hits it.
+//
+// Deliberately scoped to accounts explicitly listed in the config with
+// source: keychain — not the zero-accounts bootstrap fallback in buildPool,
+// which is a single-account convenience path (no pooling, nothing to
+// deprecate it in favor of) rather than the pooling mode #81 is about.
+func warnDeprecatedKeychainAccounts(cfg *config.Config, logger *slog.Logger) {
+	for _, a := range cfg.Accounts {
+		if a.Source != "keychain" {
+			continue
+		}
+		logger.Warn("account borrows its credential from the claude CLI's own keychain login — "+
+			"this cannot be refreshed by spillway and will fail permanently when that login expires. "+
+			accounts.KeychainRemedy(a.Name),
+			"account", a.Name)
+	}
 }
 
 // buildPool resolves configured accounts (keychain-sourced, or metadata in
