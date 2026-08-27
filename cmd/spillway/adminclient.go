@@ -9,8 +9,10 @@ package main
 // exists — a loopback listener needs none.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,6 +24,12 @@ import (
 	"github.com/coderage-labs/spillway/internal/admin"
 	"github.com/coderage-labs/spillway/internal/config"
 )
+
+// ErrAdminUnreachable marks a failure to even connect — no daemon listening
+// — as distinct from a daemon that answered with a real error. Issue #83's
+// live-apply helpers (live_apply.go) use this to tell "nothing is running,
+// which is fine" from "something is running and rejected this".
+var ErrAdminUnreachable = errors.New("no daemon listening")
 
 type adminAPI struct {
 	client *http.Client
@@ -65,6 +73,23 @@ func (a *adminAPI) get(path string, v any) error {
 	return a.do(http.MethodGet, path, nil, v)
 }
 
+// postJSON POSTs body (marshalled as JSON, or no body at all when body is
+// nil) to path, decoding the response into v when v is non-nil. Issue #83's
+// live-apply calls (accounts remove/priority/overage) are all POSTs, one
+// with a body (/api/accounts/remove) and one without (/api/settings, which
+// means "reapply what's already on disk" with no body).
+func (a *adminAPI) postJSON(path string, body, v any) error {
+	var r io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		r = bytes.NewReader(b)
+	}
+	return a.do(http.MethodPost, path, r, v)
+}
+
 // do makes one authenticated call, decoding into v when v is non-nil.
 func (a *adminAPI) do(method, path string, body io.Reader, v any) error {
 	req, err := http.NewRequest(method, a.base+path, body)
@@ -79,7 +104,13 @@ func (a *adminAPI) do(method, path string, body io.Reader, v any) error {
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("admin API unreachable (is `spillway server` running?): %w", err)
+		// %w wraps ErrAdminUnreachable specifically (not just err) so a
+		// caller — issue #83's liveApplyAccountEdit/liveRemoveAccount in
+		// particular — can tell "nothing is listening, as expected while
+		// the daemon isn't running" apart from "a running daemon answered
+		// with a real problem" via errors.Is, rather than pattern-matching
+		// this message.
+		return fmt.Errorf("admin API unreachable (is `spillway server` running?): %w: %w", ErrAdminUnreachable, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
