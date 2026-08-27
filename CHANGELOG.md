@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.1](https://github.com/coderage-labs/spillway/compare/v0.14.0...v0.14.1) (2026-08-27)
+
+
+### Fixes
+
+* bench an account only to its soonest rejected window, and re-probe it ([#90](https://github.com/coderage-labs/spillway/issues/90)) ([e3d872a](https://github.com/coderage-labs/spillway/commit/e3d872ac5a6bf632b9b58ebcc1c171943df2b798))
+* keep non-inference requests out of the pool and the hold path ([#91](https://github.com/coderage-labs/spillway/issues/91)) ([678e1aa](https://github.com/coderage-labs/spillway/commit/678e1aa01630d071e1fef31bc6c11773dc1a683a))
+
 ## [0.14.0](https://github.com/coderage-labs/spillway/compare/v0.13.0...v0.14.0) (2026-08-27)
 
 
