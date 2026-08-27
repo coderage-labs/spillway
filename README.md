@@ -345,6 +345,23 @@ upgrades (`/v1/session_ingress/ws*`) — relay with the client's own credential
 verbatim: no injection, no pool, no rewrite. That is what keeps Remote Control
 and the CLI's own token refresh working through the proxy.
 
+**Confirmed non-quota paths get the same treatment (issue #91).**
+`/api/event_logging/v2/batch`, `/api/claude_code/settings`, and
+`/api/claude_code/policy_limits` are telemetry/settings/limits lookups that
+consume no quota and need no pooled account — real traffic showed them
+being selected against a real account (misattributing them in the request
+log) and, once the pool went dry, held for up to 53 minutes waiting on
+quota they never needed, turning a two-account exhaustion into a 51-request
+queue all due to fire at once on the next reset. They now relay with the
+client's own credential exactly like an identity-bound path: no injection,
+no pool, no hold. Only `POST /v1/messages` is confirmed to need a pooled
+account at all — every other path (an unclassified one seen in the same
+traffic but not confirmed either way, e.g. `/mcp-registry/v0/servers` or
+`/latest/api/token`) still gets pool selection and a pooled credential, on
+the theory that wrongly bypassing a path that does need one is worse than a
+pointless wait, but can never hold on exhaustion: it fails fast with the
+same 429 a hold would eventually reach, just without the wait.
+
 **If the CA is regenerated, restart every proxied CLI.** Because
 `NODE_EXTRA_CA_CERTS` is read once at process start, a client launched before
 the CA changed can never be made to trust the new one — reconnecting doesn't
@@ -753,7 +770,10 @@ When every account is spent, `pool.exhaustedMode` decides: `fail` (pass the 429
 through), `hold` (park until the soonest reset, up to `pool.holdMax`), or
 `notify` (hold plus a loud log), the default. `spillway run` raises the child's
 `API_TIMEOUT_MS` past `holdMax` so the client waits out a hold, never lowering
-an existing value.
+an existing value. `hold`/`notify` only ever apply to `POST /v1/messages`
+(issue #91) — every other pooled path fails fast on exhaustion regardless of
+mode; see the confirmed non-quota paths described under [MITM mode](#mitm-mode)
+above.
 
 `hold` and `notify` fail fast, rather than parking for the full `holdMax`,
 once the soonest known reset would land past the hold deadline anyway — a
