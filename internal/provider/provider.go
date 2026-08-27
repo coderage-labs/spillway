@@ -17,6 +17,8 @@ package provider
 import (
 	"errors"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -212,6 +214,42 @@ func (s Spec) Classifiable(status int) bool {
 func Known(accountType string) bool {
 	_, ok := specs[accountType]
 	return ok
+}
+
+// DefaultUpstreamHosts returns the hostname of every registered provider's
+// DefaultUpstream, deduplicated and sorted.
+//
+// Issue #87: the MITM CA used to pre-mint a leaf only for the hosts of
+// accounts actually configured that day (internal/proxy.Handler.SetMITM),
+// so adding an account for a provider nothing had used yet (a Kimi account
+// in a Claude-only pool) meant its very first CONNECT forced a full CA
+// regeneration — exactly the client-stranding issue #66 exists to warn
+// about, just triggered by the ordinary act of adding an account instead of
+// an upgrade. Minting a leaf for every provider's DefaultUpstream up front,
+// regardless of which accounts exist yet, means that leaf is already there
+// when the account shows up: live, no regeneration, nothing stranded. The
+// cost is a handful of unused certs in the chain file for providers with no
+// account configured — cheap next to what regeneration risks.
+func DefaultUpstreamHosts() []string {
+	seen := make(map[string]bool, len(specs))
+	out := make([]string, 0, len(specs))
+	for _, s := range specs {
+		if s.DefaultUpstream == "" {
+			continue
+		}
+		u, err := url.Parse(s.DefaultUpstream)
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		host := u.Hostname()
+		if seen[host] {
+			continue
+		}
+		seen[host] = true
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Types lists the valid account types, for error messages.

@@ -314,6 +314,13 @@ func runServer(args []string) error {
 	// NotifyCARegenerated below (called later, once EnsureCA reports
 	// whether it actually regenerated) without any ordering dependency here.
 	adminHandler.SetCAWarning(handler.StaleCAWarning)
+	// Issue #87: wire `accounts add`/`login`'s live-add endpoint to the
+	// proxy handler's MITM host-set bookkeeping. handler.MITMCovers and
+	// handler.RefreshAllowedHosts are safe to hand over now even though
+	// MITM (below) hasn't necessarily been set up yet — both are just
+	// function values, not called until a live add actually happens, by
+	// which point SetMITM has already run either way.
+	adminHandler.EnableLiveMITM(handler.MITMCovers, handler.RefreshAllowedHosts)
 	if !loopback {
 		adminHandler.RequireToken()
 		if err := admin.WriteTokenFile(tokenPath, token); err != nil {

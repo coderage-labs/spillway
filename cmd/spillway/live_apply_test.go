@@ -179,6 +179,121 @@ func TestLiveRemoveAccountDaemonDownIsCleanSuccess(t *testing.T) {
 	}
 }
 
+// TestLiveAddAccountTakesEffectOnRunningPool is issue #87's mirror of
+// TestLiveRemoveAccountTakesEffectOnRunningPool: a brand-new account posted
+// via liveAddAccount (the call login.go makes right after writing the
+// config and secret store) must be selectable on the running pool
+// immediately — asserted against selection, not a response flag.
+func TestLiveAddAccountTakesEffectOnRunningPool(t *testing.T) {
+	existing := pool.NewAccount("existing", pool.SourceYAML, "t", "", 0, "")
+	existing.Type = "claude-oauth"
+	p := pool.New([]*pool.Account{existing}, time.Now())
+
+	srv := admin.New(p, nil, events.New(), "")
+	front := httptest.NewServer(srv)
+	defer front.Close()
+	liveTestConfig(t, strings.TrimPrefix(front.URL, "http://"), "existing")
+
+	msg := liveAddAccount(accountAddPayload{
+		Name: "fresh", Type: "claude-oauth", AccessToken: "new-tok", ExpiresAt: 12345,
+	})
+	if msg == "" || strings.Contains(strings.ToLower(msg), "not applied") {
+		t.Fatalf("unexpected message from a reachable daemon: %q", msg)
+	}
+
+	if err := p.Pin("fresh", false); err != nil {
+		t.Fatalf("the added account is not resolvable by the running pool: %v", err)
+	}
+	got := p.SelectFor("s", nil)
+	if got == nil || got.Name != "fresh" {
+		t.Fatalf("SelectFor while pinned to the added account = %v, want fresh", got)
+	}
+}
+
+// TestLiveAddAccountReauthHotSwapsOnRunningDaemon: re-authenticating an
+// existing account (same name posted twice) must update its credentials on
+// the running pool in place — issue #87's fold-in of #46's re-auth gap —
+// rather than only printing a "restart to fix it" notice.
+func TestLiveAddAccountReauthHotSwapsOnRunningDaemon(t *testing.T) {
+	work := pool.NewAccount("work", pool.SourceYAML, "old-tok", "old-refresh", 1, "")
+	work.Type = "claude-oauth"
+	work.Disable()
+	p := pool.New([]*pool.Account{work}, time.Now())
+
+	srv := admin.New(p, nil, events.New(), "")
+	front := httptest.NewServer(srv)
+	defer front.Close()
+	liveTestConfig(t, strings.TrimPrefix(front.URL, "http://"), "work")
+
+	msg := liveAddAccount(accountAddPayload{
+		Name: "work", Type: "claude-oauth", AccessToken: "new-tok", RefreshToken: "new-refresh", ExpiresAt: 999,
+	})
+	if msg == "" || strings.Contains(strings.ToLower(msg), "not applied") {
+		t.Fatalf("unexpected message from a reachable daemon: %q", msg)
+	}
+	if len(p.Accounts()) != 1 {
+		t.Fatalf("re-auth created a duplicate: %d accounts", len(p.Accounts()))
+	}
+	tok, refresh, expiresAt := work.Credentials()
+	if tok != "new-tok" || refresh != "new-refresh" || expiresAt != 999 {
+		t.Errorf("credentials not hot-swapped on the running pool: got (%q, %q, %d)", tok, refresh, expiresAt)
+	}
+	if work.State() != pool.StateOK {
+		t.Errorf("re-auth must revive the account on the running pool, got state %v", work.State())
+	}
+}
+
+// TestLiveAddAccountDaemonDownIsCleanSuccess is #87's explicit requirement,
+// mirroring TestLiveRemoveAccountDaemonDownIsCleanSuccess: a down daemon
+// must stay a clean success, not an error, and must not claim a live
+// update happened when it did not.
+func TestLiveAddAccountDaemonDownIsCleanSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	srv.Close() // nothing answers here now
+
+	liveTestConfig(t, addr, "solo")
+
+	msg := liveAddAccount(accountAddPayload{Name: "fresh", Type: "claude-oauth", AccessToken: "t"})
+	if msg == "" {
+		t.Fatal("want a message explaining nothing is running, got silence")
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "immediately") || strings.Contains(lower, "added to the running daemon") {
+		t.Errorf("message must not claim live application when the daemon is unreachable: %q", msg)
+	}
+	if !strings.Contains(lower, "no daemon") && !strings.Contains(lower, "not applied") {
+		t.Errorf("message does not say live application did not happen: %q", msg)
+	}
+}
+
+// TestLiveAddAccountCustomUpstreamReportsRestartRequired is the CLI-visible
+// half of #87's "still restart-only" case: a custom, non-provider-default
+// upstream must surface a restart requirement in the printed message rather
+// than silently claiming full success.
+func TestLiveAddAccountCustomUpstreamReportsRestartRequired(t *testing.T) {
+	p := pool.New(nil, time.Now())
+	srv := admin.New(p, nil, events.New(), "")
+	front := httptest.NewServer(srv)
+	defer front.Close()
+	liveTestConfig(t, strings.TrimPrefix(front.URL, "http://"))
+
+	msg := liveAddAccount(accountAddPayload{
+		Name: "custom-1", Type: "claude-oauth", Upstream: "https://custom.example.com/v1", AccessToken: "t",
+	})
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "restart") {
+		t.Errorf("message must say a restart is needed for the custom upstream host: %q", msg)
+	}
+	if strings.Contains(msg, "custom.example.com") == false {
+		t.Errorf("message does not name the host needing a restart: %q", msg)
+	}
+	// Still selectable right now — the restart caveat is CONNECT-mode only.
+	if err := p.Pin("custom-1", false); err != nil {
+		t.Fatalf("custom-upstream account must still be selectable immediately: %v", err)
+	}
+}
+
 // TestSetPriorityCleanSuccessWithDaemonDown: the config write must still
 // succeed and the command must still return nil even though nothing is
 // listening — restart is a fallback, never a requirement.

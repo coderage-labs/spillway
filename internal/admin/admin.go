@@ -59,6 +59,30 @@ type Server struct {
 	// Not a constructor parameter, for the same reason EnableSettings isn't:
 	// tests exercising the read-only API do not need MITM wired up at all.
 	caWarning func() bool
+	// hostCovered and refreshHosts wire issue #87's live account-add to the
+	// proxy handler's MITM host-set bookkeeping — see EnableLiveMITM. Both
+	// nil in tests that only exercise the pool side of account-add (no MITM
+	// at all): a nil hostCovered means every upstream reports "not covered",
+	// which the handler already treats as "flag it, don't strand it".
+	hostCovered  func(host string) bool
+	refreshHosts func()
+}
+
+// EnableLiveMITM wires issue #87's live account-add to the proxy handler's
+// CONNECT host-set bookkeeping. covers reports whether host already has a
+// pre-minted MITM leaf — typically (*proxy.Handler).MITMCovers — used to
+// decide whether a freshly added account's upstream needs a restart before
+// CONNECT-mode (system-proxy) traffic to it is pooled. refresh recomputes
+// the CONNECT-termination host set after a pool.Add — typically
+// (*proxy.Handler).RefreshAllowedHosts; normally a no-op, since every
+// provider's default upstream is pre-minted at startup regardless of which
+// accounts exist that day, but correct to call regardless. Not a
+// constructor parameter for the same reason EnableSettings isn't: tests
+// exercising only the pool side of account-add need no MITM wired up at
+// all.
+func (s *Server) EnableLiveMITM(covers func(host string) bool, refresh func()) {
+	s.hostCovered = covers
+	s.refreshHosts = refresh
 }
 
 // EnableSettings turns on the editable-config endpoint. apply is called with
@@ -226,7 +250,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// `accounts remove` has already edited the config and deleted the
 	// credential by the time it calls this, so all this does is take the
 	// name out of the running pool immediately.
+	// /api/accounts/add is issue #87's mirror: the CLI's `login` has already
+	// written the config and the secret store by the time it calls this.
 	if r.URL.Path != "/api/settings" && r.URL.Path != "/api/pin" && r.URL.Path != "/api/accounts/remove" &&
+		r.URL.Path != "/api/accounts/add" &&
 		r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -242,6 +269,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, s.accounts())
 	case r.URL.Path == "/api/accounts/remove":
 		s.handleAccountRemove(w, r)
+	case r.URL.Path == "/api/accounts/add":
+		s.handleAccountAdd(w, r)
 	case r.URL.Path == "/logo.svg":
 		w.Header().Set("Content-Type", "image/svg+xml")
 		// Immutable for a day: it is the favicon, refetched on every tab.

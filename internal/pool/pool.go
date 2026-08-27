@@ -990,6 +990,36 @@ func (p *Pool) Remove(name string) bool {
 	return false
 }
 
+// Add puts a into the pool immediately (issue #87, mirroring Remove's
+// locking discipline from #85/#83): the very next SelectExcept call can
+// choose it, and every background loop that walks Accounts() (the refresh
+// sweep, idle probing, the canary, quota snapshotting) picks it up from its
+// next tick. Reports whether it was actually added — false when an account
+// by that name already exists, so a caller cannot silently end up with two
+// entries answering to the same name (selection, Remove-by-name and Pin all
+// assume names are unique). A re-authenticated existing account is not
+// Add's job: the caller should update that *Account's credentials in place
+// (Account.SetCredentials) instead, which also revives it from
+// StateDisabled — see admin's account-add handler.
+func (p *Pool) Add(a *Account) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, existing := range p.accounts {
+		if existing.Name == a.Name {
+			return false
+		}
+	}
+	// Append rather than mutate a shared backing array in place: Accounts()
+	// copies out under lock (see its own comment), so aliasing would be
+	// safe today, but Remove already established the pattern of not
+	// relying on that — see its comment for why.
+	next := make([]*Account, len(p.accounts)+1)
+	copy(next, p.accounts)
+	next[len(p.accounts)] = a
+	p.accounts = next
+	return true
+}
+
 // SetOverageForTest seeds the extra-usage state. Production code learns this
 // only from a provider response; tests need to arrange the state that a
 // response would have produced.

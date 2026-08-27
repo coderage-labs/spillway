@@ -73,3 +73,61 @@ func liveRemoveAccount(name string) string {
 	}
 	return "removed from the running daemon immediately — it can no longer be selected for a request"
 }
+
+// accountAddPayload mirrors internal/admin's accountAddRequest JSON shape —
+// not shared directly since admin's is package-private, same as
+// accountRemoveResponse below is re-declared rather than imported.
+// login.go fills this from the tokens it already has in memory right after
+// a successful OAuth/device-flow exchange, so liveAddAccount never needs to
+// re-read the keychain or yaml itself.
+type accountAddPayload struct {
+	Name         string            `json:"name"`
+	Type         string            `json:"type"`
+	Upstream     string            `json:"upstream,omitempty"`
+	AccessToken  string            `json:"accessToken"`
+	RefreshToken string            `json:"refreshToken"`
+	ExpiresAt    int64             `json:"expiresAt"`
+	AccountUUID  string            `json:"accountUuid,omitempty"`
+	ModelMap     map[string]string `json:"modelMap,omitempty"`
+	Label        string            `json:"label,omitempty"`
+	Priority     int               `json:"priority,omitempty"`
+	AllowOverage *bool             `json:"allowOverage,omitempty"`
+}
+
+// accountAddResult mirrors admin's accountAddResponse.
+type accountAddResult struct {
+	Added           bool   `json:"added"`
+	RestartRequired bool   `json:"restartRequired"`
+	Reason          string `json:"reason"`
+}
+
+// liveAddAccount tells a reachable daemon to add req to its pool
+// immediately (issue #87), or — for a name it already has — to hot-swap
+// that account's credentials in place (the re-auth fold-in of issue #46's
+// stale-credential gap: a running daemon used to keep serving the OLD
+// credential in memory until restarted even after a successful
+// re-authentication). A down daemon is a clean success, not an error, same
+// as liveApplyAccountEdit/liveRemoveAccount: the config and secret store
+// are already durably written by the time login.go calls this, and a
+// future `spillway server` start reads them correctly on its own.
+func liveAddAccount(req accountAddPayload) string {
+	api, err := dialAdmin()
+	if err != nil {
+		return "not applied live: no daemon is currently running — this takes effect the next time `spillway server` starts"
+	}
+	var resp accountAddResult
+	if err := api.postJSON("/api/accounts/add", req, &resp); err != nil {
+		if errors.Is(err, ErrAdminUnreachable) {
+			return "not applied live: no daemon is currently running — this takes effect the next time `spillway server` starts"
+		}
+		return fmt.Sprintf("saved, but the running daemon refused to apply it live (%v) — restart to be sure it takes effect", err)
+	}
+	switch {
+	case resp.RestartRequired:
+		return fmt.Sprintf("applied to the running daemon for ordinary requests, but %s", resp.Reason)
+	case resp.Added:
+		return "added to the running daemon immediately — selectable for the very next request"
+	default:
+		return "credentials updated on the running daemon immediately — no restart needed"
+	}
+}
