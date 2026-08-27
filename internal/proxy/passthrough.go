@@ -33,6 +33,39 @@ func isIdentityPath(path string) bool {
 		strings.HasPrefix(path, "/v1/sessions/")
 }
 
+// isNonQuotaPath reports whether a path is CONFIRMED non-inference: it
+// consumes no quota and needs no pooled account, so it must never
+// participate in pool selection or the hold path (issue #91). Treated the
+// same as an identity-bound path in route() — passThrough forwards it with
+// the client's own credential, no injection, no pool — but the reason
+// differs: an identity path belongs to the client's own login, while these
+// are telemetry/settings/limits lookups that ride the CLI's own credential
+// and never touch inference.
+//
+// The list is EMPIRICAL and deliberately narrow, confirmed from real
+// traffic 2026-08-22 (issue #91): a 51-request queue formed when the pool
+// went dry because these three were held for up to 53 minutes waiting on
+// quota they never needed, and were separately served against (and logged
+// against) a real pooled account for no reason. Do NOT add a path here on
+// a guess — wrongly bypassing a path that DOES need a pooled account's
+// credential means that request fails or goes out unauthenticated, which
+// is worse than a pointless wait. Paths seen in the same traffic but not
+// confirmed one way or the other (e.g. /mcp-registry/v0/servers,
+// /latest/api/token) are deliberately left OUT of this list and instead
+// covered by route()'s narrower hold gate: only POST /v1/messages is
+// allowed to hold on exhaustion, so an unclassified path here still fails
+// fast instead of queueing, without having to guess whether it needs an
+// account's credential to be forwarded correctly.
+func isNonQuotaPath(path string) bool {
+	switch path {
+	case "/api/event_logging/v2/batch",
+		"/api/claude_code/settings",
+		"/api/claude_code/policy_limits":
+		return true
+	}
+	return false
+}
+
 // isUpgrade reports whether the request is a protocol upgrade (WebSocket).
 func isUpgrade(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") &&

@@ -372,11 +372,32 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		h.passThrough(w, r)
 		return outcome{account: "(passthrough)", event: reqlog.EventPassthrough}
 	}
+	// Confirmed non-inference paths (issue #91): same treatment as an
+	// identity path — forward with the client's own credential, never touch
+	// pool selection or the hold path — but logged with a distinct account
+	// label so "identity login" and "non-quota lookup" bypasses stay tellable
+	// apart in the request log.
+	if isNonQuotaPath(r.URL.Path) {
+		h.passThrough(w, r)
+		return outcome{account: "(non-quota)", event: reqlog.EventPassthrough}
+	}
+
+	// isInferencePath: only POST /v1/messages is confirmed to need a pooled
+	// account, both for buffered failover (§6.10) and for the hold path
+	// below (issue #91). Anything else that still reaches pool selection —
+	// an unclassified path seen in real traffic but not confirmed either
+	// way, e.g. /mcp-registry/v0/servers or /latest/api/token — gets a
+	// pooled account's credential (so it isn't wrongly sent out
+	// unauthenticated) but is never allowed to hold on exhaustion: the
+	// conservative fallback issue #91 describes, applied to everything
+	// that isn't confirmed to need it, rather than betting the
+	// thundering-herd risk on a guess about which unclassified paths matter.
+	isInferencePath := r.Method == http.MethodPost && r.URL.Path == "/v1/messages"
 
 	// Buffer only POST /v1/messages bodies within the cap (§6.10).
 	var body []byte
 	buffered := false
-	if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" && r.Body != nil {
+	if isInferencePath && r.Body != nil {
 		b, overflow, err := readCapped(r.Body, h.bodyCap)
 		if err != nil {
 			r.Body.Close()
@@ -459,20 +480,25 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			acct = h.pool.SelectExcept(session, body, tried)
 			if acct == nil {
 				// §6.11: park until the soonest reset rather than failing,
-				// bounded by holdMax per request.
-				if holdDeadline.IsZero() {
-					holdDeadline = time.Now().Add(h.holdMax)
-				}
-				if h.waitForReset(r, holdDeadline) {
-					// The hold waited out a reset, so the accounts that
-					// failed before this point may now succeed. `tried`
-					// means "failed in this round" — the wait starts a new
-					// one, and not clearing it leaves the pool permanently
-					// empty after the very first rotation.
-					clear(tried)
-					held = true
-					h.publish(events.Event{Type: reqlog.EventHeld, Detail: "pool exhausted, holding until reset"})
-					continue
+				// bounded by holdMax per request — but only for the one path
+				// confirmed to need it (issue #91). Everything else that
+				// reaches this branch falls straight through to the
+				// fail-fast response below.
+				if isInferencePath {
+					if holdDeadline.IsZero() {
+						holdDeadline = time.Now().Add(h.holdMax)
+					}
+					if h.waitForReset(r, holdDeadline) {
+						// The hold waited out a reset, so the accounts that
+						// failed before this point may now succeed. `tried`
+						// means "failed in this round" — the wait starts a new
+						// one, and not clearing it leaves the pool permanently
+						// empty after the very first rotation.
+						clear(tried)
+						held = true
+						h.publish(events.Event{Type: reqlog.EventHeld, Detail: "pool exhausted, holding until reset"})
+						continue
+					}
 				}
 				if r.Context().Err() != nil {
 					return finish("(cancelled)") // client gone — nothing to write to
