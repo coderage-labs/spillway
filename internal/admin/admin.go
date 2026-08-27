@@ -216,12 +216,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Everything except /api/settings is read-only. The CSRF guard above is
-	// load-bearing from here on: /api/settings is the first endpoint that
-	// writes, and a browser page must not be able to drive it.
+	// Everything except /api/settings, /api/pin and /api/accounts/remove is
+	// read-only. The CSRF guard above is load-bearing from here on:
+	// /api/settings is the first endpoint that writes, and a browser page
+	// must not be able to drive it.
 	// /api/pin writes too, and for the same reason as /api/settings it is
 	// behind the CSRF guard rather than this one.
-	if r.URL.Path != "/api/settings" && r.URL.Path != "/api/pin" &&
+	// /api/accounts/remove is issue #83's live-removal endpoint: the CLI's
+	// `accounts remove` has already edited the config and deleted the
+	// credential by the time it calls this, so all this does is take the
+	// name out of the running pool immediately.
+	if r.URL.Path != "/api/settings" && r.URL.Path != "/api/pin" && r.URL.Path != "/api/accounts/remove" &&
 		r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -235,6 +240,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(b)
 	case r.URL.Path == "/api/accounts":
 		s.writeJSON(w, s.accounts())
+	case r.URL.Path == "/api/accounts/remove":
+		s.handleAccountRemove(w, r)
 	case r.URL.Path == "/logo.svg":
 		w.Header().Set("Content-Type", "image/svg+xml")
 		// Immutable for a day: it is the favicon, refetched on every tab.
@@ -578,8 +585,26 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		s.onSettings(cfg)
 		s.writeJSON(w, config.CurrentSettings(cfg))
 
+	case http.MethodPost:
+		// Issue #83: re-apply whatever is already on disk to the running
+		// pool, with no body. This is what the CLI calls after writing a
+		// mutation PUT can't express — `accounts priority`/`accounts
+		// overage` write straight to the yaml via config.SetAccountPriority
+		// /SetAccountOverage (overage deliberately bypasses UpdateSettings;
+		// see that function's doc), so there is no new Settings payload to
+		// PUT — only an instruction to pick up what the file now says. Same
+		// mechanism as PUT's tail end: reread, then s.onSettings(cfg), which
+		// is the one place pool.Apply is called from here.
+		cfg, err := config.LoadFrom(s.configPath)
+		if err != nil {
+			http.Error(w, "read config", http.StatusInternalServerError)
+			return
+		}
+		s.onSettings(cfg)
+		s.writeJSON(w, config.CurrentSettings(cfg))
+
 	default:
-		w.Header().Set("Allow", "GET, PUT")
+		w.Header().Set("Allow", "GET, PUT, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }

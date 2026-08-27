@@ -208,9 +208,9 @@ that works over SSH.
 | `spillway server` | Run the daemon (proxy + admin listener) |
 | `spillway run [-- <claude args>]` | Spawn `claude` wired to the proxy; refuses if the daemon is down |
 | `spillway status [--json]` | Compact pool summary in the terminal; `--json` for state, accounts and recent requests |
-| `spillway accounts [remove <account>]` | List accounts, or remove one — `<account>` must be its exact name or exact label; a partial match is refused rather than guessed, since the wrong match deletes the wrong credential |
-| `spillway accounts overage <account> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — resolved by name, label or a unique prefix/substring — see [Extra usage](#extra-usage) |
-| `spillway accounts priority <account> <n>` | Order selection for one account — resolved by name, label or a unique prefix/substring; lower is preferred |
+| `spillway accounts [remove <account>]` | List accounts, or remove one — `<account>` must be its exact name or exact label; a partial match is refused rather than guessed, since the wrong match deletes the wrong credential. Removal reaches a running daemon immediately — the account stops being selectable before this command returns, not at the next restart |
+| `spillway accounts overage <account> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — resolved by name, label or a unique prefix/substring — see [Extra usage](#extra-usage). Applies to a running daemon immediately, in both directions |
+| `spillway accounts priority <account> <n>` | Order selection for one account — resolved by name, label or a unique prefix/substring; lower is preferred. Applies to a running daemon immediately |
 | `spillway switch [<account>\|--auto] [--force]` | Point the pool at one account — resolved by name, label or a unique prefix/substring — until told otherwise; with no argument, reports what's pinned and what you could switch to |
 | `spillway login claude <account>` | Add a Claude account (OAuth PKCE), or re-authenticate an existing one — `<account>` resolves against existing accounts by name, label or a unique prefix/substring first, and only becomes a new account's name if nothing matches |
 | `spillway login kimi <account>` | Add a Kimi account (OAuth device flow), or re-authenticate an existing one — same resolution as `login claude` |
@@ -299,9 +299,13 @@ not start (still a live session stranded, just louder about it).
 
 On-demand signing turns out not to be needed: the full set of hosts spillway
 will ever terminate CONNECT for — the global upstream plus every configured
-account's upstream — is known before the first request, and nothing adds an
-account to a running pool — a config change needs a restart to take effect
-(the same reason a fresh login shows a restart notice). So at startup spillway
+account's upstream — is known before the first request, and nothing *adds* an
+account to a running pool — `spillway login` on a new name still needs a
+restart to take effect (the same reason a fresh login shows a restart
+notice). Removing one, or changing its priority or overage, is a different
+question — those never touch the host set, and both now apply to the running
+pool immediately; see [Commands](#commands) and [Settings](#settings). So at
+startup spillway
 generates the CA, mints a leaf for every one of those hosts up front, writes
 the CA cert (`spillway-ca.pem`) and the leaf certs+keys
 (`spillway-ca-leaves.json`, 0600 in the existing 0700 directory — only the
@@ -680,6 +684,10 @@ spillway accounts priority you@side.example 1    # next
 spillway accounts priority kimi 2                # last resort
 ```
 
+Like overage, this reaches a running daemon immediately — no restart —
+falling back cleanly to "takes effect at the next start" when no daemon is
+reachable.
+
 **Pinning overrides all of it.** `spillway switch <account>` directs selection
 at one account until `spillway switch --auto`, or until the daemon restarts —
 it is a live instruction, not a setting, which is the difference between it and
@@ -776,6 +784,17 @@ not be reachable from a browser, loopback or not.
 That is deliberately distinct from the disable that means a credential died,
 which un-parking never reverses.
 
+`spillway accounts priority`/`overage`/`remove` write the same config file
+from the CLI rather than the dashboard's form, but reach a running daemon
+through the same mechanism — there is one path into the live pool, not a
+dashboard path and a separate CLI path that could disagree about whether a
+change took effect. `remove` in particular takes the account out of
+selection immediately; a request already in flight on it is left to finish
+rather than aborted, the same way `disabled` leaves in-flight work alone. If
+no daemon is reachable, all three still succeed — the config is what a
+future `spillway server` reads at startup — and say plainly that nothing
+applied live rather than claiming it did.
+
 ### Cross-provider caveat
 
 Claude Code decides its client-side capabilities from the model name it
@@ -837,6 +856,12 @@ spillway accounts overage you@example.com off       # never, even if the pool al
 spillway accounts overage you@example.com default   # follow pool.allowOverage
 spillway accounts                                   # see the current state
 ```
+
+Each of those reaches a running daemon immediately — turning `off` off stops
+billing before the command returns, it does not wait for a restart. If no
+daemon is reachable the command still succeeds (the config is what a future
+`spillway server` reads at startup) and says so plainly instead of implying
+it took effect live.
 
 `unknown` means no response has come back from that account yet this run.
 The state is read from provider headers and held in memory only, so it resets

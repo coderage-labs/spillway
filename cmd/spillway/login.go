@@ -247,6 +247,11 @@ func runAccounts(args []string) error {
 			return err
 		}
 		fmt.Println("removed:", name)
+		// Issue #83: the config and credential are already gone at this
+		// point — that is the change that matters and it has already
+		// succeeded — this only decides whether a running daemon hears
+		// about it before its next restart.
+		fmt.Println(liveRemoveAccount(name))
 		return nil
 	}
 	if len(args) >= 2 && args[0] == "overage" {
@@ -402,7 +407,11 @@ func setOverage(cfgPath string, args []string) error {
 		fmt.Printf("%s: extra usage disabled — this account will never be billed,\n"+
 			"  even if pool.allowOverage is true\n", name)
 	}
-	fmt.Println("restart the daemon for this to take effect")
+	// Issue #83: this is the setting that decides whether spillway spends
+	// money, so it must not silently keep billing after a user thinks they
+	// just turned it off. liveApplyAccountEdit reuses the same pool.Apply
+	// path the dashboard's own settings writes go through.
+	fmt.Println(liveApplyAccountEdit())
 	return nil
 }
 
@@ -428,7 +437,6 @@ func setPriority(cfgPath string, args []string) error {
 	}
 	fmt.Printf("%s: priority %d — lower is preferred, and an account is only\n"+
 		"  reached for when everything above it cannot serve\n", name, prio)
-	fmt.Println("restart the daemon for this to take effect, or set it in the dashboard,")
-	fmt.Println("which applies immediately")
+	fmt.Println(liveApplyAccountEdit())
 	return nil
 }

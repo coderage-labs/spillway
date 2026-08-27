@@ -310,14 +310,26 @@ func (p *Pool) Recover(ctx context.Context, a *Account) error {
 	return p.tm.Recover(ctx, a)
 }
 
-// Accounts returns the pool's accounts (shared pointers; read state via the
-// Account methods).
-func (p *Pool) Accounts() []*Account { return p.accounts }
+// Accounts returns a snapshot of the pool's accounts (shared *Account
+// pointers; read state via the Account methods). A copy, not the live slice:
+// issue #83 made p.accounts mutable at runtime (Remove, so far — a
+// corresponding Add is expected in a follow-up), so handing out the backing
+// array itself would race a concurrent removal the instant a caller
+// iterated it unlocked, which every caller outside this package does.
+func (p *Pool) Accounts() []*Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]*Account, len(p.accounts))
+	copy(out, p.accounts)
+	return out
+}
 
 // EarliestReset reports the soonest time an exhausted account becomes
 // eligible again; ok=false when no account is merely exhausted (e.g. all
 // disabled — waiting won't help).
 func (p *Pool) EarliestReset() (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	var earliest time.Time
 	ok := false
 	for _, a := range p.accounts {
@@ -927,6 +939,55 @@ func (p *Pool) find(name string) *Account {
 		}
 	}
 	return nil
+}
+
+// Remove takes name out of the pool immediately (issue #83): the very next
+// SelectExcept call can no longer choose it, and every background loop that
+// walks Accounts() (the refresh sweep, idle probing, the canary, quota
+// snapshotting) stops touching it from its next tick. Reports whether an
+// account by that name was actually present.
+//
+// A request already in flight on this account is deliberately left alone —
+// Remove drains rather than aborts. SelectExcept handed that request's
+// caller the *Account pointer directly, not a name to look up every time, so
+// it keeps working until it finishes and calls Done on that same pointer,
+// exactly as Park already leaves in-flight work alone for a disabled
+// account. This matters more here than for Park: the credential backing
+// this account has usually just been deleted from the secret store by the
+// caller (that is the whole bug #83 is about), but the *Account already
+// holds whatever access token it read into memory before that happened, so
+// a request mid-flight is unaffected either way. Aborting it instead would
+// turn a clean removal into a failed request for no benefit — nothing
+// downstream needs the removal to be instantaneous for requests already
+// under way, only for requests that have not started yet.
+func (p *Pool) Remove(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, a := range p.accounts {
+		if a.Name != name {
+			continue
+		}
+		// A fresh backing array, not a reslice of the old one: Accounts()
+		// used to hand out p.accounts directly, and even now that it copies
+		// under lock, leastLoaded/WhyUnavailable/find all range over
+		// p.accounts while holding mu — a append(p.accounts[:i], ...)
+		// in-place splice would be visible to nothing outside this lock, but
+		// there is no reason to rely on that when the allocation is cheap
+		// and removal is not a hot path.
+		next := make([]*Account, 0, len(p.accounts)-1)
+		next = append(next, p.accounts[:i]...)
+		next = append(next, p.accounts[i+1:]...)
+		p.accounts = next
+		if p.pinned == name {
+			p.pinned = ""
+		}
+		// Sessions sticky to this account self-heal on their next
+		// SelectExcept call: find(name) returns nil, so the sticky entry is
+		// dropped and selection falls through to the ordinary tiers. No
+		// need to walk p.sticky/p.sessionProvider here.
+		return true
+	}
+	return false
 }
 
 // SetOverageForTest seeds the extra-usage state. Production code learns this
