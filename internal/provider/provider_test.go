@@ -279,6 +279,37 @@ func TestResetHintScopesToRejectedWindowOnly(t *testing.T) {
 	}
 }
 
+// TestResetHintOfCombinedRejectionUsesSoonestWindow is issue #90,
+// reproduced directly from the live log (2026-08-22 11:41:20,
+// account=metawin): Anthropic rejected BOTH 5h and 7d in the same
+// response. anthropicReset used to take the MAX reset across the rejected
+// set, so the weekly (three days out) won and benched the account for
+// three days even though its 5h reset an hour later and was healthy — a
+// daemon restart proved the weekly rejection was not still in force
+// (17% remaining). The fix takes the MIN reset within the rejected set —
+// #25/#54's scoping to *only the rejected* windows is unchanged, this is
+// max-vs-min *within* that already-scoped set.
+func TestResetHintOfCombinedRejectionUsesSoonestWindow(t *testing.T) {
+	now := time.Date(2026, 8, 27, 11, 41, 20, 0, time.UTC)
+	h := http.Header{}
+	h.Set("anthropic-ratelimit-unified-5h-status", "rejected")
+	h.Set("anthropic-ratelimit-unified-5h-reset", itoa(now.Add(1*time.Hour).Unix()))
+	h.Set("anthropic-ratelimit-unified-7d-status", "rejected")
+	h.Set("anthropic-ratelimit-unified-7d-reset", itoa(now.Add(72*time.Hour).Unix()))
+
+	rejected := For("claude-oauth").RejectedWindows(h)
+	if len(rejected) != 2 {
+		t.Fatalf("RejectedWindows = %v, want [5h 7d]", rejected)
+	}
+
+	got := For("claude-oauth").ResetHint(h, rejected, now, time.Time{})
+	want := now.Add(1 * time.Hour)
+	if !got.Equal(want) {
+		t.Errorf("ResetHint(rejected=%v) = %v, want %v (5h's soonest reset, not 7d's three-days-out)",
+			rejected, got, want)
+	}
+}
+
 func TestProbeModelPrefersConfiguredMapping(t *testing.T) {
 	if got := For("kimi-oauth").ProbeModel(nil); got != "k3" {
 		t.Errorf("kimi default probe model = %q", got)

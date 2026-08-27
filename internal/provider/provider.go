@@ -276,6 +276,43 @@ func containsAny(s string, subs ...string) bool {
 	return false
 }
 
+// ScopeRejection reports whether any of the rejected window names is
+// account-wide — draws on every request regardless of model — and returns
+// that account-wide subset (issue #54; relocated here by #90 so the proxy's
+// live-rejection path and the background quota re-probe both derive "which
+// windows govern this account" from one place instead of two copies that
+// can drift apart).
+//
+// "Account-wide" is derived from the provider's own general/fallback
+// GoverningWindows("") rather than a hardcoded {"5h","7d"} list here: a
+// fourth family becomes account-wide or family-scoped by how a provider's
+// own window list and GoverningWindows classify it, never by an edit here.
+//
+// No RejectedWindows or no GoverningWindows at all means the provider has
+// no per-window signal to narrow by (Kimi today) — this degrades to
+// account-wide behaviour on any quota rejection, not to "never exhaust":
+// the absence of a signal is not evidence the rejection was narrow. The
+// same fallback covers the (should-not-happen, since Classify uses the
+// identical RejectedWindows to decide ErrQuota in the first place) case of
+// an empty rejected set reaching here regardless — fail toward the wider,
+// safer scope.
+func ScopeRejection(acctType string, rejected []string) (wide bool, wideNames []string) {
+	spec := For(acctType)
+	if spec.RejectedWindows == nil || spec.GoverningWindows == nil || len(rejected) == 0 {
+		return true, rejected
+	}
+	general := spec.GoverningWindows("")
+	for _, r := range rejected {
+		for _, g := range general {
+			if r == g {
+				wideNames = append(wideNames, r)
+				break
+			}
+		}
+	}
+	return len(wideNames) > 0, wideNames
+}
+
 // Overage is what a provider says about serving past the subscription quota
 // at cost. Known distinguishes "the provider told us" from "we have no idea",
 // because spending the user's money on a guess is not acceptable.

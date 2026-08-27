@@ -62,8 +62,16 @@ func (c *Canary) Run(ctx context.Context) []CanaryResult {
 		if wouldBill(a, time.Now()) {
 			continue
 		}
+		// The canary reuses probeOne, which now also re-verifies an already
+		// -exhausted account (issue #90) — so it must honour the same
+		// growing backoff a rejected re-probe sets, rather than bypassing it
+		// on its own separate schedule and re-creating the tight loop that
+		// backoff exists to prevent.
+		if next := a.NextProbeAt(); !next.IsZero() && time.Now().Before(next) {
+			continue
+		}
 		res := CanaryResult{Account: a.Name}
-		err := probeOne(ctx, c.Pool, a, c.Client, c.Upstream)
+		err := probeOne(ctx, c.Pool, a, c.Client, c.Upstream, c.reprobeBaseInterval())
 		switch {
 		case err == nil:
 			// Healthy; nothing to say.
@@ -81,6 +89,19 @@ func (c *Canary) Run(ctx context.Context) []CanaryResult {
 		out = append(out, res)
 	}
 	return out
+}
+
+// reprobeBaseInterval is the backoff base a rejected re-probe grows from
+// when it arrives via the canary rather than the ordinary probe sweep
+// (issue #90). Idle is the canary's own natural cadence; a zero Idle means
+// "check every sweep" and carries no usable duration, so this falls back to
+// the probe's own 30m default rather than handing MarkReprobeRejected a
+// zero baseInterval, which would never grow past zero.
+func (c *Canary) reprobeBaseInterval() time.Duration {
+	if c.Idle > 0 {
+		return c.Idle
+	}
+	return 30 * time.Minute
 }
 
 func (c *Canary) idleEnough(a *pool.Account) bool {
