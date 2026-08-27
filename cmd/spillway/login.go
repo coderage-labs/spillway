@@ -98,7 +98,18 @@ func runLoginClaude(args []string) error {
 	fmt.Printf("logged in: %s (%s, org %s) — token expires %s\n",
 		name, profile.Email, profile.OrgName,
 		time.UnixMilli(tokens.ExpiresAt).UTC().Format(time.RFC3339))
-	warnIfDaemonStale(name)
+	// Issue #87: put this straight into a running daemon's pool — brand new
+	// or, for an existing name, hot-swap the just-refreshed credential in
+	// place (folding in #46's re-auth gap) — rather than #46's old
+	// restart-only notice.
+	fmt.Println(liveAddAccount(accountAddPayload{
+		Name:         name,
+		Type:         "claude-oauth",
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		ExpiresAt:    tokens.ExpiresAt,
+		AccountUUID:  profile.AccountUUID,
+	}))
 	return nil
 }
 
@@ -151,7 +162,18 @@ func runLoginKimi(args []string) error {
 	fmt.Printf("logged in: %s (kimi) — token expires %s\n",
 		name, time.UnixMilli(tokens.ExpiresAtMs(time.Now())).UTC().Format(time.RFC3339))
 	fmt.Println("note: set modelMap for this account in the config, e.g. claude-sonnet-4-6 → your kimi model id (see README)")
-	warnIfDaemonStale(name)
+	// Issue #87: kimi's DefaultUpstream is pre-minted for MITM at startup
+	// regardless of whether any kimi account existed yet (see
+	// provider.DefaultUpstreamHosts), so this account is fully live —
+	// selectable AND CONNECT-mode covered — with no restart.
+	fmt.Println(liveAddAccount(accountAddPayload{
+		Name:         name,
+		Type:         "kimi-oauth",
+		Upstream:     provider.KimiUpstream,
+		AccessToken:  tokens.AccessToken,
+		RefreshToken: tokens.RefreshToken,
+		ExpiresAt:    tokens.ExpiresAtMs(time.Now()),
+	}))
 	return nil
 }
 

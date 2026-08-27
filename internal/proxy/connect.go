@@ -30,7 +30,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// problem presents as "some requests are missing" with nothing to say
 	// which host, which mode, or whether the client ever got that far —
 	// which is exactly how a Remote Control failure looked.
-	if h.ca != nil && h.allowedHosts[host] {
+	if h.ca != nil && h.hostAllowed(host) {
 		h.logger.Debug("connect", "host", host, "mode", "mitm")
 		h.terminateConnect(w, r, host)
 		return

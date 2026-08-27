@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coderage-labs/spillway/internal/config"
@@ -57,8 +58,19 @@ type Handler struct {
 	// Transport dials upstreams. Exported so tests can pin RootCAs; treat
 	// as read-only after construction.
 	Transport *http.Transport
-	// ca, when non-nil, enables CONNECT termination for allowedHosts.
-	ca           caIssuer
+	// ca, when non-nil, enables CONNECT termination for allowedHosts. Set
+	// once before serving starts (NewHandler, then main.go's post-EnsureCA
+	// SetMITM call) and never reassigned after — safe to read unlocked, same
+	// as before issue #87.
+	ca caIssuer
+	// allowedHosts is guarded by hostsMu (issue #87): RefreshAllowedHosts
+	// can now recompute it — after Pool.Add, so a newly added account is
+	// covered without a restart when its host was already pre-minted — WHILE
+	// connect.go reads it on every CONNECT. Before #87 nothing mutated this
+	// after SetMITM's single startup call, so the unguarded read in
+	// connect.go was safe by construction; a runtime mutator makes it a data
+	// race on the request path without a lock.
+	hostsMu      sync.RWMutex
 	allowedHosts map[string]bool
 	// Pool-exhaustion behaviour (§6.11).
 	exhaustedMode string
@@ -184,28 +196,102 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, p *pool.Pool) (*Handler
 }
 
 // SetMITM enables CONNECT termination: ca mints leaves for the hosts of the
-// configured upstreams (global + per-account). nil disables termination —
-// every CONNECT blind-tunnels.
+// configured upstreams (global + per-account + every registered provider's
+// DefaultUpstream — issue #87). nil disables termination — every CONNECT
+// blind-tunnels. Called exactly twice in production, both before serving
+// starts: once from NewHandler with nil (to compute the host set
+// mitm.EnsureCA needs), once from main.go with the real CA it returned.
 func (h *Handler) SetMITM(ca caIssuer) {
 	h.ca = ca
-	h.allowedHosts = map[string]bool{}
-	if u, err := url.Parse(h.upstream); err == nil {
-		h.allowedHosts[u.Hostname()] = true
+	h.setAllowedHosts(h.wantedHosts(ca))
+}
+
+// RefreshAllowedHosts recomputes which hosts CONNECT termination covers,
+// picking up a pool.Add'd account (issue #87) — normally a complete no-op,
+// since every provider's DefaultUpstream is pre-minted at startup regardless
+// of which accounts exist that day, so an ordinary account's host was
+// already allowed before it existed. It only ever matters for a custom
+// upstream host with no pre-minted leaf, and even then wantedHosts filters
+// it right back out (see that method's doc) rather than adding a host the
+// CA cannot serve — allowing CONNECT termination for a host with no leaf
+// would turn a working blind tunnel into a hard "leaf mint failed" failure.
+// Safe to call concurrently with in-flight CONNECTs; see hostsMu.
+func (h *Handler) RefreshAllowedHosts() {
+	h.setAllowedHosts(h.wantedHosts(h.ca))
+}
+
+// wantedHosts computes the candidate host set — the global upstream, every
+// registered provider's DefaultUpstream (issue #87), and every current pool
+// account's upstream override — then, whenever ca is non-nil, filters it
+// down to hosts ca actually has a precomputed leaf for. The filter is a
+// no-op on the one path that mints a CA (main.go: AllowedHosts() computed
+// with ca=nil feeds mitm.EnsureCA, which mints exactly that set, before
+// SetMITM(ca) filters against it) — it only ever removes something on a
+// later RefreshAllowedHosts call, for a custom upstream host EnsureCA was
+// never told about. That host must not become CONNECT-terminated with no
+// leaf to serve; see #87's "still restart-only" case.
+func (h *Handler) wantedHosts(ca caIssuer) map[string]bool {
+	candidates := map[string]bool{}
+	if u, err := url.Parse(h.upstream); err == nil && u.Hostname() != "" {
+		candidates[u.Hostname()] = true
+	}
+	for _, host := range provider.DefaultUpstreamHosts() {
+		candidates[host] = true
 	}
 	for _, a := range h.pool.Accounts() {
 		if u, err := url.Parse(a.Upstream); err == nil && u.Hostname() != "" {
-			h.allowedHosts[u.Hostname()] = true
+			candidates[u.Hostname()] = true
 		}
 	}
+	if ca == nil {
+		return candidates
+	}
+	out := make(map[string]bool, len(candidates))
+	for host := range candidates {
+		if _, err := ca.Leaf(host); err == nil {
+			out[host] = true
+		}
+	}
+	return out
+}
+
+// setAllowedHosts swaps in a freshly computed host set under hostsMu.
+func (h *Handler) setAllowedHosts(hosts map[string]bool) {
+	h.hostsMu.Lock()
+	h.allowedHosts = hosts
+	h.hostsMu.Unlock()
+}
+
+// hostAllowed reports whether host is currently CONNECT-terminated. Read on
+// every CONNECT (connect.go) — see hostsMu for why this locks.
+func (h *Handler) hostAllowed(host string) bool {
+	h.hostsMu.RLock()
+	defer h.hostsMu.RUnlock()
+	return h.allowedHosts[host]
+}
+
+// MITMCovers reports whether host already has a pre-minted MITM leaf —
+// the test a live account-add (issue #87) must pass before it can promise
+// CONNECT-mode termination for that host without a restart. Always false
+// while MITM is disabled (h.ca nil).
+func (h *Handler) MITMCovers(host string) bool {
+	if h.ca == nil {
+		return false
+	}
+	_, err := h.ca.Leaf(host)
+	return err == nil
 }
 
 // AllowedHosts returns the hostnames CONNECT termination covers right now
-// (the global upstream plus every account's upstream override), sorted.
-// Exported so the caller can size the CA's precomputed leaf set correctly
-// (issue #69): NewHandler already computes this via SetMITM(nil), so
-// calling this right after NewHandler and before mitm.EnsureCA hands the
-// full, real host set to EnsureCA before it mints anything.
+// (the global upstream, every provider's default upstream, and every
+// account's upstream override), sorted. Exported so the caller can size the
+// CA's precomputed leaf set correctly (issue #69): NewHandler already
+// computes this via SetMITM(nil), so calling this right after NewHandler and
+// before mitm.EnsureCA hands the full, real host set to EnsureCA before it
+// mints anything.
 func (h *Handler) AllowedHosts() []string {
+	h.hostsMu.RLock()
+	defer h.hostsMu.RUnlock()
 	hosts := make([]string, 0, len(h.allowedHosts))
 	for host := range h.allowedHosts {
 		hosts = append(hosts, host)

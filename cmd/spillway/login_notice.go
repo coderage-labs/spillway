@@ -16,6 +16,13 @@ type adminGetter interface {
 // reports name as disabled right after a successful login, say so and name
 // the fix; otherwise stay silent.
 //
+// Superseded as login.go's call site by issue #87's liveAddAccount
+// (live_apply.go), which actually fixes the staleness instead of only
+// reporting it — login.go no longer calls this. Kept, and still exercised
+// directly by login_notice_test.go, as the underlying "does the daemon
+// still think this account is disabled" detector for any future caller
+// that only wants to observe rather than fix it live.
+//
 // Silence is the answer, not an error, in every other case:
 //   - no daemon reachable — the ordinary case while setting up, or when
 //     nothing is running yet. A warning there would be worse than nothing.
@@ -50,22 +57,4 @@ func restartNotice(api adminGetter, name string) string {
 			name)
 	}
 	return ""
-}
-
-// warnIfDaemonStale is the call site login.go uses after a successful login.
-// It is deliberately not the testable unit (restartNotice is, above) — this
-// wrapper only dials the daemon and prints, and dialAdmin itself needs a
-// config on disk to resolve, which is exactly the kind of thing login_test.go
-// avoids setting up for every case. Any failure to even dial (bad config,
-// nothing listening) is silence, same as restartNotice's own silence: the
-// credential is already written by the time this runs, so nothing here may
-// turn a successful login into a visible failure.
-func warnIfDaemonStale(name string) {
-	api, err := dialAdmin()
-	if err != nil {
-		return
-	}
-	if msg := restartNotice(api, name); msg != "" {
-		fmt.Println(msg)
-	}
 }

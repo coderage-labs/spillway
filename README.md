@@ -212,8 +212,8 @@ that works over SSH.
 | `spillway accounts overage <account> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — resolved by name, label or a unique prefix/substring — see [Extra usage](#extra-usage). Applies to a running daemon immediately, in both directions |
 | `spillway accounts priority <account> <n>` | Order selection for one account — resolved by name, label or a unique prefix/substring; lower is preferred. Applies to a running daemon immediately |
 | `spillway switch [<account>\|--auto] [--force]` | Point the pool at one account — resolved by name, label or a unique prefix/substring — until told otherwise; with no argument, reports what's pinned and what you could switch to |
-| `spillway login claude <account>` | Add a Claude account (OAuth PKCE), or re-authenticate an existing one — `<account>` resolves against existing accounts by name, label or a unique prefix/substring first, and only becomes a new account's name if nothing matches |
-| `spillway login kimi <account>` | Add a Kimi account (OAuth device flow), or re-authenticate an existing one — same resolution as `login claude` |
+| `spillway login claude <account>` | Add a Claude account (OAuth PKCE), or re-authenticate an existing one — `<account>` resolves against existing accounts by name, label or a unique prefix/substring first, and only becomes a new account's name if nothing matches. Reaches a running daemon immediately: a new account is selectable before the command returns, and re-authenticating an existing one hot-swaps its credential in the running pool rather than leaving the daemon holding the stale one until restarted |
+| `spillway login kimi <account>` | Add a Kimi account (OAuth device flow), or re-authenticate an existing one — same resolution and live-apply behaviour as `login claude` |
 | `spillway statusline` | Print the Claude Code status line |
 | `spillway statusline install\|uninstall\|status` | Wire it into `~/.claude/settings.json` |
 | `spillway service install\|uninstall\|status` | Run the daemon in the background — launchd on macOS, a Scheduled Task on Windows, a systemd user unit on Linux |
@@ -298,13 +298,20 @@ bug) or, once that was fixed to fail loudly instead, left a daemon that would
 not start (still a live session stranded, just louder about it).
 
 On-demand signing turns out not to be needed: the full set of hosts spillway
-will ever terminate CONNECT for — the global upstream plus every configured
-account's upstream — is known before the first request, and nothing *adds* an
-account to a running pool — `spillway login` on a new name still needs a
-restart to take effect (the same reason a fresh login shows a restart
-notice). Removing one, or changing its priority or overage, is a different
-question — those never touch the host set, and both now apply to the running
-pool immediately; see [Commands](#commands) and [Settings](#settings). So at
+will ever terminate CONNECT for — the global upstream, every registered
+provider's default upstream (`api.anthropic.com`, `api.kimi.com` — issue
+#87), and every configured account's upstream override — is known before the
+first request. Pre-minting a leaf for every *provider*, not only the hosts of
+accounts configured that day, is what lets `spillway login` on a brand-new
+provider (say, the first Kimi account in a Claude-only pool) reach a running
+daemon immediately: its leaf is already there, so adding the account never
+needs a chain regeneration. `login`, `accounts remove`, and `accounts
+priority`/`overage` all now apply to the running pool immediately; see
+[Commands](#commands) and [Settings](#settings). The one case that still needs
+a restart is a *custom* `upstream:` host that is no provider's default —
+`spillway login`/`accounts add` will say so plainly rather than silently
+regenerating the chain (which would strand every other running proxied CLI
+— exactly the failure mode the rest of this section exists to avoid). So at
 startup spillway
 generates the CA, mints a leaf for every one of those hosts up front, writes
 the CA cert (`spillway-ca.pem`) and the leaf certs+keys
@@ -315,12 +322,15 @@ to read on the next start, and no ambiguous keychain or disk error to
 mishandle, because the thing that used to be read no longer exists.
 
 A restart with an unchanged host set — the ordinary case, including the
-`brew upgrade` scenario that caused the original outage — reuses the stored
-CA cert and every leaf byte-for-byte: nothing a client already trusts
-changes. A host set that grew (a config change added an account or upstream)
+`brew upgrade` scenario that caused the original outage, and now also the
+ordinary case of adding an account for a provider spillway already knows
+about (issue #87) — reuses the stored CA cert and every leaf byte-for-byte:
+nothing a client already trusts changes. Only a host set that actually grew
+— a custom `upstream:` override naming a host no provider already covers —
 forces a full regeneration, which strands running clients exactly like any
 CA replacement — accepted, because it only follows a deliberate change that
-already needs a restart, never a plain upgrade. An install from before #69
+already needs a restart, never a plain upgrade or an ordinary account add.
+An install from before #69
 migrates the same way: it has an old pem but no leaf manifest, which is
 handled as ordinary regeneration rather than trying to read the now-orphaned
 keychain key forward — reading it would have to succeed at the moment of the
@@ -526,7 +536,9 @@ nothing else.
 - `spillway login` on an account name that already exists re-authenticates
   it in place: it writes a fresh grant and clears anything that would make
   spillway ignore it, without touching the label, priority, `allowOverage` or
-  model map you already set.
+  model map you already set. A running daemon picks up the new grant
+  immediately (issue #87) — it no longer keeps serving the old, possibly
+  disabled, credential in memory until restarted.
 
 ### `source: keychain` is deprecated — do not use it for pooling
 
@@ -790,10 +802,15 @@ through the same mechanism — there is one path into the live pool, not a
 dashboard path and a separate CLI path that could disagree about whether a
 change took effect. `remove` in particular takes the account out of
 selection immediately; a request already in flight on it is left to finish
-rather than aborted, the same way `disabled` leaves in-flight work alone. If
-no daemon is reachable, all three still succeed — the config is what a
-future `spillway server` reads at startup — and say plainly that nothing
-applied live rather than claiming it did.
+rather than aborted, the same way `disabled` leaves in-flight work alone.
+`login` (issue #87) is the mirror on the way in: a brand-new account is
+selectable before the command returns, and re-authenticating an existing one
+hot-swaps its credential on the live `*Account` in place — reviving it if it
+had gone disabled — rather than the daemon keeping the stale one in memory
+until restarted. If no daemon is reachable, all four still succeed — the
+config (and secret store) is what a future `spillway server` reads at
+startup — and say plainly that nothing applied live rather than claiming it
+did.
 
 ### Cross-provider caveat
 
