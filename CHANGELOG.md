@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/coderage-labs/spillway/compare/v0.13.0...v0.14.0) (2026-08-27)
+
+
+### Features
+
+* apply account adds and re-auth live to the running pool ([#87](https://github.com/coderage-labs/spillway/issues/87)) ([9e16f2a](https://github.com/coderage-labs/spillway/commit/9e16f2a21d8c8beab170f2254d00af702a4f2ecd))
+
 ## [0.13.0](https://github.com/coderage-labs/spillway/compare/v0.12.2...v0.13.0) (2026-08-27)
 
 
