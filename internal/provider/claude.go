@@ -276,16 +276,27 @@ func AnthropicRepresentativeClaim(h http.Header) (raw, window string, recognised
 }
 
 // anthropicReset bounds how long an exhausted window sits out, reading the
-// reset header of only the named windows (issue #54).
+// reset header of only the named windows (issue #54), and — within that
+// already-narrowed set — taking the SOONEST of their resets, not the
+// longest (issue #90).
 //
-// Before this, the reset was always the max of 5h and 7d's own headers,
-// regardless of which window actually rejected the request: a 5h-only
-// rejection (5h rejected, 7d allowed) borrowed 7d's far-off reset and
-// sidelined the account for the whole week instead of ~2 hours — measured
-// live on main, 144h instead of 2. Restricting the scan to `windows` (the
-// caller passes only the window(s) that actually fired) fixes that same
-// bug for every family at once, fable's 7d_oi included, rather than adding
-// a fourth special case here.
+// #54's scoping to only the windows that actually fired is unchanged and
+// still fixes its own bug on its own: a 5h-only rejection (5h rejected, 7d
+// allowed) never sees 7d's header at all here, because `windows` doesn't
+// name it — see TestResetHintScopesToRejectedWindowOnly.
+//
+// What issue #90 fixes is the aggregation WITHIN that set when more than
+// one named window actually fired together. Before this, a combined
+// rejection (e.g. 5h AND 7d both rejected in the same response) took the
+// MAX of their resets, so the far-off weekly window won and benched the
+// account for its full three days even though the 5h window — the one
+// that actually clears first — reset an hour later and was healthy.
+// Measured live (2026-08-27 11:41:20, account=metawin): sentenced to
+// 2026-08-30T07:00:00Z (the 7d reset) when the 5h reset, an hour out, was
+// the binding constraint. The account becomes usable again as soon as its
+// SOONEST rejected window clears; if a longer one is still in force the
+// worst case is one more 429 costing a rotation, not days of a missing
+// account.
 //
 // windows empty (a provider with no per-window signal, or a defensive call
 // with nothing to narrow by) finds no reset header to read and falls
@@ -297,15 +308,27 @@ func anthropicReset(h http.Header, windows []string, now time.Time) time.Time {
 		if !containsName(windows, w.name) {
 			continue
 		}
-		if v := h.Get("anthropic-ratelimit-unified-" + w.prefix + "-reset"); v != "" {
-			if sec, err := strconv.ParseFloat(v, 64); err == nil {
-				if t := time.Unix(int64(sec), 0); t.After(reset) {
-					reset = t
-				}
-			}
+		v := h.Get("anthropic-ratelimit-unified-" + w.prefix + "-reset")
+		if v == "" {
+			continue
+		}
+		sec, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			continue
+		}
+		t := time.Unix(int64(sec), 0)
+		if !t.After(now) {
+			// Already passed — not a real future bound to weigh against
+			// the others, and never the reason to fall back to a stale
+			// zero value here (retryAfter/1h below are for "no reset
+			// header at all", not "the header we found was in the past").
+			continue
+		}
+		if reset.IsZero() || t.Before(reset) {
+			reset = t
 		}
 	}
-	if !reset.IsZero() && reset.After(now) {
+	if !reset.IsZero() {
 		return reset
 	}
 	if ra := retryAfter(h); ra > 0 {
