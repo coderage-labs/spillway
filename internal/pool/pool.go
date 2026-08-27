@@ -105,6 +105,19 @@ type Account struct {
 	// governs — including when the account is the only one in the pool —
 	// rather than merely deprioritise it.
 	windowRejected map[string]time.Time
+	// probeBackoff is the current spacing enforced between exhausted-account
+	// re-probes (issue #90): zero until the first re-probe is rejected
+	// again, then baseInterval, then doubling on every further rejected
+	// re-probe (capped by maxProbeBackoff) — so a genuinely spent account is
+	// probed less and less often instead of every tick forever. Cleared to
+	// zero by ClearExhausted, never by MarkReprobeRejected itself: a
+	// rejected re-probe must not reset its own backoff to the base interval,
+	// only a confirmed recovery does.
+	probeBackoff time.Duration
+	// nextProbeAt is the earliest time a re-probe should run again after a
+	// rejected re-probe (issue #90); zero means no extra restriction beyond
+	// needsProbe's ordinary staleness check.
+	nextProbeAt time.Time
 }
 
 // QuotaWindow is one provider quota bucket in a provider-agnostic shape:
@@ -521,13 +534,84 @@ func better(a, b *Account) bool {
 // Done releases a request slot previously taken by Select.
 func (p *Pool) Done(a *Account) { a.addInFlight(-1) }
 
+// maxExhaustedHorizon caps how far into the future a single exhaustion can
+// sentence an account, regardless of what a reset value claims (issue #90).
+// spillway's longest legitimate provider window is the weekly bucket
+// (7d/168h); this leaves generous slack above that for clock skew rather
+// than clipping a real 7d-only rejection, while still bounding a corrupted
+// or wildly-wrong reset (a bad epoch parse, a provider bug, a stale
+// org-level cap reported far past when it actually lifts) to something a
+// re-probe can still recover from, instead of trusting an arbitrary claimed
+// duration outright.
+const maxExhaustedHorizon = 9 * 24 * time.Hour
+
+// maxProbeBackoff caps how far the re-probe spacing (probeBackoff) can grow
+// for a single exhausted account (issue #90), so a genuinely long-spent
+// account still gets checked at least this often instead of the backoff
+// drifting toward "never."
+const maxProbeBackoff = 24 * time.Hour
+
+func capExhaustion(until time.Time) time.Time {
+	if ceiling := time.Now().Add(maxExhaustedHorizon); until.After(ceiling) {
+		return ceiling
+	}
+	return until
+}
+
 // MarkExhausted marks an account out of quota until the given time (§6.1:
-// quota-429 rotates; the account is skipped until its window resets).
+// quota-429 rotates; the account is skipped until its window resets),
+// capped at maxExhaustedHorizon (issue #90) rather than trusting an
+// arbitrarily far-future reset outright.
 func (p *Pool) MarkExhausted(a *Account, until time.Time) {
 	a.mu.Lock()
 	a.state = StateExhausted
-	a.exhaustedUntil = until
+	a.exhaustedUntil = capExhaustion(until)
 	a.mu.Unlock()
+}
+
+// MarkReprobeRejected records that a re-probe of an already-exhausted
+// account (issue #90) was rejected again: extends the bench to the fresh
+// `until` (capped the same as MarkExhausted) and grows the probe backoff —
+// baseInterval on the first rejected re-probe, doubling on every one after
+// that, capped at maxProbeBackoff — rather than resetting it to baseInterval,
+// so a genuinely spent account gets re-probed less and less often instead of
+// every tick forever. The backoff is never reset to zero here; only
+// ClearExhausted (a re-probe that actually recovers) does that.
+func (p *Pool) MarkReprobeRejected(a *Account, until time.Time, baseInterval time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state = StateExhausted
+	a.exhaustedUntil = capExhaustion(until)
+	if a.probeBackoff < baseInterval {
+		a.probeBackoff = baseInterval
+	} else {
+		a.probeBackoff *= 2
+	}
+	if a.probeBackoff > maxProbeBackoff {
+		a.probeBackoff = maxProbeBackoff
+	}
+	a.nextProbeAt = time.Now().Add(a.probeBackoff)
+}
+
+// ClearExhausted un-benches an account a re-probe found healthy again
+// (issue #90), rather than waiting for exhaustedUntil to arrive on its own:
+// a rejection that turns out to have been transient, spurious, or misread
+// (measured live: a restart found an account StateOK and immediately
+// servable, with its weekly window reading 17% remaining, days before its
+// recorded exhaustedUntil) should not sentence the account to its original
+// deadline just because that deadline hasn't arrived yet. A no-op unless
+// the account is currently exhausted, so it can never revive a disabled or
+// parked account.
+func (p *Pool) ClearExhausted(a *Account) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state != StateExhausted {
+		return
+	}
+	a.state = StateOK
+	a.exhaustedUntil = time.Time{}
+	a.probeBackoff = 0
+	a.nextProbeAt = time.Time{}
 }
 
 // MarkWindowRejected records that upstream has refused window `name` until
@@ -861,6 +945,15 @@ func (a *Account) ExhaustedUntil() time.Time {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.exhaustedUntil
+}
+
+// NextProbeAt reports the earliest time a re-probe of this account should
+// run again, following a rejected re-probe's backoff (issue #90). Zero
+// means no extra restriction beyond the caller's own staleness check.
+func (a *Account) NextProbeAt() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.nextProbeAt
 }
 
 func (a *Account) stateLocked() State {

@@ -971,34 +971,15 @@ func quotaReset(acct *pool.Account, h http.Header, windows []string) time.Time {
 // account-wide — draws on every request regardless of model — and returns
 // that account-wide subset (issue #54).
 //
-// "Account-wide" is derived from the provider's own general/fallback
-// GoverningWindows("") rather than a hardcoded {"5h","7d"} list here: a
-// fourth family becomes account-wide or family-scoped by how claudeWindows
-// and claudeGoverningWindows classify it, never by an edit in this package.
-//
-// No RejectedWindows or no GoverningWindows at all means the provider has
-// no per-window signal to narrow by (Kimi today) — this degrades to
-// today's account-wide behaviour on any quota rejection, not to "never
-// exhaust": the absence of a signal is not evidence the rejection was
-// narrow. The same fallback covers the (should-not-happen, since Classify
-// uses the identical RejectedWindows to decide ErrQuota in the first
-// place) case of an empty rejected set reaching here regardless — fail
-// toward the wider, safer scope.
+// A thin wrapper: the actual scope decision now lives in
+// provider.ScopeRejection (issue #90), so the background quota re-probe
+// (internal/accounts/probe.go) makes exactly the same call instead of a
+// second, hand-rolled copy that could drift from this one. Kept here, under
+// its original name, so this package's own tests
+// (TestAccountWideRejectionScoping) keep exercising it as "proxy.go's own
+// scope decision" rather than needing to know it moved.
 func accountWideRejection(acctType string, rejected []string) (wide bool, wideNames []string) {
-	spec := provider.For(acctType)
-	if spec.RejectedWindows == nil || spec.GoverningWindows == nil || len(rejected) == 0 {
-		return true, rejected
-	}
-	general := spec.GoverningWindows("")
-	for _, r := range rejected {
-		for _, g := range general {
-			if r == g {
-				wideNames = append(wideNames, r)
-				break
-			}
-		}
-	}
-	return len(wideNames) > 0, wideNames
+	return provider.ScopeRejection(acctType, rejected)
 }
 
 func containsStr(list []string, s string) bool {
