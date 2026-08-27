@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.13.0](https://github.com/coderage-labs/spillway/compare/v0.12.2...v0.13.0) (2026-08-27)
+
+
+### Features
+
+* warn a running session when a chain regeneration has stranded it ([#66](https://github.com/coderage-labs/spillway/issues/66)) ([429d0b1](https://github.com/coderage-labs/spillway/commit/429d0b1de68d7b1ad0bc14e3773aaef7db5cccff))
+
+
+### Fixes
+
+* apply account remove/priority/overage live to the running pool ([#83](https://github.com/coderage-labs/spillway/issues/83)) ([530e93a](https://github.com/coderage-labs/spillway/commit/530e93aa8ede649be85603ac938042b1848bd7e3))
+* deprecate borrowed keychain credentials for pooling ([#81](https://github.com/coderage-labs/spillway/issues/81)) ([ad0d707](https://github.com/coderage-labs/spillway/commit/ad0d707597fbf68765da3e366f5d7091cb8e22a1))
+* keep headroom chart labels inside the plot ([#75](https://github.com/coderage-labs/spillway/issues/75)) ([11d57e5](https://github.com/coderage-labs/spillway/commit/11d57e5d3449065eb99f437566d955eb69f527da))
+
+
+### Documentation
+
+* drop the hero caption ([8ff62bb](https://github.com/coderage-labs/spillway/commit/8ff62bb7b8e130d42f2e1b82ca1a209167f12d23)), closes [#72](https://github.com/coderage-labs/spillway/issues/72)
+* show the dashboard in the README, over an enriched demo pool ([#72](https://github.com/coderage-labs/spillway/issues/72)) ([593393a](https://github.com/coderage-labs/spillway/commit/593393a7bf1f5af487a16da1e2d306e55dea3ee7))
+
 ## [0.12.2](https://github.com/coderage-labs/spillway/compare/v0.12.1...v0.12.2) (2026-08-24)
 
 
