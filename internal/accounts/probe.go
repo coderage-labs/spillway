@@ -30,12 +30,28 @@ package accounts
 // not here but one level up, by never actually starting a restart with zero
 // windows: SeedQuota (seed.go) installs last-known state from quota_samples
 // before the probe loop runs, so "no windows" means genuinely unknown again.
+//
+// Issue #90 reuses this exact machinery for a second purpose: an exhausted
+// account is never selected for real traffic, so nothing else ever learns
+// that its bench was wrong (transient, spurious, or a stale reset value) —
+// before this, only a daemon restart, which clears exhaustion in memory
+// unconditionally, ever discovered that. ProbeIdle already walks every
+// non-disabled account each tick, including exhausted ones, and needsProbe's
+// wouldBill guard already never lets it bill; the only piece added for #90
+// is what happens to the RESULT: probeOne now checks whether the account
+// was exhausted going in, and if so hands the response to reprobeOutcome,
+// which clears the bench on success or extends it (growing, never
+// resetting, its own re-probe backoff) on a confirmed rejection. No new
+// ticker, no new config setting — the same probeOnStart/probeInterval
+// schedule now also re-verifies exhausted accounts while they are
+// exhausted, not just idle ones.
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -44,6 +60,12 @@ import (
 	"github.com/coderage-labs/spillway/internal/pool"
 	"github.com/coderage-labs/spillway/internal/provider"
 )
+
+// probeClassifyCap bounds how much of a probe response body is read for
+// classification (issue #90's reprobeOutcome) — mirrors the proxy's own
+// max429Body cap for the same reason: a provider error body has no business
+// being large, and there's no case for buffering more of one.
+const probeClassifyCap = 1 << 16
 
 // probeBody is the cheapest request that still returns quota headers: one
 // token, no thinking, shortest viable prompt.
@@ -76,12 +98,12 @@ func ProbeIdle(ctx context.Context, p *pool.Pool, client *http.Client, defaultUp
 		if a.State() == pool.StateDisabled {
 			continue
 		}
-		err := probeOne(ctx, p, a, client, defaultUpstream)
+		err := probeOne(ctx, p, a, client, defaultUpstream, staleAfter)
 		if errors.Is(err, errProbeUnauthorized) {
 			// The stored token was superseded (another holder refreshed it).
 			// Recover once and retry before giving up.
 			if rerr := p.Recover(ctx, a); rerr == nil {
-				err = probeOne(ctx, p, a, client, defaultUpstream)
+				err = probeOne(ctx, p, a, client, defaultUpstream, staleAfter)
 			}
 		}
 		if err != nil {
@@ -160,6 +182,14 @@ func needsProbe(a *pool.Account, staleAfter time.Duration) bool {
 	if wouldBill(a, time.Now()) {
 		return false
 	}
+	// A rejected re-probe (issue #90) sets NextProbeAt to enforce its own
+	// growing backoff, separately from — and possibly longer than —
+	// staleAfter; check it before the ordinary staleness comparison below so
+	// a repeatedly-rejected exhausted account is spaced out rather than
+	// re-probed every tick at the base interval.
+	if next := a.NextProbeAt(); !next.IsZero() && time.Now().Before(next) {
+		return false
+	}
 	if staleAfter <= 0 {
 		return false // periodic probing disabled: startup gap only
 	}
@@ -176,18 +206,23 @@ func needsProbe(a *pool.Account, staleAfter time.Duration) bool {
 // recovery before writing the account off.
 var errProbeUnauthorized = errors.New("probe unauthorized")
 
-func probeOne(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.Client, defaultUpstream string) error {
+// probeOne sends one probe request. reprobeBackoff is the base spacing
+// (issue #90) used only when the account was already exhausted going in
+// and this probe is rejected again — the same value as ProbeIdle's own
+// staleAfter, so a rejected re-probe is never spaced closer than the
+// ordinary probe cadence.
+func probeOne(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.Client, defaultUpstream string, reprobeBackoff time.Duration) error {
 	upstream := a.Upstream
 	if upstream == "" {
 		upstream = defaultUpstream
 	}
 	model := probeModel(a)
-	body := fmt.Sprintf(probeBody, model)
+	reqBody := fmt.Sprintf(probeBody, model)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(upstream, "/")+"/v1/messages", bytes.NewReader([]byte(body)))
+		strings.TrimRight(upstream, "/")+"/v1/messages", bytes.NewReader([]byte(reqBody)))
 	if err != nil {
 		return err
 	}
@@ -196,11 +231,18 @@ func probeOne(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.C
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 	req.Header.Set("Authorization", "Bearer "+a.Token())
 
+	// Captured before the request: this probe's own RecordQuota call below
+	// updates the account's windows, and reading state only afterward could
+	// no longer tell "was exhausted, now recovering" from "was already
+	// fine".
+	wasExhausted := a.State() == pool.StateExhausted
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, probeClassifyCap))
 
 	p.RecordQuota(a, resp.Header, time.Now())
 	// The probe really did serve this model, so the status line has something
@@ -214,5 +256,72 @@ func probeOne(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.C
 	if resp.StatusCode >= 400 && len(a.QuotaWindows()) == 0 {
 		return fmt.Errorf("probe returned %d with no quota headers", resp.StatusCode)
 	}
+
+	if wasExhausted {
+		reprobeOutcome(p, a, provider.For(a.Type), resp.StatusCode, resp.Header, respBody, reprobeBackoff)
+	}
 	return nil
+}
+
+// resetFor mirrors internal/proxy/proxy.go's quotaReset: the provider
+// decides the deadline from its own response headers, restricted to
+// `windows`, falling back to the account's last known quota reset when the
+// headers don't say. Kept as its own small copy here (rather than exported
+// from proxy, which this package must not import) because it is a
+// three-line wrapper around Spec.ResetHint with no independent judgment
+// call of its own to drift out of sync.
+func resetFor(a *pool.Account, spec provider.Spec, h http.Header, windows []string) time.Time {
+	now := time.Now()
+	fallback := time.Time{}
+	if reset, ok := a.EarliestQuotaReset(); ok {
+		fallback = reset
+	}
+	return spec.ResetHint(h, windows, now, fallback)
+}
+
+// reprobeOutcome interprets a probe response for an account that was
+// already StateExhausted before this probe ran (issue #90): a probe is the
+// one place spillway acts as a client on an exhausted account's behalf, so
+// it is also the one place that can discover a bench was wrong before its
+// recorded exhaustedUntil says so.
+//
+// A response with no confirmed quota rejection clears the exhaustion
+// immediately (ClearExhausted) — matching the live-observed case of a
+// daemon restart finding an account StateOK and its weekly window at 17%
+// remaining, days before its recorded deadline.
+//
+// A response still rejected re-derives `until` the same way the live
+// rejection path does — #54's family scoping via provider.ScopeRejection,
+// #90's soonest-not-longest fix inside anthropicReset — and extends the
+// bench via MarkReprobeRejected, which also grows the re-probe backoff
+// instead of resetting it, so a genuinely spent account is probed less and
+// less often rather than every tick forever.
+//
+// Anything else — ErrRate, ErrModelID, or a rejection that turns out not to
+// be account-wide (`wide` false) — is inconclusive: the probe always asks
+// for a fixed, known-good, non-fable model, so neither should occur in
+// practice, and guessing here risks either clearing a bench that is still
+// real or extending one on a signal that was never actually about the whole
+// account. Left untouched; the next probe tick tries again.
+func reprobeOutcome(p *pool.Pool, a *pool.Account, spec provider.Spec, status int, h http.Header, body []byte, baseInterval time.Duration) {
+	switch spec.Classify(status, h, body) {
+	case provider.ErrQuota:
+		var rejected []string
+		if spec.RejectedWindows != nil {
+			rejected = spec.RejectedWindows(h)
+		}
+		wide, wideNames := provider.ScopeRejection(a.Type, rejected)
+		if !wide {
+			return
+		}
+		until := resetFor(a, spec, h, wideNames)
+		if until.IsZero() {
+			until = time.Now().Add(baseInterval)
+		}
+		p.MarkReprobeRejected(a, until, baseInterval)
+	case provider.ErrNone:
+		if status < 400 {
+			p.ClearExhausted(a)
+		}
+	}
 }
