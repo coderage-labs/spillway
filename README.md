@@ -676,11 +676,41 @@ even if it's the only account left — the request falls through to the
 usual hold-then-429 path instead) while leaving it fully eligible for
 Sonnet/Opus/Haiku, which a fable rejection never touches. A rejection of
 `5h` or `7d` still exhausts the whole account as before, and now waits out
-only the window that actually rejected the request rather than the
-longest reset among every window the account has — a fable-only 429 used
-to be misread as a same-account throttle and retried three times, and a
-5h-only 429 used to borrow 7d's far longer reset and sideline the account
-for up to a week when it should have cleared in a couple of hours.
+only the window(s) that actually rejected the request rather than every
+window the account has — a fable-only 429 used to be misread as a
+same-account throttle and retried three times, and a 5h-only 429 used to
+borrow 7d's far longer reset and sideline the account for up to a week when
+it should have cleared in a couple of hours.
+
+**A combined rejection benches to its soonest window, not its longest.**
+Anthropic can reject more than one window in the same response (e.g. `5h`
+*and* `7d` together). The account-wide deadline is the soonest reset among
+whichever windows actually fired, not the longest: measured live, a
+combined `5h`+`7d` rejection took the far-off weekly reset and benched an
+account for three days, even though its 5h window — the binding
+constraint — cleared an hour later and was healthy. If a longer-lived
+rejection is still genuinely in force once the shorter one clears, the
+worst case is one more 429 costing a rotation, not days of a missing
+account. Separately, `exhaustedUntil` is capped at 9 days regardless of
+what a reset value claims, so a corrupted or wildly-wrong reset (a bad
+epoch parse, a stale org-level cap) can't sentence an account indefinitely
+either.
+
+**Exhausted accounts are re-probed, not just waited out.** Nothing else
+ever routes real traffic to an exhausted account, so a bench that was
+wrong — transient, spurious, or read off a stale figure — used to sit
+until its deadline arrived or the daemon restarted (a restart clears
+in-memory exhaustion unconditionally, which is how one such case was
+actually discovered: the account came back serving immediately, its
+weekly window reading 17% remaining, days before its recorded deadline).
+The same `probeOnStart`/`probeInterval` machinery that fills idle tanks
+now also re-verifies an exhausted account while it stays exhausted: a
+healthy re-probe clears the bench immediately, and a re-probe that is
+rejected again extends it to the fresh deadline while growing — never
+resetting — its own probe backoff, so a genuinely spent account gets
+checked less often over time instead of every tick. This never bills:
+the same guard that stops an ordinary idle probe from paying to re-learn
+a spent window (see below) applies identically here.
 
 **Rank accounts of different providers.** At equal priority the tie-break is
 in-flight count, and headroom below the threshold does not enter into it — so
@@ -769,10 +799,14 @@ error.
 
 An idle account reports no quota until something is routed to it, so a standby
 tank would sit blank. `probeOnStart` sends one minimal request per account with
-no reading, and `probeInterval` re-probes readings that have gone stale. This
-is spillway originating traffic rather than proxying it, so it is deliberately
-narrow: never for an account that already reported recently, never fatal on
-failure, and switchable off.
+no reading, and `probeInterval` re-probes readings that have gone stale — the
+same schedule also re-verifies an exhausted account for as long as it stays
+exhausted (see "Exhausted accounts are re-probed" above), rather than a
+separate mechanism. This is spillway originating traffic rather than proxying
+it, so it is deliberately narrow: never for an account that already reported
+recently, never fatal on failure, never for an account whose quota is spent
+with a reset still ahead (that would risk billing, not just re-learning a
+figure already on file), and switchable off.
 
 Quota windows live in memory, so a restart used to mean every tank went blank
 until the next probe or request — and, for an account that was spent with
