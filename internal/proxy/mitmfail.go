@@ -16,8 +16,14 @@ package proxy
 // The key is (host, detail): a client failing for one reason must not
 // suppress logging of a DIFFERENT failure on the same host, or the same
 // failure detail recurring on a different host.
+//
+// The stale-CA stranded-client detector (below) keys its OWN recurrence
+// check differently — see classifyHandshakeFailure — because "don't log
+// 11,665 near-identical lines" and "is this the same failure recurring"
+// turned out to be different questions (issue #96).
 import (
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,13 +61,13 @@ type mitmFailLogger struct {
 	strandedStale time.Duration
 }
 
-// strandedRecurWindow bounds how soon a repeat of the exact same (host,
-// detail) pair has to arrive to count as the SAME client still stuck
+// strandedRecurWindow bounds how soon a repeat of the same (host, coarse
+// failure class) pair has to arrive to count as the SAME client still stuck
 // retrying against a replaced CA, rather than an unrelated later failure
-// that happens to produce an identical — often generic ("EOF") — detail
-// string on the same host. A client stuck on a stale trust anchor retries
-// far more often than this; two failures this far apart are treated as
-// unrelated, so it takes a fresh pairing to count as evidence again.
+// that happens to land in the same — often generic ("eof") — class on the
+// same host. A client stuck on a stale trust anchor retries far more often
+// than this; two failures this far apart are treated as unrelated, so it
+// takes a fresh pairing to count as evidence again.
 const strandedRecurWindow = 2 * time.Minute
 
 // strandedStaleWindow is how long Stranded keeps reporting true after the
@@ -108,8 +114,71 @@ func (l *mitmFailLogger) activate() {
 	l.mu.Unlock()
 }
 
+// Coarse failure classes for the stale-CA stranded-client detector (issue
+// #96). What the detector needs is "same host, same KIND of failure" —
+// never the exact bytes of a Go network error, which vary by platform for
+// the identical underlying event: Windows reports a torn-down connection
+// as "wsarecv: An existing connection was forcibly closed by the remote
+// host" where Unix says "read: connection reset by peer", and a client
+// rejecting our MITM leaf can surface as any of several TLS alerts
+// ("bad certificate", "unknown certificate authority") or even a garbled
+// decrypt ("bad record MAC") from a client still holding pre-regeneration
+// key material. Keying recurrence on the raw normalized string (as
+// normalizeHandshakeDetail produces, for the log throttle) missed exactly
+// this: two occurrences of the same real-world failure landing on
+// different text shapes never compared equal, so the recurrence the
+// detector exists to catch was silently missed — worst on Windows, the
+// platform this repo can least easily inspect (ci.yml is "written blind").
+const (
+	classHandshakeRejected = "tls-handshake-rejected"
+	classConnReset         = "connection-reset"
+	classEOF               = "eof"
+	classTimeout           = "timeout"
+	classOther             = "other"
+)
+
+// classifyHandshakeFailure buckets a handshake-failure detail into a
+// coarse, platform-stable class. An unrecognised message still gets a
+// stable class (classOther) rather than falling back to the raw text:
+// falling back to raw text is exactly the bug this exists to fix — it
+// would silently reintroduce #96 on whatever future platform or Go version
+// emits a shape this function does not yet know about.
+func classifyHandshakeFailure(detail string) string {
+	d := strings.ToLower(detail)
+	switch {
+	case strings.Contains(d, "tls:"):
+		// Any TLS-layer alert or crypto failure: the client rejecting our
+		// leaf (bad certificate / unknown certificate authority /
+		// certificate expired) or a garbled decrypt (bad record MAC) —
+		// different wire-level shapes of the same root cause, a client
+		// that does not hold key material this run's CA will vouch for.
+		return classHandshakeRejected
+	case strings.Contains(d, "connection reset by peer"),
+		strings.Contains(d, "forcibly closed"),
+		strings.Contains(d, "connection aborted"),
+		strings.Contains(d, "was aborted"),
+		strings.Contains(d, "broken pipe"),
+		strings.Contains(d, "econnreset"):
+		// "connection reset by peer" (Unix) and Windows' "wsarecv: An
+		// existing connection was forcibly closed by the remote host" /
+		// "wsasend: An established connection was aborted..." are the same
+		// event — the peer tore the TCP connection down mid-handshake —
+		// reported through different syscalls with different wording.
+		return classConnReset
+	case strings.Contains(d, "eof"):
+		return classEOF
+	case strings.Contains(d, "timeout"), strings.Contains(d, "deadline exceeded"):
+		return classTimeout
+	default:
+		return classOther
+	}
+}
+
 // noteStranded folds one raw handshake failure into the stale-CA detector.
-// Must be called with l.mu held.
+// key is (host, coarse failure class) — see classifyHandshakeFailure — not
+// (host, raw detail): recurrence needs "same kind of failure", which the
+// raw text does not reliably give across platforms. Must be called with
+// l.mu held.
 func (l *mitmFailLogger) noteStranded(key string, now time.Time) {
 	if !l.strandedArmed {
 		return
@@ -144,7 +213,7 @@ func (l *mitmFailLogger) log(host, detail string) {
 	now := time.Now()
 
 	l.mu.Lock()
-	l.noteStranded(key, now)
+	l.noteStranded(host+"\x00"+classifyHandshakeFailure(detail), now)
 	e, ok := l.seen[key]
 	if !ok {
 		e = &mitmFailEntry{}
