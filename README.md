@@ -5,8 +5,7 @@
 <h1 align="center">spillway</h1>
 
 <p align="center">
-  Pool your own AI subscription accounts behind one local proxy,<br>
-  so a session doesn't stop at a 429.
+  Pool your own AI subscription accounts behind one local proxy, so a session doesn't stop at a 429.
 </p>
 
 <p align="center">
