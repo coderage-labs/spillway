@@ -173,6 +173,89 @@ func TestNormalizeHandshakeDetailCollapsesAllThreeRealShapes(t *testing.T) {
 	}
 }
 
+// ── issue #96: coarse failure classes for the stale-CA detector ────────────
+//
+// classifyHandshakeFailure is what noteStranded keys recurrence on instead
+// of the raw normalized detail — these exercise the pure function directly,
+// independent of the Handler-level recurrence tests in staleca_test.go.
+
+// TestClassifyHandshakeFailureKnownShapes pins every platform/wording shape
+// #96 names to its class, including the real 4 shapes a production log
+// held (see TestNormalizeHandshakeDetailCollapsesAllThreeRealShapes) and
+// the Windows wordings CI could not produce locally.
+func TestClassifyHandshakeFailureKnownShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		msg   string
+		class string
+	}{
+		{"remote alert: bad certificate", "remote error: tls: bad certificate", classHandshakeRejected},
+		{"remote alert: unknown certificate authority", "remote error: tls: unknown certificate authority", classHandshakeRejected},
+		{"local error: bad record MAC", "local error: tls: bad record MAC", classHandshakeRejected},
+		{"unix: connection reset by peer", "read tcp <addr>-><addr>: read: connection reset by peer", classConnReset},
+		{"windows: wsarecv forcibly closed", "wsarecv: An existing connection was forcibly closed by the remote host", classConnReset},
+		{"windows: wsasend aborted", "wsasend: An established connection was aborted by the software in your host machine", classConnReset},
+		{"bare EOF", "EOF", classEOF},
+		{"unexpected EOF", "unexpected EOF", classEOF},
+		{"io timeout", "i/o timeout", classTimeout},
+		{"context deadline exceeded", "context deadline exceeded", classTimeout},
+		{"unrecognised message", "some future golang wording nobody anticipated", classOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyHandshakeFailure(tc.msg); got != tc.class {
+				t.Errorf("classifyHandshakeFailure(%q) = %q, want %q", tc.msg, got, tc.class)
+			}
+		})
+	}
+}
+
+// TestClassifyHandshakeFailureUnixAndWindowsResetAreSameClass is the exact
+// pairing #96 reports: Go's wording for an identical underlying event (the
+// peer tore the connection down mid-handshake) differs by platform, and the
+// detector must not care.
+func TestClassifyHandshakeFailureUnixAndWindowsResetAreSameClass(t *testing.T) {
+	unix := classifyHandshakeFailure("read tcp 127.0.0.1:7654->127.0.0.1:61018: read: connection reset by peer")
+	win := classifyHandshakeFailure("wsarecv: An existing connection was forcibly closed by the remote host")
+	if unix != win {
+		t.Fatalf("unix reset classified %q, windows reset classified %q — want the same class", unix, win)
+	}
+}
+
+// TestClassifyHandshakeFailureUnrecognisedIsStable: an unrecognised message
+// must not fall back to the raw text as its own ad-hoc "class" — that
+// reintroduces #96 verbatim for whatever shape this function does not yet
+// know about. Two DIFFERENT unrecognised messages must still land on the
+// identical, stable class.
+func TestClassifyHandshakeFailureUnrecognisedIsStable(t *testing.T) {
+	a := classifyHandshakeFailure("some future golang wording nobody anticipated")
+	b := classifyHandshakeFailure("a completely different unrecognised phrasing")
+	if a != b {
+		t.Fatalf("two unrecognised messages classified differently: %q vs %q", a, b)
+	}
+	if a != classOther {
+		t.Errorf("unrecognised message classified as %q, want the stable %q", a, classOther)
+	}
+}
+
+// TestMitmFailLoggerThrottleStaysGranularAcrossSameClassDifferentText proves
+// the throttle (the "seen" map, keyed on raw detail) and the stale-CA
+// recurrence check (keyed on coarse class) are two separate mechanisms: two
+// messages that classify identically but read differently must still both
+// log through the throttle — collapsing them would defeat #64's "a client
+// failing for a DIFFERENT reason on the same host must still be logged".
+func TestMitmFailLoggerThrottleStaysGranularAcrossSameClassDifferentText(t *testing.T) {
+	var buf bytes.Buffer
+	l := newMitmFailLoggerWindow(mfTestLogger(&buf), time.Hour)
+
+	l.log("api.anthropic.com", "remote error: tls: bad certificate")
+	l.log("api.anthropic.com", "local error: tls: bad record MAC") // same class, different raw text
+
+	got := strings.Count(buf.String(), "mitm connection failed")
+	if got != 2 {
+		t.Fatalf("got %d log lines, want 2 — the throttle must stay keyed on raw detail, not the coarse class", got)
+	}
+}
+
 // ── issue #66: stale-CA stranded-client detection ──────────────────────────
 //
 // These exercise mitmFailLogger.Stranded() directly rather than through a
