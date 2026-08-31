@@ -128,9 +128,26 @@ func ProbeIdle(ctx context.Context, p *pool.Pool, client *http.Client, defaultUp
 // the reading we already have, and if it is gone with overage on, we pay for
 // the privilege. The stored reset time is what says when to look again, so
 // waiting for it costs nothing.
+//
+// Only the windows the probe's OWN model draws on can make it bill. A spent
+// family the probe never engages says nothing about what the probe costs:
+// the probe asks for a small non-fable model, so a spent fable bucket cannot
+// charge it, and treating that as "would bill" would park an otherwise
+// healthy account's tank until that family reset — up to a week — while
+// nothing refreshed it. That was reachable before quota windows were
+// retained across readings and is the ordinary case now that they are.
 func wouldBill(a *pool.Account, now time.Time) bool {
+	governing := map[string]bool{}
+	if gw := provider.For(a.Type).GoverningWindows; gw != nil {
+		for _, name := range gw(probeModel(a)) {
+			governing[name] = true
+		}
+	}
 	spent, reset := false, time.Time{}
 	for _, w := range a.QuotaWindows() {
+		if len(governing) > 0 && !governing[w.Name] {
+			continue // a family this probe never engages cannot charge it
+		}
 		if w.Limit <= 0 || w.Used/w.Limit < 1 {
 			continue
 		}
