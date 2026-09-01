@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -895,7 +896,16 @@ func (a *Account) setWindowsSourced(source string, w []QuotaWindow) {
 func (a *Account) QuotaWindows() []QuotaWindow {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]QuotaWindow(nil), a.windows...)
+	out := append([]QuotaWindow(nil), a.windows...)
+	// Sorted here rather than at each display site (issue #106): the stored
+	// order is whatever setWindowsSourced last produced, which depends on
+	// arrival order and on which subset a response happened to carry, so it
+	// differs between accounts on one page and shifts under the reader as
+	// requests come in. Every consumer — dashboard tanks, the figures table,
+	// the chart legend, the statusline — reads through here, so one sort
+	// keeps them all agreeing.
+	sort.Slice(out, func(i, j int) bool { return lessWindow(out[i].Name, out[j].Name) })
+	return out
 }
 
 // OverThreshold reports whether ANY quota window is at/above the used
