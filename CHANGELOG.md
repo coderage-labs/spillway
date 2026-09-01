@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.0](https://github.com/coderage-labs/spillway/compare/v0.15.0...v0.16.0) (2026-09-01)
+
+
+### Features
+
+* record cache token usage so quota burn becomes explicable ([#110](https://github.com/coderage-labs/spillway/issues/110)) ([f15d5e3](https://github.com/coderage-labs/spillway/commit/f15d5e3f2cc31d5acd7c53d17dd6c369cbf7c5e5))
+
+
+### Fixes
+
+* merge quota windows by name so a silent response stops deleting them ([#100](https://github.com/coderage-labs/spillway/issues/100)) ([1faabf3](https://github.com/coderage-labs/spillway/commit/1faabf329750bc3805f5ec18d3e2847516f00e3b))
+
 ## [0.15.0](https://github.com/coderage-labs/spillway/compare/v0.14.1...v0.15.0) (2026-09-01)
 
 
