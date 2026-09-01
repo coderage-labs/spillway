@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.17.0](https://github.com/coderage-labs/spillway/compare/v0.16.0...v0.17.0) (2026-09-01)
+
+
+### Features
+
+* opt-in strip of the credit signals Claude Code's model gate latches on ([#118](https://github.com/coderage-labs/spillway/issues/118)) ([6624510](https://github.com/coderage-labs/spillway/commit/6624510abf78439f915b2c20f19dad647182f0db)), closes [#103](https://github.com/coderage-labs/spillway/issues/103)
+
+
+### Fixes
+
+* decode gzipped responses so the usage sniffer stops recording zeros ([#121](https://github.com/coderage-labs/spillway/issues/121)) ([04db493](https://github.com/coderage-labs/spillway/commit/04db493a43e4d7c7c31b5cc04e99ca6e40bc77f0))
+* judge probe cost by the families the probe itself draws on ([#117](https://github.com/coderage-labs/spillway/issues/117)) ([6563096](https://github.com/coderage-labs/spillway/commit/65630968c8ae9c91e02160680200a6cd5185b714)), closes [#116](https://github.com/coderage-labs/spillway/issues/116)
+
 ## [0.16.0](https://github.com/coderage-labs/spillway/compare/v0.15.0...v0.16.0) (2026-09-01)
 
 
