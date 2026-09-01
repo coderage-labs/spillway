@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.15.0](https://github.com/coderage-labs/spillway/compare/v0.14.1...v0.15.0) (2026-09-01)
+
+
+### Features
+
+* wake a held request when capacity appears, not just when the clock says so ([#105](https://github.com/coderage-labs/spillway/issues/105)) ([bf404fe](https://github.com/coderage-labs/spillway/commit/bf404fe0259e2e4db8e0356c504967525ad7b624))
+
+
+### Fixes
+
+* classify handshake failures by kind, not by platform error text ([#96](https://github.com/coderage-labs/spillway/issues/96)) ([9d58fb2](https://github.com/coderage-labs/spillway/commit/9d58fb21ec20816bdf5adae02301e83221d44c7a))
+* order quota windows by length, then variant ([#106](https://github.com/coderage-labs/spillway/issues/106)) ([#109](https://github.com/coderage-labs/spillway/issues/109)) ([f5ba0c1](https://github.com/coderage-labs/spillway/commit/f5ba0c185663fb7e11e3616b1514e42a1057ad7a))
+* stop an unindexed quota_samples query blocking startup ([#104](https://github.com/coderage-labs/spillway/issues/104)) ([a341d9c](https://github.com/coderage-labs/spillway/commit/a341d9cb9dfb25fc3905f41d746a30b5a6410fc8))
+
 ## [0.14.1](https://github.com/coderage-labs/spillway/compare/v0.14.0...v0.14.1) (2026-08-27)
 
 
