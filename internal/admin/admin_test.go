@@ -157,6 +157,80 @@ func TestAccountsShape(t *testing.T) {
 	}
 }
 
+// TestAccountsIncludesCacheStats: issue #110's dashboard surfacing. An
+// account with recorded cache volume reports a hit rate and the two
+// volumes on /api/accounts; an account with no requests logged yet reports
+// neither (nil hit rate, zero volumes) rather than a misleading 0%.
+func TestAccountsIncludesCacheStats(t *testing.T) {
+	s, _ := newTestServer(t)
+	l, err := reqlog.Open(t.TempDir() + "/r.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	for _, e := range []reqlog.Entry{
+		{Account: "work", Event: reqlog.EventServed, CacheCreationInputTokens: 4165, CacheReadInputTokens: 1816},
+		{Account: "work", Event: reqlog.EventServed, CacheCreationInputTokens: 0, CacheReadInputTokens: 200},
+	} {
+		if err := l.Record(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.log = l
+
+	front := httptest.NewServer(s)
+	defer front.Close()
+	req, _ := authed(front.URL + "/api/accounts")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got []accountJSON
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("accounts = %+v", got)
+	}
+	a := got[0]
+	if a.CacheCreateTokens != 4165 || a.CacheReadTokens != 2016 {
+		t.Errorf("cache volume = create=%d read=%d, want create=4165 read=2016", a.CacheCreateTokens, a.CacheReadTokens)
+	}
+	if a.CacheHitRate == nil {
+		t.Fatal("CacheHitRate = nil, want a value once there's cache volume")
+	}
+	want := 2016.0 / (2016.0 + 4165.0)
+	if *a.CacheHitRate != want {
+		t.Errorf("CacheHitRate = %v, want %v", *a.CacheHitRate, want)
+	}
+}
+
+func TestAccountsOmitsCacheStatsWithNoVolume(t *testing.T) {
+	s, _ := newTestServer(t) // no log wired at all
+	front := httptest.NewServer(s)
+	defer front.Close()
+	req, _ := authed(front.URL + "/api/accounts")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var got []accountJSON
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("accounts = %+v", got)
+	}
+	if got[0].CacheHitRate != nil {
+		t.Errorf("CacheHitRate = %v, want nil with no log wired", *got[0].CacheHitRate)
+	}
+	if got[0].CacheCreateTokens != 0 || got[0].CacheReadTokens != 0 {
+		t.Errorf("cache volume = %+v, want zero with no log wired", got[0])
+	}
+}
+
 func TestRequestsEndpoint(t *testing.T) {
 	s, _ := newTestServer(t)
 	l, err := reqlog.Open(t.TempDir() + "/r.db")

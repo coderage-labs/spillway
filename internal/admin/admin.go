@@ -401,9 +401,30 @@ type accountJSON struct {
 	LastModel      string             `json:"lastModel,omitempty"`
 	Upstream       string             `json:"upstream,omitempty"`
 	Windows        []pool.QuotaWindow `json:"quotaWindows,omitempty"`
+	// CacheHitRate, CacheCreateTokens and CacheReadTokens (issue #110) are
+	// lifetime totals from the request log — cache_read/(cache_read +
+	// cache_creation) and the two volumes themselves, so a burn spike is
+	// explicable beside burn/h and dry-in rather than a mystery. Hit rate is
+	// omitted (nil) rather than 0 when there is no cache volume yet.
+	CacheHitRate      *float64 `json:"cacheHitRate,omitempty"`
+	CacheCreateTokens int64    `json:"cacheCreateTokens,omitempty"`
+	CacheReadTokens   int64    `json:"cacheReadTokens,omitempty"`
 }
 
 func (s *Server) accounts() []accountJSON {
+	// Looked up once per call, not once per account: CacheStats already
+	// aggregates every account in a single query.
+	cacheByAcct := map[string]reqlog.CacheStat{}
+	if s.log != nil {
+		if stats, err := s.log.CacheStats(); err == nil {
+			for _, c := range stats {
+				cacheByAcct[c.Account] = c
+			}
+		}
+		// Errors are swallowed deliberately: cache stats are a dashboard
+		// nicety, not something worth failing /api/accounts over.
+	}
+
 	var out []accountJSON
 	for _, a := range s.pool.Accounts() {
 		j := accountJSON{
@@ -422,6 +443,11 @@ func (s *Server) accounts() []accountJSON {
 			LastModel:     a.LastModel(),
 			Upstream:      a.Upstream,
 			Windows:       a.QuotaWindows(),
+		}
+		if c, ok := cacheByAcct[a.Name]; ok {
+			j.CacheHitRate = c.HitRate()
+			j.CacheCreateTokens = c.CacheCreationInputTokens
+			j.CacheReadTokens = c.CacheReadInputTokens
 		}
 		if r := a.Overage().ResetAt; !r.IsZero() {
 			j.OverageResetAt = &r

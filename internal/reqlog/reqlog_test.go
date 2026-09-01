@@ -20,7 +20,8 @@ func TestRoundTrip(t *testing.T) {
 	for i, e := range []Entry{
 		{Account: "work", Path: "/v1/messages", Status: 200, DurationMs: 1200, Bytes: 4096, Event: EventServed},
 		{Account: "kimi", Path: "/v1/messages", Status: 200, DurationMs: 800, Bytes: 1024, Event: EventRotatedQuota,
-			UserAgent: "python-requests/2.32.0"},
+			UserAgent: "python-requests/2.32.0", SessionHash: "deadbeef",
+			InputTokens: 120, OutputTokens: 340, CacheCreationInputTokens: 4165, CacheReadInputTokens: 1816},
 	} {
 		if err := l.Record(e); err != nil {
 			t.Fatalf("Record %d: %v", i, err)
@@ -43,6 +44,15 @@ func TestRoundTrip(t *testing.T) {
 	// that can't show the quota-consumption consequence of that issue.
 	if got[0].UserAgent != "python-requests/2.32.0" {
 		t.Errorf("UserAgent = %q, want round-tripped value", got[0].UserAgent)
+	}
+	// Issue #110: the four usage counters and the session hash round-trip
+	// exactly like every other column here.
+	if got[0].SessionHash != "deadbeef" {
+		t.Errorf("SessionHash = %q, want round-tripped value", got[0].SessionHash)
+	}
+	if got[0].InputTokens != 120 || got[0].OutputTokens != 340 ||
+		got[0].CacheCreationInputTokens != 4165 || got[0].CacheReadInputTokens != 1816 {
+		t.Errorf("usage counters = %+v, want round-tripped values", got[0])
 	}
 	if got[0].Ts.IsZero() {
 		t.Error("ts not populated")
@@ -82,24 +92,48 @@ func TestRedactionBySchema(t *testing.T) {
 	// names are not credentials. user_agent was added for issue #64 (telling
 	// a non-CLI caller apart after the fact); a User-Agent string is
 	// identifying metadata, same tier as a model name, never a credential.
+	//
+	// session_hash and the four *_tokens columns were added for issue #110:
+	// the four are read from the response's `usage` block, the one deliberate
+	// exception to "never bodies" (see the package doc), and are token
+	// COUNTS — integers describing volume, not the credential tokens the
+	// banned-substring check below exists to catch. session_hash is an
+	// fnv32a hash of proxy.sessionKey's value, hashed again before it
+	// reaches this package, so nothing identifying (a raw client IP, in the
+	// no-user-id fallback case) is ever stored — see RotationCost for why
+	// it exists.
+	//
 	// Anything new must be justified the same way, which is the point of
 	// asserting the exact set.
 	want := map[string]bool{
 		"ts": true, "account": true, "path": true, "status": true,
 		"duration_ms": true, "bytes": true, "event": true,
 		"model_asked": true, "model_served": true, "user_agent": true,
+		"session_hash": true, "input_tokens": true, "output_tokens": true,
+		"cache_creation_input_tokens": true, "cache_read_input_tokens": true,
 	}
 	if len(cols) != len(want) {
 		t.Errorf("columns = %v", cols)
+	}
+	// usageCountColumns are the only columns allowed to contain "token": a
+	// token COUNT, never a credential. Enumerated explicitly (not "ends
+	// with _tokens") so a new column still has to earn its way onto this
+	// list rather than merely matching a pattern.
+	usageCountColumns := map[string]bool{
+		"input_tokens": true, "output_tokens": true,
+		"cache_creation_input_tokens": true, "cache_read_input_tokens": true,
 	}
 	for _, c := range cols {
 		if !want[c] {
 			t.Errorf("unexpected column %q — redaction surface widened", c)
 		}
-		for _, banned := range []string{"header", "body", "token", "authorization", "api_key", "apikey"} {
+		for _, banned := range []string{"header", "body", "authorization", "api_key", "apikey"} {
 			if strings.Contains(c, banned) {
 				t.Errorf("column %q smells like credential storage", c)
 			}
+		}
+		if strings.Contains(c, "token") && !usageCountColumns[c] {
+			t.Errorf("column %q smells like credential storage", c)
 		}
 	}
 }

@@ -328,7 +328,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 		// didn't come from the CLI (issue #64: an MCP server's own call,
 		// once a combined CA bundle lets it verify a MITM'd host) can be
 		// told apart after the fact. A hint only — most non-CLI clients
-		// don't send a distinctive one either.
+		// don't send a distinctive one either. The four usage counters and
+		// the (hashed) session are issue #110's one deliberate exception —
+		// see reqlog's package doc.
 		_ = h.hooks.Log.Record(reqlog.Entry{
 			Account:    oc.account,
 			Path:       r.URL.Path,
@@ -340,6 +342,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 			ModelAsked:  oc.modelAsked,
 			ModelServed: oc.modelServed,
 			UserAgent:   r.Header.Get("User-Agent"),
+			SessionHash: oc.sessionHash,
+
+			InputTokens:              oc.usage.InputTokens,
+			OutputTokens:             oc.usage.OutputTokens,
+			CacheCreationInputTokens: oc.usage.CacheCreationInputTokens,
+			CacheReadInputTokens:     oc.usage.CacheReadInputTokens,
 		})
 	}
 }
@@ -353,6 +361,18 @@ type outcome struct {
 	// (doc §6.18). Reported only — never routed on.
 	modelAsked  string
 	modelServed string
+	// usage is the four response-usage counters (issue #110), populated
+	// only on the one branch that streams a genuine upstream response to
+	// the client (writeResponse) — zero everywhere else, including every
+	// classifiable-error branch, since there is no usage block worth
+	// reading in a synthesized or captured error response.
+	usage usageTotals
+	// sessionHash identifies this request's session (see sessionKey),
+	// hashed a second time before it leaves this package — never the raw
+	// value, which can be a client IP. Empty for paths that bypass pool
+	// selection entirely (isUpgrade/isIdentityPath/isNonQuotaPath), since
+	// no session key is ever computed for them.
+	sessionHash string
 }
 
 // route runs the request through selection, injection and failover, writing
@@ -416,6 +436,12 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 	}
 
 	session := sessionKey(r, body, buffered)
+	// Hashed a second time before it's ever recorded (issue #110): session
+	// is sometimes a raw client IP (sessionKey's no-user-id fallback), and
+	// the request log stores metadata, not identifying values. Computed
+	// once, like modelAsked below — it never changes across this request's
+	// retry loop.
+	sessionHash := hashSession(session)
 
 	tried := map[string]bool{}
 	recovered := map[string]bool{}
@@ -435,6 +461,9 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		modelAsked = modelOf(body)
 	}
 	modelServed := modelAsked
+	// usage is set only by the writeResponse call site below, on the one
+	// branch that actually streams a genuine response to the client.
+	var usage usageTotals
 	modelFor := func(a *pool.Account) string {
 		if a == nil {
 			return modelAsked
@@ -463,7 +492,8 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			event = reqlog.EventHeld
 		}
 		return outcome{account: account, event: event,
-			modelAsked: modelAsked, modelServed: modelServed}
+			modelAsked: modelAsked, modelServed: modelServed,
+			usage: usage, sessionHash: sessionHash}
 	}
 	rateTries := 0
 	for {
@@ -687,7 +717,7 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			// credit for a response it didn't serve.
 			acct.SetLastModel(modelServed)
 			defer h.pool.Done(acct)
-			writeResponse(w, resp)
+			usage = writeResponse(w, resp)
 			return finish(name)
 		}
 
@@ -903,14 +933,27 @@ func (h *Handler) buildRequest(r *http.Request, upstream string, acct *pool.Acco
 }
 
 // writeResponse streams an upstream response to the client header-faithfully,
-// flushing after every chunk.
-func writeResponse(w http.ResponseWriter, resp *http.Response) {
+// flushing after every chunk, and returns the usage counters observed along
+// the way (issue #110).
+//
+// The sniffer sits beside the client writer in an io.MultiWriter, not in
+// front of it: io.Copy calls Write once per internal buffer's worth of
+// bytes, and MultiWriter calls fw (the client) first, every time, before it
+// ever reaches the sniffer. The client's copy of the response is therefore
+// byte-identical and no later than it would be without the sniffer —
+// sniffing is a side effect of bytes that were going to the client anyway,
+// never a gate in front of them. Response headers, in particular
+// Content-Length, are copied unchanged before either writer runs, so a
+// non-streaming response's framing is untouched too.
+func writeResponse(w http.ResponseWriter, resp *http.Response) usageTotals {
 	defer resp.Body.Close()
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	fw := &flushWriter{w: w}
-	_, _ = io.Copy(fw, resp.Body)
+	sniff := newUsageSniffer(resp.Header.Get("Content-Type"), resp.Header.Get("Content-Encoding"))
+	_, _ = io.Copy(io.MultiWriter(fw, sniff), resp.Body)
 	fw.Flush()
+	return sniff.usage()
 }
 
 // writeCaptured replays an already-read upstream response (429 classification
@@ -1078,6 +1121,21 @@ func sessionKey(r *http.Request, body []byte, buffered bool) string {
 		return "ip:" + ip
 	}
 	return "ip:" + r.RemoteAddr
+}
+
+// hashSession collapses a sessionKey value down to an opaque grouping key
+// before it's ever eligible for the request log (issue #110): sessionKey's
+// no-user-id fallback is a raw client IP, and the log records metadata, not
+// values a session key like that would leak. The hash only needs to be
+// stable and collision-resistant enough to group "same session" requests
+// for RotationCost — not to be cryptographically strong.
+func hashSession(s string) string {
+	if s == "" {
+		return ""
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	return strconv.FormatUint(uint64(h.Sum32()), 16)
 }
 
 // readCapped reads up to cap+1 bytes, reporting overflow when the content

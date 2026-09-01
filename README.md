@@ -1019,8 +1019,23 @@ cross-provider rotation is off in this config, so its headroom does not
 rescue a Claude request.
 
 The request log is SQLite at `~/.config/spillway-requests.db` (0600) and stores
-**metadata only** — never headers or bodies. A schema test asserts the exact
-column set, so widening that surface has to be deliberate.
+**metadata only** — never headers or bodies, and never any prompt or
+completion content. A schema test asserts the exact column set, so widening
+that surface has to be deliberate.
+
+One deliberate exception (issue #110): four integers from the response's
+`usage` block — `input_tokens`, `output_tokens`, `cache_creation_input_tokens`
+and `cache_read_input_tokens` — are read and stored, because spillway's
+rotation logic had never measured what a rotation actually costs in prompt
+cache. Nothing else in that body is ever parsed — no content block, no tool
+input, no stop reason, no text of any kind — and a request's session is
+recorded only as a hash, never the raw value (which can be a client IP). The
+parser observes response bytes as they stream past without buffering them: a
+parse failure, a truncated stream, or an encoded (gzip/br) body it doesn't
+decode all just record zero, and never affect the response the client
+receives. The dashboard's "exact figures" table shows the resulting cache hit
+rate and cache-create/cache-read volume per account, beside burn/h and dry
+in.
 
 The same database's `quota_samples` table — the headroom history behind the
 dashboard's chart and startup quota seeding — is pruned to the last **14

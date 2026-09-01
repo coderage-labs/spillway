@@ -471,6 +471,7 @@
       <table>
         <thead><tr><th>account</th><th>window</th><th class="num">headroom</th><th>source</th>
                    <th class="num">burn/h</th><th class="num">dry in</th>
+                   <th class="num">cache hit</th><th class="num">cache create/read</th>
                    <th class="num">refills</th><th>state</th></tr></thead>
         <tbody id="figures"></tbody>
       </table>
@@ -1186,6 +1187,14 @@ function renderTanks(list) {
         '<td class="num dim">' + (rate ? (rate * 100).toFixed(1) + "%" : "&mdash;") + '</td>' +
         '<td class="num ' + (beatsReset ? "bad" : "dim") + '">' +
           (dry === null ? "&mdash;" : fmtDur(dry)) + '</td>' +
+        // Cache hit rate and create/read volume (issue #110): account-level
+        // totals, repeated across each of the account's window rows the
+        // same way "state" already is — there is one value per account,
+        // not per window.
+        '<td class="num dim">' + (typeof a.cacheHitRate === "number"
+          ? (a.cacheHitRate * 100).toFixed(1) + "%" : "&mdash;") + '</td>' +
+        '<td class="num dim">' + ((a.cacheCreateTokens || a.cacheReadTokens)
+          ? (a.cacheCreateTokens || 0) + " / " + (a.cacheReadTokens || 0) : "&mdash;") + '</td>' +
         '<td class="num dim">' + (w.resetAt ? fmtReset(w.resetAt) : "&mdash;") + '</td>' +
         '<td class="' + (a.state === "ok" ? "dim" : "bad") + '">' + esc(a.state) + '</td>';
       figures.appendChild(tr);
@@ -1207,7 +1216,7 @@ function renderTanks(list) {
   }
 
   if (!figures.children.length) {
-    figures.innerHTML = '<tr><td colspan="8" class="empty">' +
+    figures.innerHTML = '<tr><td colspan="10" class="empty">' +
       'No quota signal yet. Figures appear after the first request.</td></tr>';
   }
   alarms.sort((x, y) => x.secs - y.secs);

@@ -21,6 +21,9 @@ const now = Date.now();
 const ACCOUNTS = [{
   name: 'you@example-one.com', label: 'work', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 1,
   quotaWindows: [{ name: '5h', limit: 1, used: 0.42, resetAt: new Date(now + 3600e3).toISOString(), source: 'headers' }],
+  // Issue #110: cache hit rate and create/read volume, beside burn/h and
+  // dry-in in the same figures row.
+  cacheHitRate: 0.304, cacheCreateTokens: 4165, cacheReadTokens: 1816,
 }, {
   name: 'you@example-two.com', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 0,
   quotaWindows: [
@@ -222,6 +225,10 @@ eval(js);
     // §6.5: a polled reading is up to a minute stale and a measured one is
     // exact; showing both as a bare percentage implies equal confidence.
     'quota source shown per window': figures.includes('measured') && figures.includes('polled'),
+    // Issue #110: cache hit rate (30.4%) and create/read volume (4165/1816)
+    // rendered beside burn/h and dry-in.
+    'cache hit rate shown': figures.includes('30.4%'),
+    'cache create/read volume shown': figures.includes('4165 / 1816'),
     'burn-rate verdict stated': burn.length > 10,
     'requests rendered': reqs.includes('/v1/messages'),
     'settings panel fetched': fetchCount.settings > 0,
