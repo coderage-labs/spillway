@@ -89,7 +89,15 @@ func (s *Server) handleAccountAdd(w http.ResponseWriter, r *http.Request) {
 	// behaviour (issue #46's stale-credential problem).
 	for _, a := range s.pool.Accounts() {
 		if a.Name == req.Name {
+			wasDisabled := a.State() == pool.StateDisabled
 			a.SetCredentials(req.AccessToken, req.RefreshToken, req.ExpiresAt)
+			if wasDisabled && a.State() != pool.StateDisabled {
+				// Issue #105: a live re-auth reviving a disabled credential
+				// is a transition into potentially-usable capacity — wake
+				// any request currently parked rather than leaving it to
+				// find out only when its timer eventually fires.
+				s.pool.SignalCapacity()
+			}
 			s.writeJSON(w, accountAddResponse{Added: false})
 			return
 		}
