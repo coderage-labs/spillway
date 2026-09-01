@@ -17,11 +17,15 @@ Anthropic-shaped endpoint) and rotates requests across a pool of **your own**
 subscription accounts, so a session doesn't stop at a 429.
 
 It is a **proxy, never a client**: the vendor's own CLI stays in the loop, and
-spillway forwards its requests byte-faithfully apart from four mutations
-(auth header, `account_uuid`, and the model when mapping across providers —
-both where Claude Code puts it: the top-level executor model, and an
-advisor's model nested inside `tools[]`). That fidelity is what keeps usage
-inside your subscription rather than falling through to metered API billing.
+spillway forwards its requests byte-faithfully apart from four request
+mutations (auth header, `account_uuid`, and the model when mapping across
+providers — both where Claude Code puts it: the top-level executor model, and
+an advisor's model nested inside `tools[]`). That fidelity is what keeps
+usage inside your subscription rather than falling through to metered API
+billing. Responses are untouched by default; one opt-in setting,
+`pool.hideOverageFromClient`, removes Anthropic's credit markers from pooled
+responses — see "Hiding credit signals" below for why a pool wants that and
+what it trades away.
 
 Single user, single machine. Not a team server.
 
@@ -506,6 +510,7 @@ pool:
   maxBufferBytes: 8388608   # largest body still eligible for cross-account retry
   crossProvider: false      # see the cross-provider caveat below
   stickyAcrossFamily: false # see "Per-family quota" below
+  hideOverageFromClient: false # see "Hiding credit signals" below
 log:
   level: info
 accounts:
@@ -728,6 +733,42 @@ checked less often over time instead of every tick. This never bills:
 the same guard that stops an ordinary idle probe from paying to re-learn
 a spent window (see below) applies identically here.
 
+### Hiding credit signals (Claude Code's silent model swap)
+
+Claude Code carries a usage-credit gate for its top model family: when a
+response tells it that fable is being served on paid extra usage — the
+`overage-in-use` header on a 200, a 429 whose representative-claim names the
+fable weekly bucket, or a 429 body carrying `credits_required` — it latches,
+silently swaps the session down to the next model (Opus on a Max plan), and
+stays there until the CLI restarts or `/model` is run. The latch never lifts
+when a quota window resets.
+
+Behind a pool that behaviour inverts its purpose. Those signals describe
+**one account**, but the client reads them as the world: measured live, the
+overage tier served one fable request from the single billable account at a
+moment the whole pool was legitimately fable-dry, the client latched, and
+when another account's fable window reset hours later the session kept
+asking for Opus indefinitely — rotation never saw another fable request to
+act on, so an account with a full fable tank sat idle while the session ran
+degraded.
+
+`pool.hideOverageFromClient: true` removes exactly those latch inputs from
+pooled Claude responses (and only those: utilization and status headers pass
+through, passthrough/identity traffic is never touched, and non-Claude
+providers are never rewritten). Spillway's own defence against silent
+spending is unaffected — the warning log, the desktop notification, and the
+request-log `overage` entry are all written before the strip.
+
+It is off by default because it is a consent decision, not a tuning knob:
+with it on, the CLI's own "spend money?" dialog never appears, and
+`pool.allowOverage` (off by default, fail-closed, per-account overridable)
+becomes the only authority on whether spillway ever serves a billed
+request. Turn it on when you run more than one account and would rather
+spillway decide when to spend; leave it off if you want the vendor CLI's
+own prompt to stay in the loop. An already-latched session is not
+recovered — the latch lives in the client process, so one restart of that
+session is still needed after enabling this.
+
 **Rank accounts of different providers.** At equal priority the tie-break is
 in-flight count, and headroom below the threshold does not enter into it — so
 whichever account happens to be idle at that instant wins the session, and
@@ -857,8 +898,11 @@ probed unconditionally.
 
 The dashboard can edit an allowlisted subset of the config —
 `exhaustedMode`, `holdMax`, `switchThreshold`, `probeOnStart`,
-`probeInterval`, `crossProvider`, `stickyAcrossFamily`, and per-account
-`label`, `priority` and `disabled`.
+`probeInterval`, `crossProvider`, `stickyAcrossFamily`,
+`hideOverageFromClient`, and per-account `label`, `priority` and `disabled`.
+`hideOverageFromClient` is editable here, unlike `allowOverage`, because it
+cannot cause spend by itself: with `allowOverage` off spillway refuses
+rather than bills, stripped markers or not.
 Changes validate before they are written and apply to the running pool with no
 restart. Credentials are not editable and are not exposed: token material must
 not be reachable from a browser, loopback or not.

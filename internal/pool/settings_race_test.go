@@ -78,6 +78,9 @@ func TestDashboardSettingsRaceWithSelector(t *testing.T) {
 				_ = b.Label()
 				_ = a.Priority()
 				_ = b.Priority()
+				// The proxy reads this per response (issue #103), so it
+				// races with Apply exactly like the fields above.
+				_ = p.HideOverageFromClient()
 			}
 		}()
 
@@ -85,8 +88,9 @@ func TestDashboardSettingsRaceWithSelector(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 5000; i++ {
 				p.Apply(Settings{
-					SwitchThreshold: 0.9,
-					CrossProvider:   true,
+					SwitchThreshold:       0.9,
+					CrossProvider:         true,
+					HideOverageFromClient: i%2 == 0,
 					Accounts: []AccountSettings{
 						{Name: "pa", Label: fmt.Sprintf("L%d", i), Priority: i % 3},
 						{Name: "pb", Label: fmt.Sprintf("M%d", i), Priority: (i + 1) % 3},

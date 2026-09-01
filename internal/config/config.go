@@ -115,6 +115,23 @@ type Config struct {
 		// give — same-family requests where the sticky account still has
 		// headroom are never affected either way.
 		StickyAcrossFamily bool `yaml:"stickyAcrossFamily,omitempty"`
+		// HideOverageFromClient strips Anthropic's credit markers — the
+		// overage-in-use and overage-disabled-reason headers, the fable
+		// representative-claim on a 429, and a 429 body's
+		// "credits_required" code — from pooled Claude responses before
+		// they reach the client (issue #103). Claude Code latches on those
+		// signals and silently swaps a session's model down for good, even
+		// after another pooled account's window has reset; behind a pool
+		// they describe one account, not the session's real headroom.
+		//
+		// Off by default, and turning it on is a consent decision, not a
+		// tuning knob: it removes the client's own paid-usage dialog, so
+		// AllowOverage above (off by default, fail-closed, per-account
+		// overridable) becomes the ONLY thing standing between a spent pool
+		// and a billed request. Spillway's own spending record is
+		// unaffected either way — the overage warning, notification and
+		// request-log entry are written before the strip.
+		HideOverageFromClient bool `yaml:"hideOverageFromClient,omitempty"`
 		// MaxBufferBytes caps the request body held for cross-account retry.
 		// Larger bodies stream straight through with no failover, so this
 		// trades memory for how big a request can still be retried.
