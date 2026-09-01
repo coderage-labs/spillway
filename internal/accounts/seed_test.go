@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestSeedQuotaSuppressesProbeForASpentAccountWithOverage(t *testing.T) {
 		t.Fatal("precondition: freshly built account should start with no windows, like after a restart")
 	}
 
-	SeedQuota(p, l, now, quietLogger())
+	SeedQuota(context.Background(), p, l, now, quietLogger())
 
 	if len(a.QuotaWindows()) == 0 {
 		t.Fatal("seeding did not install any windows from quota_samples")
@@ -70,7 +71,7 @@ func TestSeedQuotaLeavesAnAccountWithNoSamplesProbeable(t *testing.T) {
 	a.Type = "claude-oauth"
 	p := pool.New([]*pool.Account{a}, now)
 
-	SeedQuota(p, l, now, quietLogger())
+	SeedQuota(context.Background(), p, l, now, quietLogger())
 
 	if len(a.QuotaWindows()) != 0 {
 		t.Fatalf("seeding manufactured %d windows out of an empty quota_samples table", len(a.QuotaWindows()))
@@ -103,12 +104,87 @@ func TestSeedQuotaDiscardsASampleWhoseResetHasPassed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	SeedQuota(p, l, now, quietLogger())
+	SeedQuota(context.Background(), p, l, now, quietLogger())
 
 	if len(a.QuotaWindows()) != 0 {
 		t.Fatalf("a sample past its reset should have been discarded, not seeded: %v", a.QuotaWindows())
 	}
 	if !needsProbe(a, 30*time.Minute) {
 		t.Error("a stale, past-reset sample must not suppress a probe")
+	}
+}
+
+// Issue #104: SeedQuota sits on the startup path before the listeners bind,
+// so a stuck or pathologically slow quota_samples read must not be able to
+// hang the daemon. A context that has already expired must make SeedQuota
+// return promptly, having applied nothing — exactly like an account with no
+// samples at all, never a hang and never a half-applied seed.
+func TestSeedQuotaRespectsAnExpiredContext(t *testing.T) {
+	l := openTestLog(t)
+	now := time.Now()
+
+	a := pool.NewAccount("spent", pool.SourceYAML, "tok", "", 0, "")
+	a.Type = "claude-oauth"
+	a.SetAllowOverage(allowOverage(true))
+	p := pool.New([]*pool.Account{a}, now)
+
+	// Would seed successfully (see
+	// TestSeedQuotaSuppressesProbeForASpentAccountWithOverage) if the
+	// context did not expire first.
+	if err := l.RecordQuota(reqlog.Sample{
+		Ts: now.Add(-10 * time.Minute), Account: "spent", Window: "7d",
+		Limit: 1, Used: 1, ResetAt: now.Add(9 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	start := time.Now()
+	SeedQuota(ctx, p, l, now, quietLogger())
+	elapsed := time.Since(start)
+
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("SeedQuota took %s against an already-expired context — it must return immediately, not hang", elapsed)
+	}
+	if len(a.QuotaWindows()) != 0 {
+		t.Fatalf("an expired context must leave accounts unseeded (same as no samples), got %d windows", len(a.QuotaWindows()))
+	}
+	if !needsProbe(a, 30*time.Minute) {
+		t.Error("an account that timed out during seeding must still be probeable, like a genuinely unknown one")
+	}
+}
+
+// Same guarantee under an actual timeout rather than a context that is
+// already dead on arrival: given a query slow enough to blow a very short
+// deadline, SeedQuota must still bound its own wall-clock time to roughly
+// that deadline, not to however long the query would otherwise take.
+func TestSeedQuotaBoundedByTimeoutOnASlowQuery(t *testing.T) {
+	l := openTestLog(t)
+	now := time.Now()
+
+	a := pool.NewAccount("acct", pool.SourceYAML, "tok", "", 0, "")
+	a.Type = "claude-oauth"
+	p := pool.New([]*pool.Account{a}, now)
+
+	if err := l.RecordQuota(reqlog.Sample{
+		Ts: now.Add(-time.Minute), Account: "acct", Window: "5h",
+		Limit: 1, Used: 0.5, ResetAt: now.Add(4 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	// Let the deadline actually elapse before calling in, rather than racing it.
+	time.Sleep(time.Millisecond)
+
+	start := time.Now()
+	SeedQuota(ctx, p, l, now, quietLogger())
+	elapsed := time.Since(start)
+
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("SeedQuota took %s past a nanosecond timeout — a slow seed must not delay startup", elapsed)
 	}
 }

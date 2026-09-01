@@ -1004,6 +1004,15 @@ The request log is SQLite at `~/.config/spillway-requests.db` (0600) and stores
 **metadata only** — never headers or bodies. A schema test asserts the exact
 column set, so widening that surface has to be deliberate.
 
+The same database's `quota_samples` table — the headroom history behind the
+dashboard's chart and startup quota seeding — is pruned to the last **14
+days**, both once at every startup and on an hourly timer thereafter. The
+dashboard's own history view tops out at 7 days (`?hours=168`), so this keeps
+a full 2x margin past the longest thing that reads it. Nothing pruned this
+table before; on one real installation it grew to 57,617 rows (40 MB)
+answering a question with 8 possible answers, and the unindexed query behind
+that answer is what caused issue #104's startup hang.
+
 ## Development
 
 ```sh
