@@ -816,6 +816,24 @@ an unknown reset is not the same as a known-far-off one, and treating it
 that way would turn a possibly transient gap into an instant, unretryable
 error.
 
+A held request also wakes on new pool **capacity**, not only on the clock
+(issue #105). Waiting purely for the soonest reset means a pool that gains a
+usable account mid-hold is invisible to a request already parked — reported
+live: a working account was added while every other account was exhausted,
+and the queued requests kept sleeping instead of using it. Adding an account
+(live-add, issue #87, or a re-authenticated credential), un-parking one, and
+an exhausted account's bench clearing early via re-probe (issue #90 — a
+rejected re-probe now un-benches the account before its recorded reset, and
+a held request can see that too) all wake every currently-held request
+immediately. A wake means "go re-check", not "you're served": selection
+runs again, and if it still fails the request goes back to waiting against
+its *original* hold deadline — the wake never grants a fresh budget. To
+avoid recreating the exact herd issue #91 was filed about (51 requests held
+at once), requests woken by the same event stagger their re-selection by a
+small, increasing delay (30ms per waiter, capped at 2s) rather than all
+re-selecting in the same instant; ordinary quota-header updates never fire
+this signal, only an actual transition into potentially-usable capacity.
+
 An idle account reports no quota until something is routed to it, so a standby
 tank would sit blank. `probeOnStart` sends one minimal request per account with
 no reading, and `probeInterval` re-probes readings that have gone stale — the

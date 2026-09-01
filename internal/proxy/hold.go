@@ -10,11 +10,42 @@ package proxy
 // only to reach the exact 429 it could have returned immediately.
 // waitForReset now fails fast whenever the soonest KNOWN reset would land
 // after the deadline — same answer, without the wait.
-
+//
+// Issue #105: park used to wait on exactly the reset timer and the client
+// giving up — a moment in time, never a fact about the pool. An account
+// added, re-probed back to health, un-parked, or re-authenticated while a
+// request was parked was invisible to it: the good account sat idle and the
+// request slept until the ORIGINAL reset regardless. park now also selects
+// on the pool's capacity-changed signal (internal/pool/capacity.go), waking
+// early to re-try selection — but a wake only means "something changed, go
+// look again", not "this request can now be served". The caller
+// (waitForReset via proxy.go's loop) re-selects and, if that still fails,
+// comes back through waitForReset against the SAME original deadline —
+// never a fresh budget.
 import (
 	"net/http"
 	"time"
 )
+
+// wakeStagger bounds how long park delays after a capacity wake before
+// re-selecting, scaled by the caller's rank among everyone this same signal
+// woke (issue #105's anti-thunder measure). Every held request reads the
+// same broadcast channel, so without this every one of them would call
+// SelectExcept in the same instant a single account became usable — the
+// exact herd issue #91 was filed about (51 held requests), just retriggered
+// on a faster clock. Selection and inFlight accounting already spread load
+// across MULTIPLE usable accounts; this spreads the RATE of re-selection
+// when there is only one. Small enough that the reported bug (a good
+// account sitting idle for what could be hours) is still fixed in
+// low-single-digit seconds even for a large herd; capped by maxWakeStagger
+// below so a pathologically large herd can't push an individual wait past
+// its own deadline.
+const wakeStagger = 30 * time.Millisecond
+
+// maxWakeStagger caps the total stagger delay regardless of rank, so an
+// unusually large herd degrades to "many requests re-select at roughly the
+// same capped delay" rather than "the delay grows without bound".
+const maxWakeStagger = 2 * time.Second
 
 // resetSlack absorbs two unrelated small sources of clock skew, rather than
 // building a cliff that is sensitive to either:
@@ -96,18 +127,43 @@ func (h *Handler) waitForReset(r *http.Request, deadline time.Time) bool {
 	return h.park(r, wait, reset)
 }
 
-// park blocks for wait, registering the hold — for the status line and
-// dashboard, so a parked request is distinguishable from a hung one (§6.11)
-// — as ending at until. Returns true once wait has elapsed, false
-// immediately if the client disconnects first.
+// park blocks for wait (or until the pool signals new capacity — issue
+// #105), registering the hold — for the status line and dashboard, so a
+// parked request is distinguishable from a hung one (§6.11) — as ending at
+// until. Returns true once wait has elapsed OR the pool gained
+// potentially-usable capacity, false immediately if the client disconnects
+// first. A true return is a hint to re-try selection, not a promise it will
+// succeed — the caller's loop already treats every true return this way.
 func (h *Handler) park(r *http.Request, wait time.Duration, until time.Time) bool {
 	release := h.pool.BeginHold(until)
 	defer release()
 
 	timer := time.NewTimer(wait + resetSlack) // slack past the reset
 	defer timer.Stop()
+
+	wake := h.pool.CapacitySignal()
 	select {
 	case <-timer.C:
+		return true
+	case <-wake.Ch():
+		// Anti-thunder: spread re-selection across the requests this same
+		// signal woke instead of every one of them calling SelectExcept in
+		// the same instant (see wakeStagger's comment). The backstop timer
+		// and a client disconnect still both pre-empt the stagger.
+		stagger := time.Duration(wake.Rank()) * wakeStagger
+		if stagger > maxWakeStagger {
+			stagger = maxWakeStagger
+		}
+		if stagger > 0 {
+			staggerTimer := time.NewTimer(stagger)
+			defer staggerTimer.Stop()
+			select {
+			case <-staggerTimer.C:
+			case <-timer.C:
+			case <-r.Context().Done():
+				return false
+			}
+		}
 		return true
 	case <-r.Context().Done():
 		return false // client disconnect cancels the hold

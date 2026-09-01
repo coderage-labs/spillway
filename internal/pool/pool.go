@@ -264,6 +264,9 @@ type Pool struct {
 	// holds are the requests currently parked waiting for a reset, guarded
 	// by mu. See hold.go.
 	holds map[*hold]struct{}
+	// capGen is the current generation of the capacity-changed broadcast
+	// (issue #105), guarded by mu. See capacity.go.
+	capGen *CapacityWake
 }
 
 // New builds a Pool. Accounts with expired tokens and no recovery path start
@@ -277,7 +280,8 @@ func New(accounts []*Account, now time.Time) *Pool {
 		}
 	}
 	return &Pool{accounts: accounts, sticky: map[string]string{},
-		sessionProvider: map[string]string{}, switchThreshold: 0.98}
+		sessionProvider: map[string]string{}, switchThreshold: 0.98,
+		capGen: newCapacityWake()}
 }
 
 // Threshold is the used-fraction at or above which an account is rotated
@@ -312,7 +316,15 @@ func (p *Pool) EnsureFresh(ctx context.Context, a *Account) error {
 	if p.tm == nil {
 		return nil
 	}
-	return p.tm.EnsureFresh(ctx, a)
+	wasDisabled := a.State() == StateDisabled
+	err := p.tm.EnsureFresh(ctx, a)
+	if wasDisabled && a.State() != StateDisabled {
+		// Issue #105: a refresh that revives a disabled credential is a
+		// transition into potentially-usable capacity, the same as a live
+		// re-auth through the admin endpoint.
+		p.SignalCapacity()
+	}
+	return err
 }
 
 // Recover forces one credential recovery after an upstream 401.
@@ -320,7 +332,12 @@ func (p *Pool) Recover(ctx context.Context, a *Account) error {
 	if p.tm == nil {
 		return ErrNoTokenManager
 	}
-	return p.tm.Recover(ctx, a)
+	wasDisabled := a.State() == StateDisabled
+	err := p.tm.Recover(ctx, a)
+	if wasDisabled && a.State() != StateDisabled {
+		p.SignalCapacity() // issue #105, same reasoning as EnsureFresh above
+	}
+	return err
 }
 
 // Accounts returns a snapshot of the pool's accounts (shared *Account
@@ -604,14 +621,23 @@ func (p *Pool) MarkReprobeRejected(a *Account, until time.Time, baseInterval tim
 // parked account.
 func (p *Pool) ClearExhausted(a *Account) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.state != StateExhausted {
-		return
+	wasExhausted := a.state == StateExhausted
+	if wasExhausted {
+		a.state = StateOK
+		a.exhaustedUntil = time.Time{}
+		a.probeBackoff = 0
+		a.nextProbeAt = time.Time{}
 	}
-	a.state = StateOK
-	a.exhaustedUntil = time.Time{}
-	a.probeBackoff = 0
-	a.nextProbeAt = time.Time{}
+	a.mu.Unlock()
+	if wasExhausted {
+		// Issue #105: this is #90's bench-clears-early case — a held
+		// request parked on the OLD (later) exhaustedUntil cannot see this
+		// on its own. Signalled after releasing a.mu, never while holding
+		// it: SelectExcept takes p.mu then an account's a.mu, so taking
+		// them in the opposite order here (a.mu then p.mu, inside
+		// SignalCapacity) would be a lock-order inversion.
+		p.SignalCapacity()
+	}
 }
 
 // MarkWindowRejected records that upstream has refused window `name` until
@@ -1110,6 +1136,10 @@ func (p *Pool) Add(a *Account) bool {
 	copy(next, p.accounts)
 	next[len(p.accounts)] = a
 	p.accounts = next
+	// Issue #105: a newly-added account is exactly the transition a
+	// currently-parked request cannot otherwise see — wake it rather than
+	// leaving it to find out only when its timer eventually fires.
+	p.signalCapacityLocked()
 	return true
 }
 
@@ -1191,7 +1221,15 @@ func (p *Pool) Apply(s Settings) {
 		if as.Disabled {
 			a.Park()
 		} else {
+			wasParked := a.Parked()
 			a.Unpark()
+			if wasParked {
+				// Issue #105: an operator un-parking an account is a
+				// transition into potentially-usable capacity, same as
+				// Add — a held request should not have to wait out its
+				// timer to notice.
+				p.SignalCapacity()
+			}
 		}
 		a.SetLabel(as.Label)
 		a.SetPriority(as.Priority)
