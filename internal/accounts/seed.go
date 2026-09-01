@@ -19,6 +19,8 @@ package accounts
 // meaning what needsProbe assumes it means: genuinely unknown, safe to probe.
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -43,6 +45,18 @@ import (
 // worth billing over, so this should only bite readings that were never
 // going to suppress a probe anyway.
 //
+// SeedQuota is an optimisation, not a correctness requirement (issue #104):
+// ctx bounds how long it will wait on the query. A caller on the startup
+// path should pass a short timeout so a slow or stuck read.Log does not
+// delay binding the listeners — if ctx expires first, this logs a warning
+// and returns having touched nothing, exactly like the "no samples at all"
+// case. That matters here specifically because it uses modernc.org/sqlite,
+// whose QueryContext genuinely interrupts the in-flight query on
+// cancellation (sqlite3_interrupt) rather than abandoning it to finish on
+// its own: without that, a query that finished late, after real probe/poll
+// data had already arrived, could overwrite live state with a stale seed
+// (setWindowsSourced's replace-by-source is wholesale, not merge-if-newer).
+//
 // Seeded windows are stamped with the Source the account's own provider
 // uses live ("headers" for header-reporting providers, "poll" for polled
 // ones) rather than a distinct "seeded" tag. QuotaWindow replacement is
@@ -55,10 +69,14 @@ import (
 // carries the original sample's timestamp rather than now, so both the
 // dashboard's relative-time display and needsProbe's own staleness check
 // see it for what it is.
-func SeedQuota(p *pool.Pool, rl *reqlog.Log, now time.Time, logger *slog.Logger) {
-	samples, err := rl.LatestQuotaSamples()
+func SeedQuota(ctx context.Context, p *pool.Pool, rl *reqlog.Log, now time.Time, logger *slog.Logger) {
+	samples, err := rl.LatestQuotaSamples(ctx)
 	if err != nil {
-		logger.Warn("seed quota: reading quota_samples failed", "err", err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			logger.Warn("seed quota: timed out reading quota_samples, starting unseeded", "err", err)
+		} else {
+			logger.Warn("seed quota: reading quota_samples failed", "err", err)
+		}
 		return
 	}
 	byAccount := make(map[string][]pool.QuotaWindow)

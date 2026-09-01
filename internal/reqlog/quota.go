@@ -6,6 +6,7 @@ package reqlog
 // "dry in 2h10m, before its 3h22m refill".
 
 import (
+	"context"
 	"database/sql"
 	"time"
 )
@@ -21,9 +22,16 @@ type Sample struct {
 }
 
 // sampleInterval throttles writes: quota headers arrive on every response,
-// but a point per account/window per minute is plenty to draw a curve and
-// keeps the table small enough to never need pruning in practice.
+// but a point per account/window per minute is plenty to draw a curve.
 const sampleInterval = time.Minute
+
+// QuotaRetention bounds how long quota_samples is kept. The dashboard's
+// oldest query (/api/quota-history?hours=168, admin.hoursParam's cap) is 7
+// days, so this keeps a full 2x buffer past the longest thing that reads it.
+// Issue #104: with nothing pruning it, the table grew from 1.4MB to 40MB (8
+// account/window pairs, 57,617 rows) in a week, which is what made the
+// unindexed startup query slow enough to hang the daemon.
+const QuotaRetention = 14 * 24 * time.Hour
 
 func (l *Log) initQuota() error {
 	_, err := l.db.Exec(`CREATE TABLE IF NOT EXISTS quota_samples (
@@ -38,6 +46,25 @@ func (l *Log) initQuota() error {
 		return err
 	}
 	if _, err = l.db.Exec(`CREATE INDEX IF NOT EXISTS quota_ts ON quota_samples (ts)`); err != nil {
+		return err
+	}
+	// Issue #104: LatestQuotaSamples (startup seeding) filters on
+	// (account, window); quota_ts alone can't help that, so the query
+	// devolved into a per-row correlated subquery over the whole table —
+	// 34s at 57,617 rows. CREATE INDEX IF NOT EXISTS is idempotent and
+	// harmless if a DB already has an equivalent index under a different
+	// name (one was added by hand as a stopgap): sqlite just carries two.
+	if _, err = l.db.Exec(`CREATE INDEX IF NOT EXISTS quota_account_window_ts
+		ON quota_samples (account, window, ts)`); err != nil {
+		return err
+	}
+	// Bound the table itself, not just the index that makes scanning it
+	// fast — see QuotaRetention. Run at every open, not only on a timer, so
+	// a database that only ever sees short-lived restarts (the Homebrew
+	// cask restarts the service on every upgrade, issue #34) still gets
+	// pruned regularly.
+	if _, err = l.db.Exec(`DELETE FROM quota_samples WHERE ts < ?`,
+		time.Now().Add(-QuotaRetention).UnixMilli()); err != nil {
 		return err
 	}
 	// Kimi's 7-day window used to be recorded as "weekly", before window
@@ -93,16 +120,63 @@ func (l *Log) QuotaSince(cutoff time.Time) ([]Sample, error) {
 // in-memory quota windows before anything has probed or polled (issue #34:
 // without this, an account with no reading at all is probed unconditionally,
 // including when that would bill).
-func (l *Log) LatestQuotaSamples() ([]Sample, error) {
-	rows, err := l.db.Query(`SELECT ts, account, window, lim, used, reset_at
-		FROM quota_samples q
-		WHERE ts = (SELECT MAX(ts) FROM quota_samples q2
-			WHERE q2.account = q.account AND q2.window = q.window)`)
+//
+// Issue #104: this used to be a correlated subquery
+// (`WHERE ts = (SELECT MAX(ts) FROM quota_samples q2 WHERE q2.account =
+// q.account AND q2.window = q.window)`), which nothing indexed — SQLite ran
+// the inner MAX() once per outer row, an O(n²)-ish scan that took 34.3s over
+// 57,617 rows on the live database to produce 8 result rows. It is rewritten
+// here as a join against a derived table of per-(account, window) maximums,
+// which is the same computation without repeating it once per row: the
+// GROUP BY runs a single pass over the table, and the join back to the base
+// table (to recover lim/used/reset_at, and to preserve every row exactly at
+// the max — see below) is driven by the quota_account_window_ts index. The
+// two forms are provably equivalent: "ts equals the max ts for this
+// account+window" is exactly what both the correlated subquery and the
+// derived-table join test, row by row.
+//
+// This includes ties on ts deliberately: if two rows for the same
+// account+window happen to share the newest ts, the original query returned
+// both (its WHERE clause matches every row at the max, not just one), and a
+// naive `SELECT account, window, MAX(ts), lim, used, reset_at ... GROUP BY
+// account, window` would instead silently pick one of them (SQLite's
+// bare-column-with-aggregate extension resolves ties arbitrarily). The join
+// form preserves the original's "return every tied row" behavior.
+//
+// latestQuotaSamplesQuery is a package-level const (rather than inlined)
+// so a test can run `EXPLAIN QUERY PLAN` against the exact text this
+// executes, instead of a hand-maintained copy that could drift from it.
+func (l *Log) LatestQuotaSamples(ctx context.Context) ([]Sample, error) {
+	rows, err := l.db.QueryContext(ctx, latestQuotaSamplesQuery)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanSamples(rows)
+}
+
+const latestQuotaSamplesQuery = `
+	SELECT q.ts, q.account, q.window, q.lim, q.used, q.reset_at
+	FROM quota_samples q
+	JOIN (
+		SELECT account, window, MAX(ts) AS max_ts
+		FROM quota_samples
+		GROUP BY account, window
+	) latest
+		ON latest.account = q.account
+		AND latest.window = q.window
+		AND latest.max_ts = q.ts`
+
+// PruneQuota deletes quota_samples older than cutoff and reports how many
+// rows it removed. Called once at Open (via initQuota) and periodically by
+// the daemon (main), so both a long-lived process and one that only ever
+// sees short restarts stay bounded — see QuotaRetention.
+func (l *Log) PruneQuota(cutoff time.Time) (int64, error) {
+	res, err := l.db.Exec(`DELETE FROM quota_samples WHERE ts < ?`, cutoff.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func scanSamples(rows *sql.Rows) ([]Sample, error) {

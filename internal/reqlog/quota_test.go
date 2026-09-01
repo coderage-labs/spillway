@@ -1,7 +1,13 @@
 package reqlog
 
 import (
+	"context"
+	"database/sql"
+	"fmt"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -245,7 +251,7 @@ func TestLatestQuotaSamplesReturnsNewestPerAccountWindow(t *testing.T) {
 	write("a", "7d", 0.2, 0)
 	write("b", "5h", 0.9, 0)
 
-	got, err := l.LatestQuotaSamples()
+	got, err := l.LatestQuotaSamples(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,5 +270,390 @@ func TestLatestQuotaSamplesReturnsNewestPerAccountWindow(t *testing.T) {
 	}
 	if s, ok := byKey["b/5h"]; !ok || s.Used != 0.9 {
 		t.Errorf("b/5h missing or wrong: %+v", s)
+	}
+}
+
+// insertRawSample writes directly to quota_samples, bypassing RecordQuota's
+// throttle and letting a test place two rows at the exact same ts (a tie) —
+// something RecordQuota's own dedup logic would otherwise prevent.
+func insertRawSample(t *testing.T, l *Log, ts time.Time, account, window string, lim, used float64, resetAt time.Time) {
+	t.Helper()
+	var reset any
+	if !resetAt.IsZero() {
+		reset = resetAt.UnixMilli()
+	}
+	if _, err := l.db.Exec(`INSERT INTO quota_samples (ts, account, window, lim, used, reset_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, ts.UnixMilli(), account, window, lim, used, reset); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// oldLatestQuotaSamplesQuery is issue #104's original, unindexed correlated
+// subquery — kept here, verbatim, ONLY so
+// TestLatestQuotaSamplesRewriteMatchesOriginalQuery can prove the rewrite
+// returns identical rows on identical data. It must never be used outside
+// this one test.
+const oldLatestQuotaSamplesQuery = `SELECT ts, account, window, lim, used, reset_at
+	FROM quota_samples q
+	WHERE ts = (SELECT MAX(ts) FROM quota_samples q2
+		WHERE q2.account = q.account AND q2.window = q.window)`
+
+func fetchSamples(t *testing.T, l *Log, query string) []Sample {
+	t.Helper()
+	rows, err := l.db.Query(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got, err := scanSamples(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func sampleKey(s Sample) string {
+	return fmt.Sprintf("%s|%s|%d|%g|%g|%d", s.Account, s.Window, s.Ts.UnixMilli(), s.Limit, s.Used, s.ResetAt.UnixMilli())
+}
+
+func sortedKeys(samples []Sample) []string {
+	keys := make([]string, len(samples))
+	for i, s := range samples {
+		keys[i] = sampleKey(s)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// The rewrite (a join against a derived per-(account,window) MAX(ts) table)
+// must return exactly the same rows as the original correlated subquery on
+// identical data — including three edge cases the correlated form handles
+// implicitly and a naive `GROUP BY` rewrite would not: an account with a
+// single sample, a tie on ts within one (account, window) pair (the
+// original's WHERE clause matches every row at the max, not just one), and
+// a window that exists for one account but not another.
+func TestLatestQuotaSamplesRewriteMatchesOriginalQuery(t *testing.T) {
+	l := openTest(t)
+	base := time.Now().Truncate(time.Millisecond)
+	reset := base.Add(3 * time.Hour)
+
+	// Ordinary history: several samples per pair, oldest to newest.
+	insertRawSample(t, l, base, "a", "5h", 1, 0.1, reset)
+	insertRawSample(t, l, base.Add(time.Minute), "a", "5h", 1, 0.3, reset)
+	insertRawSample(t, l, base.Add(2*time.Minute), "a", "5h", 1, 0.5, reset)
+
+	// Single-sample account: only one row ever recorded.
+	insertRawSample(t, l, base, "solo", "7d", 1, 0.9, reset)
+
+	// Tie on ts: two rows for the same (account, window) sharing the exact
+	// newest timestamp, with different payloads. The original query's WHERE
+	// matches both; a plain GROUP BY would arbitrarily keep only one.
+	tieTs := base.Add(5 * time.Minute)
+	insertRawSample(t, l, tieTs, "tied", "5h", 1, 0.4, reset)
+	insertRawSample(t, l, tieTs, "tied", "5h", 1, 0.7, reset)
+	// An older row for the same pair must NOT show up even though it's not tied.
+	insertRawSample(t, l, base, "tied", "5h", 1, 0.05, reset)
+
+	// A window that exists for one account but not another: "b" has 7d,
+	// "a" (above) only has 5h.
+	insertRawSample(t, l, base, "b", "7d", 1, 0.2, reset)
+
+	want := sortedKeys(fetchSamples(t, l, oldLatestQuotaSamplesQuery))
+	got, err := l.LatestQuotaSamples(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotKeys := sortedKeys(got)
+
+	if len(want) == 0 {
+		t.Fatal("test fixture produced no rows from the reference query — fixture is broken")
+	}
+	if !reflect.DeepEqual(want, gotKeys) {
+		t.Fatalf("rewrite diverges from the original query:\n old: %v\n new: %v", want, gotKeys)
+	}
+	// Specifically confirm the tie produced two rows, not one collapsed row.
+	tiedCount := 0
+	for _, s := range got {
+		if s.Account == "tied" && s.Ts.Equal(tieTs) {
+			tiedCount++
+		}
+	}
+	if tiedCount != 2 {
+		t.Errorf("tie on ts: want both tied rows preserved, got %d", tiedCount)
+	}
+}
+
+// The rewrite's whole point is to stop doing a per-row correlated subquery.
+// EXPLAIN QUERY PLAN on the exact text LatestQuotaSamples runs must not
+// reference "q2" — the alias the old correlated subquery used for its inner
+// scan. This fails immediately (no large fixture needed) if the query is
+// ever reverted to the old form.
+func TestLatestQuotaSamplesQueryPlanHasNoCorrelatedSubquery(t *testing.T) {
+	l := openTest(t)
+	rows, err := l.db.Query("EXPLAIN QUERY PLAN " + latestQuotaSamplesQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan strings.Builder
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range vals {
+			fmt.Fprintf(&plan, "%v ", v)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plan.String(), "q2") {
+		t.Fatalf("query plan still references a per-row correlated subquery (alias q2): %s", plan.String())
+	}
+}
+
+// With enough rows that the old correlated-subquery plan would be visibly
+// slow (58,000 across 8 pairs mirrors issue #104's real database almost
+// exactly), the rewrite must stay fast. The bound here is deliberately
+// generous — this is a regression guard against reverting to the O(n²)-ish
+// plan, not a micro-benchmark, and must not make CI flaky on a slow runner.
+func TestLatestQuotaSamplesFastOnALargeFixture(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-fixture timing test in -short mode")
+	}
+	l := openTest(t)
+	base := time.Now().Truncate(time.Millisecond)
+	reset := base.Add(3 * time.Hour)
+	const pairs = 8
+	const rowsPerPair = 7200 // ~57,600 rows total, matching issue #104's live database
+
+	tx, err := l.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO quota_samples (ts, account, window, lim, used, reset_at)
+		VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p := 0; p < pairs; p++ {
+		account := fmt.Sprintf("acct-%d", p%4)
+		window := "5h"
+		if p%2 == 0 {
+			window = "7d"
+		}
+		account = fmt.Sprintf("%s-%d", account, p) // keep all 8 pairs distinct
+		for i := 0; i < rowsPerPair; i++ {
+			ts := base.Add(time.Duration(i) * time.Second)
+			if _, err := stmt.Exec(ts.UnixMilli(), account, window, 1.0, float64(i%100)/100, reset.UnixMilli()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	got, err := l.LatestQuotaSamples(context.Background())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != pairs {
+		t.Fatalf("want %d rows (one per account/window pair), got %d", pairs, len(got))
+	}
+	// Measured: the old correlated-subquery plan took 34.3s on this shape of
+	// data (issue #104); the rewrite measures ~0.03s. 2s is a wide margin
+	// for a slow CI runner while still failing hard if the plan regresses
+	// back to the old O(n²)-ish behavior.
+	if elapsed > 2*time.Second {
+		t.Errorf("LatestQuotaSamples took %s on %d rows — the old correlated-subquery plan would take tens of seconds here; the rewrite should not", elapsed, pairs*rowsPerPair)
+	}
+}
+
+func indexNames(t *testing.T, path string) []string {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'quota_samples'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// Open runs the (account, window, ts) index migration unconditionally on
+// every open — it must be safe to run twice, and safe on a database that
+// already carries an equivalent index added by hand under a different name
+// (issue #104 notes one was: "applied locally as a stopgap").
+func TestQuotaIndexMigrationIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.db")
+
+	l1, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopening re-runs initQuota's migrations, including
+	// `CREATE INDEX IF NOT EXISTS quota_account_window_ts`, against a
+	// database that already has that exact index.
+	l2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopening a database that already has the index must not fail: %v", err)
+	}
+	if err := l2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	names := indexNames(t, path)
+	found := 0
+	for _, n := range names {
+		if n == "quota_account_window_ts" {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("want exactly one quota_account_window_ts index after two opens, got %d (indexes: %v)", found, names)
+	}
+}
+
+// A hand-added index under a name spillway didn't choose (issue #104: "An
+// index was added by hand to the user's DB as a stopgap") must not make
+// Open fail — CREATE INDEX IF NOT EXISTS only checks its own name, so this
+// is a real path: the database ends up with two indexes covering the same
+// columns, and that must be harmless, not an error.
+func TestQuotaIndexMigrationToleratesHandAddedIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.db")
+
+	raw, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE quota_samples (
+		ts INTEGER NOT NULL, account TEXT NOT NULL, window TEXT NOT NULL,
+		lim REAL NOT NULL, used REAL NOT NULL, reset_at INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	// Simulates the hand-added stopgap index under whatever name an operator
+	// happened to pick.
+	if _, err := raw.Exec(`CREATE INDEX manual_stopgap_idx ON quota_samples (account, window, ts)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open must tolerate a pre-existing hand-added index: %v", err)
+	}
+	defer l.Close()
+
+	names := indexNames(t, path)
+	if !contains(names, "manual_stopgap_idx") {
+		t.Errorf("hand-added index should survive Open, got %v", names)
+	}
+	if !contains(names, "quota_account_window_ts") {
+		t.Errorf("Open should still create its own index alongside the hand-added one, got %v", names)
+	}
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// PruneQuota is the mechanism issue #104 asks for: nothing was bounding
+// quota_samples, which is how it grew to 57,617 rows answering an 8-row
+// question. It must delete rows strictly older than cutoff and leave
+// everything else — in particular, a recent sample must survive even when
+// an old one for a different pair does not.
+func TestPruneQuotaDeletesOnlyRowsOlderThanCutoff(t *testing.T) {
+	l := openTest(t)
+	now := time.Now().Truncate(time.Millisecond)
+
+	insertRawSample(t, l, now.Add(-30*24*time.Hour), "old", "5h", 1, 0.5, now.Add(-29*24*time.Hour))
+	insertRawSample(t, l, now.Add(-time.Hour), "recent", "5h", 1, 0.2, now.Add(4*time.Hour))
+
+	cutoff := now.Add(-QuotaRetention)
+	n, err := l.PruneQuota(cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("want exactly 1 row pruned, got %d", n)
+	}
+
+	remaining := fetchSamples(t, l, `SELECT ts, account, window, lim, used, reset_at FROM quota_samples`)
+	if len(remaining) != 1 || remaining[0].Account != "recent" {
+		t.Fatalf("want only the recent sample left, got %+v", remaining)
+	}
+}
+
+// initQuota prunes on every Open, not only on main's periodic ticker — a
+// database that only ever sees short-lived restarts must still shrink. This
+// must not take the seed's own most-recent sample with it: a sample well
+// within QuotaRetention (and within its own reset) has to survive an Open.
+func TestOpenPruneDoesNotDeleteASampleSeedingStillNeeds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.db")
+	now := time.Now().Truncate(time.Millisecond)
+
+	l, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 10 days old: within QuotaRetention (14 days) and within its own
+	// reset, so SeedQuota would use it if it survives.
+	insertRawSample(t, l, now.Add(-10*24*time.Hour), "kept", "7d", 1, 0.3, now.Add(4*24*time.Hour))
+	// Far older than QuotaRetention: this one should not survive a reopen.
+	insertRawSample(t, l, now.Add(-30*24*time.Hour), "gone", "5h", 1, 0.9, now.Add(-29*24*time.Hour))
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l2, err := Open(path) // re-runs initQuota's prune
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+
+	got, err := l2.LatestQuotaSamples(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Account != "kept" {
+		t.Fatalf("want only the still-recent 'kept' sample after reopen, got %+v", got)
 	}
 }

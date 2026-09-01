@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +33,44 @@ import (
 // expiry. Well under accounts.refreshWindow (5m) so a token cannot slip past
 // it between sweeps.
 const refreshSweepInterval = time.Minute
+
+// quotaPruneInterval is how often the daemon prunes quota_samples on a
+// timer, on top of the prune initQuota already does at every Open (issue
+// #104). A long-lived daemon relies on this one; the Open-time prune alone
+// only helps a process that gets restarted.
+const quotaPruneInterval = time.Hour
+
+// seedQuotaTimeout bounds accounts.SeedQuota on the startup path (issue
+// #104). The rewritten query is ~0.03s even unindexed on the measured
+// 57,617-row database, so this is a generous multiple of that meant to
+// catch a stuck or corrupt database, not the ordinary case — SeedQuota is
+// an optimisation (#34), and a daemon that cannot serve is worse than one
+// that starts unseeded and probes once.
+const seedQuotaTimeout = 5 * time.Second
+
+// startupWatchdogTimeout: how long startup gets before this logs loudly that
+// the listeners still aren't bound (issue #104). Before this, a hang
+// anywhere between process start and ListenAndServe was completely silent —
+// launchd reported the job running and nothing answered, and it took a
+// SIGQUIT stack dump to find out why.
+const startupWatchdogTimeout = 15 * time.Second
+
+// startupWatchdog logs loudly if bound is not closed within timeout, then
+// logs again once it finally is (so the log distinguishes "still hung" from
+// "came up slowly"). Run in its own goroutine from the top of runServer.
+func startupWatchdog(logger *slog.Logger, bound <-chan struct{}, timeout time.Duration) {
+	start := time.Now()
+	select {
+	case <-bound:
+		return
+	case <-time.After(timeout):
+		logger.Error("spillway has not bound its listeners yet — startup may be hung",
+			"elapsed", timeout)
+	}
+	<-bound
+	logger.Warn("listeners bound, but only after exceeding the startup watchdog threshold",
+		"elapsed", time.Since(start))
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -156,6 +195,18 @@ func runServer(args []string) error {
 		Level: parseLevel(cfg.Log.Level),
 	}))
 
+	// Issue #104: a silent hang anywhere between here and the two
+	// ListenAndServe/Serve calls below used to look, from outside, exactly
+	// like a healthy daemon — launchd reports the job running, and nothing
+	// answers. listenersBound closes once both the admin and proxy
+	// listeners have actually bound (bindWG.Done() at each call site
+	// below); the watchdog logs loudly if that takes too long.
+	var bindWG sync.WaitGroup
+	bindWG.Add(2)
+	listenersBound := make(chan struct{})
+	go func() { bindWG.Wait(); close(listenersBound) }()
+	go startupWatchdog(logger, listenersBound, startupWatchdogTimeout)
+
 	store := openSecrets()
 	// Scrub any inline tokens from an older config into the keychain (§5).
 	cfgPath, err := config.Path()
@@ -195,7 +246,19 @@ func runServer(args []string) error {
 	// restart, a real request that gets billed (issue #34). Seeding from
 	// the persisted quota_samples table means an account genuinely has no
 	// reading only when that is actually true.
-	accounts.SeedQuota(p, rl, time.Now(), logger)
+	//
+	// Issue #104: this used to run an unindexed query that took 34s+ on a
+	// real database, entirely before either listener bound — the daemon
+	// looked hung because it was. seedQuotaTimeout bounds it: SeedQuota is
+	// an optimisation (#34), not a correctness requirement, so a slow or
+	// stuck read here must not delay binding. A request that lands in the
+	// gap this leaves (bind happens before/without seeding) sees an
+	// unseeded account exactly like a genuinely new one — needsProbe treats
+	// it as unknown and probes once, the same cost #34 already accepted for
+	// that case, not a new one.
+	seedCtx, cancelSeed := context.WithTimeout(context.Background(), seedQuotaTimeout)
+	accounts.SeedQuota(seedCtx, p, rl, time.Now(), logger)
+	cancelSeed()
 
 	broker := events.New()
 
@@ -287,6 +350,23 @@ func runServer(args []string) error {
 		}
 	}()
 
+	// Prune quota_samples on a timer (issue #104). initQuota already does
+	// this once at Open, which is enough for a process that gets restarted
+	// often (the Homebrew cask does this on every upgrade, #34) but not for
+	// one that stays up — this is the backstop for that case.
+	go func() {
+		t := time.NewTicker(quotaPruneInterval)
+		defer t.Stop()
+		for range t.C {
+			n, err := rl.PruneQuota(time.Now().Add(-reqlog.QuotaRetention))
+			if err != nil {
+				logger.Warn("quota prune failed", "err", err)
+			} else if n > 0 {
+				logger.Debug("pruned old quota samples", "rows", n)
+			}
+		}
+	}()
+
 	adminAddr := cfg.Admin.Addr
 	if adminAddr == "" {
 		adminAddr = admin.DefaultAddr
@@ -344,6 +424,7 @@ func runServer(args []string) error {
 	if err != nil {
 		return fmt.Errorf("admin listener: %w", err)
 	}
+	bindWG.Done() // one of two listeners bound — see listenersBound above
 	go func() {
 		switch {
 		case admin.IsUnix(adminAddr):
@@ -386,6 +467,14 @@ func runServer(args []string) error {
 
 	addr := net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))
 	srv := &http.Server{Addr: addr, Handler: handler}
+	// Split from ListenAndServe so the bind itself — the thing the startup
+	// watchdog and #104's bind-vs-seed ordering both care about — happens
+	// here, separately from Serve, which blocks for the life of the daemon.
+	proxyLn, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("proxy listener: %w", err)
+	}
+	bindWG.Done() // both listeners bound — see listenersBound above
 
 	// Validate has already refused a non-loopback bind without the opt-in, so
 	// reaching here off loopback means the operator asked for it. Say plainly
@@ -415,7 +504,7 @@ func runServer(args []string) error {
 
 	logger.Info("spillway listening", "addr", "http://"+addr,
 		"upstream", cfg.Upstream, "build", buildInfo())
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(proxyLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
