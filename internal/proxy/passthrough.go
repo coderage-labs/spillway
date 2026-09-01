@@ -88,7 +88,7 @@ func (h *Handler) passThrough(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "spillway: upstream error", http.StatusBadGateway)
 		return
 	}
-	writeResponse(w, resp)
+	writeResponse(w, resp, h.logger)
 }
 
 // rawRequest clones r for the default upstream with no credential mutation.

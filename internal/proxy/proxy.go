@@ -730,7 +730,7 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			// credit for a response it didn't serve.
 			acct.SetLastModel(modelServed)
 			defer h.pool.Done(acct)
-			usage = writeResponse(w, resp)
+			usage = writeResponse(w, resp, h.logger)
 			return finish(name)
 		}
 
@@ -967,12 +967,12 @@ func (h *Handler) buildRequest(r *http.Request, upstream string, acct *pool.Acco
 // never a gate in front of them. Response headers, in particular
 // Content-Length, are copied unchanged before either writer runs, so a
 // non-streaming response's framing is untouched too.
-func writeResponse(w http.ResponseWriter, resp *http.Response) usageTotals {
+func writeResponse(w http.ResponseWriter, resp *http.Response, logger *slog.Logger) usageTotals {
 	defer resp.Body.Close()
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	fw := &flushWriter{w: w}
-	sniff := newUsageSniffer(resp.Header.Get("Content-Type"), resp.Header.Get("Content-Encoding"))
+	sniff := newUsageSniffer(resp.Header.Get("Content-Type"), resp.Header.Get("Content-Encoding"), logger)
 	_, _ = io.Copy(io.MultiWriter(fw, sniff), resp.Body)
 	fw.Flush()
 	return sniff.usage()
