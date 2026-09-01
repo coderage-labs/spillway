@@ -879,8 +879,8 @@ func (a *Account) Quota() (map[string]string, time.Time) {
 	return a.quota, a.quotaAt
 }
 
-// SetQuotaWindows stores provider quota state (§6.5), replacing windows
-// from the same source only.
+// SetQuotaWindows stores provider quota state (§6.5), merging by window
+// name (issue #100).
 func (a *Account) SetQuotaWindows(w []QuotaWindow) {
 	source := "poll"
 	for _, x := range w {
@@ -892,30 +892,48 @@ func (a *Account) SetQuotaWindows(w []QuotaWindow) {
 	a.setWindowsSourced(source, w)
 }
 
-// setWindowsSourced replaces windows from one source, keeping others.
+// setWindowsSourced merges an incoming batch of windows into the account's
+// known set, keyed by Name (issue #100). A window present in w overwrites
+// whatever was stored under that name, whichever source reported it before
+// — the newest report always wins. A window NOT mentioned in w is left
+// exactly as it was: absence in one response is not evidence the window
+// went away, only that this response had nothing to say about it.
 //
-// It stamps the source onto what it stores. Previously the caller chose the
-// filter and the payload carried the label, so a payload that set no Source
-// was filtered as "poll" and stored as "" — the filter matched nothing, and
-// every poll appended a fresh copy of every window. A Kimi account reached a
-// hundred and five windows in an afternoon, and because OverThreshold scans
-// all of them, a single stale one below the threshold would have pinned the
-// account out of rotation permanently.
+// This replaces an earlier design that replaced everything from one
+// source wholesale. That was wrong the moment one source's own responses
+// stopped being a complete picture: anthropic-ratelimit-unified-7d_oi-*
+// (spillway's "7d-fable") only rides on a fable response, so a plain
+// Sonnet/Opus/Haiku response — still source "headers" — carried just
+// [5h, 7d] and the wholesale replace deleted the account's fable window
+// on every non-fable turn (issue #100).
+//
+// It still stamps Source onto what it stores, and merging by Name rather
+// than filtering by Source is also what keeps this immune to the earlier
+// Kimi bug (a hundred and five windows in an afternoon, from a poller
+// payload that set no Source: the old filter compared "poll" against ""
+// and matched nothing, so every poll appended a fresh copy of every
+// window instead of replacing it). Matching by Name has no equivalent
+// failure mode — a poll that repeats the same names just overwrites the
+// same entries, whatever Source ends up stamped on them.
 func (a *Account) setWindowsSourced(source string, w []QuotaWindow) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	// Fresh slice: a.windows[:0] aliases the backing array, so the append
-	// below can overwrite entries the loop has not read yet.
-	kept := make([]QuotaWindow, 0, len(a.windows)+len(w))
-	for _, x := range a.windows {
-		if x.Source != source {
-			kept = append(kept, x)
-		}
-	}
 	for i := range w {
 		w[i].Source = source
 	}
-	a.windows = append(kept, w...)
+	for _, nw := range w {
+		replaced := false
+		for i := range a.windows {
+			if a.windows[i].Name == nw.Name {
+				a.windows[i] = nw
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			a.windows = append(a.windows, nw)
+		}
+	}
 }
 
 // QuotaWindows returns the latest provider quota state.
