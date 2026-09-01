@@ -656,6 +656,19 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		// selection, rotation, or eligibility.
 		h.claims.check(h.logger, provider.For(acct.Type), modelServed, resp.Header)
 
+		// Issue #103: with hideOverageFromClient on, this account's credit
+		// markers stop here. Placement is load-bearing twice over: after
+		// RecordQuota, the overage warning and claims.check — all of which
+		// must see the real headers — and before every branch below that
+		// writes to the client, which all copy from resp.Header. Evaluated
+		// per iteration, so a rotation re-decides for the next account
+		// (a Kimi account after a Claude one, or the flag flipping
+		// mid-flight, both resolve correctly).
+		hideCredit := h.hidingCreditSignals(acct)
+		if hideCredit {
+			stripCreditSignals(resp.Header)
+		}
+
 		// Upstream 5xx (issue #26): 529 Overloaded is the clear case, but this
 		// treats the whole 5xx range alike. Every provider's
 		// ClassifiableStatuses stays under 500 — nothing here ever means
@@ -868,7 +881,16 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			continue
 		}
 
-		// Out of inline retries: the client sees the upstream 429 as-is.
+		// Out of inline retries: the client sees the upstream 429 as-is —
+		// except its credit markers when they are being hidden (issue #103).
+		// The body must be neutralized WITH the headers, not instead of
+		// them: the client's 429 path latches on the body's
+		// "credits_required" code precisely when the claim header is
+		// absent, so stripping only the header would make the latch MORE
+		// likely, not less.
+		if hideCredit {
+			errBody = neutralizeCreditsRequired(errBody)
+		}
 		h.pool.Done(acct)
 		writeCaptured(w, resp, errBody)
 		return finish(name)

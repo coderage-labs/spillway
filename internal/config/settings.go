@@ -26,6 +26,12 @@ type Settings struct {
 	ProbeInterval      *string `json:"probeInterval,omitempty"`
 	CrossProvider      *bool   `json:"crossProvider,omitempty"`
 	StickyAcrossFamily *bool   `json:"stickyAcrossFamily,omitempty"`
+	// HideOverageFromClient is editable here, unlike allowOverage, because
+	// it cannot cause spend by itself: with allowOverage off (the default,
+	// and deliberately NOT reachable from this surface) spillway refuses
+	// rather than bills, stripped markers or not. What it does change is
+	// who asks for consent — see the config field's comment (issue #103).
+	HideOverageFromClient *bool `json:"hideOverageFromClient,omitempty"`
 	// Accounts maps account name -> editable per-account fields.
 	Accounts map[string]AccountSettings `json:"accounts,omitempty"`
 }
@@ -46,13 +52,15 @@ func CurrentSettings(c *Config) Settings {
 	thr := fmt.Sprintf("%g", c.Pool.SwitchThreshold)
 	cross := c.Pool.CrossProvider
 	sticky := c.Pool.StickyAcrossFamily
+	hideOverage := c.Pool.HideOverageFromClient
 	probe := c.Pool.ProbeOnStart == nil || *c.Pool.ProbeOnStart
 
 	s := Settings{
 		ExhaustedMode: &mode, HoldMax: &hold, SwitchThreshold: &thr,
 		ProbeOnStart: &probe, ProbeInterval: &probeIv, CrossProvider: &cross,
-		StickyAcrossFamily: &sticky,
-		Accounts:           map[string]AccountSettings{},
+		StickyAcrossFamily:    &sticky,
+		HideOverageFromClient: &hideOverage,
+		Accounts:              map[string]AccountSettings{},
 	}
 	for _, a := range c.Accounts {
 		label, disabled, prio := a.Label, a.Disabled, a.Priority
@@ -81,6 +89,9 @@ func (s Settings) apply(cfg *Config) error {
 	}
 	if s.StickyAcrossFamily != nil {
 		cfg.Pool.StickyAcrossFamily = *s.StickyAcrossFamily
+	}
+	if s.HideOverageFromClient != nil {
+		cfg.Pool.HideOverageFromClient = *s.HideOverageFromClient
 	}
 	if s.SwitchThreshold != nil {
 		var f float64

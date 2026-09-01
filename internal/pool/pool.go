@@ -262,6 +262,14 @@ type Pool struct {
 	// for keeping the account's prompt cache warm. Guarded by mu, same as
 	// switchThreshold above.
 	stickyAcrossFamily bool
+	// hideOverageFromClient strips the credit markers — the signals Claude
+	// Code's usage-credit gate latches on — from pooled Claude responses
+	// before they reach the client (issue #103). Off by default: on, it
+	// removes the client's own paid-usage consent dialog, leaving
+	// allowOverage above as the only spend authority — which is the point
+	// behind a pool, and exactly what the flag's documentation says to the
+	// user's face. Guarded by mu, same as switchThreshold above.
+	hideOverageFromClient bool
 	// holds are the requests currently parked waiting for a reset, guarded
 	// by mu. See hold.go.
 	holds map[*hold]struct{}
@@ -1056,6 +1064,16 @@ func (p *Pool) AllowOverage() bool {
 	return p.allowOverage
 }
 
+// HideOverageFromClient reports whether pooled Claude responses have their
+// credit markers removed before reaching the client (issue #103). Read by
+// the proxy per response rather than snapshotted at construction, so a
+// settings change applies to the next request like every pool setting.
+func (p *Pool) HideOverageFromClient() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hideOverageFromClient
+}
+
 // disabledOrParked is the overage tier's floor. That tier deliberately admits
 // StateExhausted accounts — being out of quota is the precondition for using
 // extra usage at all — but a dead credential or an operator park still means
@@ -1204,6 +1222,9 @@ type Settings struct {
 	// StickyAcrossFamily is pool.stickyAcrossFamily's config-facing value
 	// (issue #24 decision 2). See that field's comment.
 	StickyAcrossFamily bool
+	// HideOverageFromClient is pool.hideOverageFromClient's config-facing
+	// value (issue #103). See that field's comment.
+	HideOverageFromClient bool
 	// Accounts, if non-empty, is applied to the matching pool accounts by
 	// Name. Left empty (e.g. from buildPool at startup, where per-account
 	// fields are already set at construction and park state is applied
@@ -1230,6 +1251,7 @@ func (p *Pool) Apply(s Settings) {
 	p.crossProvider = s.CrossProvider
 	p.allowOverage = s.AllowOverage
 	p.stickyAcrossFamily = s.StickyAcrossFamily
+	p.hideOverageFromClient = s.HideOverageFromClient
 	p.mu.Unlock()
 
 	if len(s.Accounts) == 0 {

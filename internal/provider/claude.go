@@ -103,7 +103,7 @@ var overageAllowed = map[string]bool{
 //	Overage-Reset: 1788220800
 func anthropicOverage(h http.Header) Overage {
 	v := h.Get("anthropic-ratelimit-unified-overage-status")
-	inUse := h.Get("anthropic-ratelimit-unified-overage-in-use") == "true"
+	inUse := h.Get(OverageInUseHeader) == "true"
 	if v == "" && !inUse {
 		return Overage{Utilization: -1}
 	}
@@ -114,7 +114,7 @@ func anthropicOverage(h http.Header) Overage {
 		Available:   overageAllowed[v] || inUse,
 		InUse:       inUse,
 		Utilization: -1,
-		Reason:      h.Get("anthropic-ratelimit-unified-overage-disabled-reason"),
+		Reason:      h.Get(OverageDisabledReasonHeader),
 	}
 	if u := h.Get("anthropic-ratelimit-unified-overage-utilization"); u != "" {
 		if f, err := strconv.ParseFloat(u, 64); err == nil {
@@ -229,6 +229,24 @@ func claudeGoverningWindows(model string) []string {
 	}
 	return windows
 }
+
+// The three headers below are exported for the proxy's hideOverageFromClient
+// strip (issue #103): they are the response signals Claude Code's usage-credit
+// gate latches on, and the proxy must delete exactly the spellings this
+// package reads, not a second hand-typed copy that could drift.
+const (
+	// OverageInUseHeader says this response was served on paid extra usage.
+	// Read by anthropicOverage below; on the client it is the 200-path latch
+	// input for the credit gate (issue #103).
+	OverageInUseHeader = "anthropic-ratelimit-unified-overage-in-use"
+	// OverageDisabledReasonHeader carries why extra usage will not serve.
+	// Read by anthropicOverage below; the client caches it and it feeds the
+	// same gate (issue #103).
+	OverageDisabledReasonHeader = "anthropic-ratelimit-unified-overage-disabled-reason"
+	// RepresentativeClaimHeader is anthropicRepresentativeClaimHeader's
+	// exported name — one spelling, shared with the proxy.
+	RepresentativeClaimHeader = anthropicRepresentativeClaimHeader
+)
 
 // anthropicRepresentativeClaimHeader carries Anthropic's own answer to
 // "which window governed this response" (issue #53) — as opposed to

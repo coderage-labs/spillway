@@ -22,6 +22,12 @@ package proxy
 // configured and DOES rewrite a nested model is covered separately by
 // TestNestedToolModelMapThroughProxy in nested_model_test.go, which is the
 // fingerprint test for mutation #4 specifically.
+//
+// This suite guards the REQUEST side only, and that has not widened: the
+// opt-in response mutation (hideOverageFromClient, issue #103) touches
+// nothing spillway sends upstream, so nothing here changes for it. Its own
+// guards — including that responses stay byte-faithful while the flag is
+// off — live in credit_signals_test.go.
 
 import (
 	"bytes"

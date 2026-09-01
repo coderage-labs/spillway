@@ -615,10 +615,11 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 	// state are already applied above, at construction, before this pool is
 	// reachable from any other goroutine.
 	p.Apply(pool.Settings{
-		SwitchThreshold:    cfg.Pool.SwitchThreshold,
-		CrossProvider:      cfg.Pool.CrossProvider,
-		AllowOverage:       cfg.Pool.AllowOverage,
-		StickyAcrossFamily: cfg.Pool.StickyAcrossFamily,
+		SwitchThreshold:       cfg.Pool.SwitchThreshold,
+		CrossProvider:         cfg.Pool.CrossProvider,
+		AllowOverage:          cfg.Pool.AllowOverage,
+		StickyAcrossFamily:    cfg.Pool.StickyAcrossFamily,
+		HideOverageFromClient: cfg.Pool.HideOverageFromClient,
 	})
 	p.SetTokenManager(mgr)
 	usable := 0
@@ -651,11 +652,12 @@ func poolSettings(nc *config.Config) pool.Settings {
 		}
 	}
 	return pool.Settings{
-		SwitchThreshold:    nc.Pool.SwitchThreshold,
-		CrossProvider:      nc.Pool.CrossProvider,
-		AllowOverage:       nc.Pool.AllowOverage,
-		StickyAcrossFamily: nc.Pool.StickyAcrossFamily,
-		Accounts:           accts,
+		SwitchThreshold:       nc.Pool.SwitchThreshold,
+		CrossProvider:         nc.Pool.CrossProvider,
+		AllowOverage:          nc.Pool.AllowOverage,
+		StickyAcrossFamily:    nc.Pool.StickyAcrossFamily,
+		HideOverageFromClient: nc.Pool.HideOverageFromClient,
+		Accounts:              accts,
 	}
 }
 
