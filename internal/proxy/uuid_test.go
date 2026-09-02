@@ -30,16 +30,12 @@ func TestPatchAccountUUID(t *testing.T) {
 	body := []byte(bodyWithUserID(uuidA))
 	out := patchAccountUUID(body, uuidB)
 
-	if len(out) != len(body) {
-		t.Fatalf("length changed: %d → %d", len(body), len(out))
-	}
-	s := string(out)
-	if !strings.Contains(s, `account_uuid\":\"`+uuidB) {
-		t.Errorf("metadata account_uuid not rewritten:\n%s", s)
-	}
-	// The same string in user message content must be untouched.
-	if !strings.Contains(s, `account_uuid\":\"`+uuidA+`\" in user content`) {
-		t.Errorf("user-content account_uuid was rewritten:\n%s", s)
+	// Byte-exact: the 36-byte uuid inside metadata.user_id changes, and
+	// every other byte — including the identical-looking uuid in user
+	// message content — is untouched (issue #128).
+	want := strings.Replace(string(body), `account_uuid\":\"`+uuidA, `account_uuid\":\"`+uuidB, 1)
+	if string(out) != want {
+		t.Errorf("only the metadata account_uuid may change:\n got  %s\n want %s", out, want)
 	}
 	// Idempotent re-patch works (failover path patches per attempt).
 	out2 := patchAccountUUID(out, uuidA)
@@ -99,8 +95,9 @@ func TestUUIDRewriteThroughProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if s := <-got; !strings.Contains(s, `account_uuid\":\"`+uuidB) {
-		t.Errorf("upstream body not rewritten:\n%s", s)
+	want := strings.Replace(body, `account_uuid\":\"`+uuidA, `account_uuid\":\"`+uuidB, 1)
+	if s := <-got; s != want {
+		t.Errorf("upstream body is not byte-faithful outside the metadata account_uuid:\n got  %s\n want %s", s, want)
 	}
 
 	// Account without a UUID: untouched.

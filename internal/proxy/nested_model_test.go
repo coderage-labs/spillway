@@ -23,14 +23,12 @@ func TestRewriteModelRewritesNestedToolsModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteModel: %v", err)
 	}
-	if !strings.Contains(string(out), `"model":"k3[1m]"`) {
-		t.Errorf("top-level model not rewritten:\n%s", out)
-	}
-	if !strings.Contains(string(out), `"model":"kimi-for-coding"`) {
-		t.Errorf("nested tools[].model not rewritten:\n%s", out)
-	}
-	if strings.Contains(string(out), "claude-fable-5") || strings.Contains(string(out), "claude-sonnet-4-6") {
-		t.Errorf("original model ids should be gone entirely:\n%s", out)
+	// Byte-exact: the two model values change and NOTHING else does. A
+	// substring check would pass while the rest of the body drifted, and
+	// the prompt cache keys on the bytes (issue #128).
+	want := `{"model":"k3[1m]","tools":[{"type":"advisor_x","model":"kimi-for-coding"}],"messages":[]}`
+	if string(out) != want {
+		t.Errorf("body is not byte-faithful outside the two model values:\n got  %s\n want %s", out, want)
 	}
 }
 
@@ -51,15 +49,13 @@ func TestRewriteModelRewritesMultipleNestedToolsModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteModel: %v", err)
 	}
-	s := string(out)
-	if !strings.Contains(s, `"model":"kimi-for-coding","name":"A"`) {
-		t.Errorf("tools[0].model not rewritten in place:\n%s", s)
-	}
-	if !strings.Contains(s, `"model":"kimi-for-coding-highspeed","name":"B"`) {
-		t.Errorf("tools[2].model not rewritten in place:\n%s", s)
-	}
-	if !strings.Contains(s, `{"type":"bash"}`) {
-		t.Errorf("tools[1], which has no model, must be untouched:\n%s", s)
+	want := `{"model":"k3[1m]","tools":[` +
+		`{"type":"advisor_a","model":"kimi-for-coding","name":"A"},` +
+		`{"type":"bash"},` +
+		`{"type":"advisor_b","model":"kimi-for-coding-highspeed","name":"B"}` +
+		`],"messages":[]}`
+	if string(out) != want {
+		t.Errorf("body is not byte-faithful outside the three model values:\n got  %s\n want %s", out, want)
 	}
 }
 
@@ -93,8 +89,9 @@ func TestRewriteModelLeavesOrdinaryContentModelStringAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteModel: %v", err)
 	}
-	if !strings.Contains(string(out), `claude-fable-5`) {
-		t.Errorf("model string inside message content must survive untouched:\n%s", out)
+	want := strings.Replace(string(body), `"claude-sonnet-4-6"`, `"k3[1m]"`, 1)
+	if string(out) != want {
+		t.Errorf("only the top-level model may change; message content must survive byte-for-byte:\n got  %s\n want %s", out, want)
 	}
 }
 
@@ -109,8 +106,9 @@ func TestRewriteModelLeavesToolSchemaModelPropertyAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteModel: %v", err)
 	}
-	if !strings.Contains(string(out), `"enum":["claude-fable-5"]`) {
-		t.Errorf("a schema property named model must not be rewritten:\n%s", out)
+	want := strings.Replace(string(body), `"claude-sonnet-4-6"`, `"k3[1m]"`, 1)
+	if string(out) != want {
+		t.Errorf("only the top-level model may change; a schema property named model must survive byte-for-byte:\n got  %s\n want %s", out, want)
 	}
 }
 
@@ -125,8 +123,9 @@ func TestRewriteModelLeavesDeeperNestedModelKeyAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteModel: %v", err)
 	}
-	if !strings.Contains(string(out), `"config":{"model":"claude-fable-5"}`) {
-		t.Errorf("a model key nested inside a tool's own sub-object must not be rewritten:\n%s", out)
+	want := strings.Replace(string(body), `"claude-sonnet-4-6"`, `"k3[1m]"`, 1)
+	if string(out) != want {
+		t.Errorf("only the top-level model may change; a model key inside a tool's sub-object must survive byte-for-byte:\n got  %s\n want %s", out, want)
 	}
 }
 
@@ -176,8 +175,9 @@ func TestNestedToolModelMapThroughProxy(t *testing.T) {
 	}
 	resp.Body.Close()
 	sent := <-got
-	if !strings.Contains(sent, `"model":"k3[1m]"`) || !strings.Contains(sent, `"model":"kimi-for-coding"`) {
-		t.Errorf("upstream body missing rewritten models = %s", sent)
+	wantSent := `{"model":"k3[1m]","tools":[{"type":"advisor_x","model":"kimi-for-coding"}],"messages":[]}`
+	if sent != wantSent {
+		t.Errorf("upstream body is not byte-faithful outside the two model values:\n got  %s\n want %s", sent, wantSent)
 	}
 
 	// Unmapped nested model: hard error, upstream never hit.
@@ -351,10 +351,8 @@ func TestRewriteModelEscapedQuotesNearModelBoundaryStillRewrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteModel: %v", err)
 	}
-	if !strings.Contains(string(out), `"model":"kimi-for-coding"`) {
-		t.Errorf("nested model not rewritten around escaped neighbours:\n%s", out)
-	}
-	if !strings.Contains(string(out), `"note":"a \"quoted\" note"`) {
-		t.Errorf("escaped neighbour field corrupted:\n%s", out)
+	want := `{"model":"k3[1m]","tools":[{"type":"advisor_\"x\"","model":"kimi-for-coding","note":"a \"quoted\" note"}]}`
+	if string(out) != want {
+		t.Errorf("escaped neighbours must survive byte-for-byte:\n got  %s\n want %s", out, want)
 	}
 }
