@@ -293,7 +293,7 @@ func insertRawSample(t *testing.T, l *Log, ts time.Time, account, window string,
 // TestLatestQuotaSamplesRewriteMatchesOriginalQuery can prove the rewrite
 // returns identical rows on identical data. It must never be used outside
 // this one test.
-const oldLatestQuotaSamplesQuery = `SELECT ts, account, window, lim, used, reset_at
+const oldLatestQuotaSamplesQuery = `SELECT ts, account, window, lim, used, reset_at, fetched_at
 	FROM quota_samples q
 	WHERE ts = (SELECT MAX(ts) FROM quota_samples q2
 		WHERE q2.account = q.account AND q2.window = q.window)`
@@ -616,7 +616,7 @@ func TestPruneQuotaDeletesOnlyRowsOlderThanCutoff(t *testing.T) {
 		t.Fatalf("want exactly 1 row pruned, got %d", n)
 	}
 
-	remaining := fetchSamples(t, l, `SELECT ts, account, window, lim, used, reset_at FROM quota_samples`)
+	remaining := fetchSamples(t, l, `SELECT ts, account, window, lim, used, reset_at, fetched_at FROM quota_samples`)
 	if len(remaining) != 1 || remaining[0].Account != "recent" {
 		t.Fatalf("want only the recent sample left, got %+v", remaining)
 	}
@@ -655,5 +655,138 @@ func TestOpenPruneDoesNotDeleteASampleSeedingStillNeeds(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Account != "kept" {
 		t.Fatalf("want only the still-recent 'kept' sample after reopen, got %+v", got)
+	}
+}
+
+// Issue #138: RecordQuota/LatestQuotaSamples must carry FetchedAt separately
+// from Ts — a window recorded by a sampler tick long after it was last
+// really measured must not have that gap erased by the round trip.
+func TestRecordQuotaKeepsFetchedAtSeparateFromTs(t *testing.T) {
+	l := openTest(t)
+	sampleTime := time.Now().Truncate(time.Millisecond)
+	measuredAt := sampleTime.Add(-40 * time.Hour) // the real header's own age
+
+	if err := l.RecordQuota(Sample{
+		Ts: sampleTime, Account: "work", Window: "7d-fable",
+		Limit: 1, Used: 1, ResetAt: sampleTime.Add(31 * time.Hour), FetchedAt: measuredAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := l.LatestQuotaSamples(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 sample, got %d", len(got))
+	}
+	if !got[0].Ts.Equal(sampleTime) {
+		t.Errorf("Ts = %v, want the sampler's own write time %v", got[0].Ts, sampleTime)
+	}
+	if !got[0].FetchedAt.Equal(measuredAt) {
+		t.Errorf("FetchedAt = %v, want the provider's measurement time %v — "+
+			"it must not collapse onto Ts (issue #138)", got[0].FetchedAt, measuredAt)
+	}
+}
+
+// A row written before the fetched_at column existed carries no honest
+// measurement time. It must load without error (an existing database must
+// keep working) and its FetchedAt must come back as the zero time — never
+// something derived from Ts, which is exactly the illusion issue #138 is
+// about: a sample's write time is not evidence of when the window was
+// really measured.
+func TestPreMigrationRowsHaveUnknownNotFreshFetchedAt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.db")
+
+	// Simulate a database from before the fetched_at column existed: the
+	// exact schema initQuota created prior to issue #138.
+	raw, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE quota_samples (
+		ts INTEGER NOT NULL, account TEXT NOT NULL, window TEXT NOT NULL,
+		lim REAL NOT NULL, used REAL NOT NULL, reset_at INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	oldSampleTs := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	if _, err := raw.Exec(`INSERT INTO quota_samples (ts, account, window, lim, used, reset_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		oldSampleTs.UnixMilli(), "legacy", "7d", 1.0, 0.5,
+		oldSampleTs.Add(4*time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l, err := Open(path)
+	if err != nil {
+		t.Fatalf("opening a pre-#138 database must succeed: %v", err)
+	}
+	defer l.Close()
+
+	got, err := l.LatestQuotaSamples(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want the pre-existing row to still load, got %d rows", len(got))
+	}
+	if !got[0].FetchedAt.IsZero() {
+		t.Errorf("FetchedAt = %v for a row with no fetched_at column value, want the zero time "+
+			"(unknown, never mistaken for fresh) — got a value derived from Ts=%v instead",
+			got[0].FetchedAt, oldSampleTs)
+	}
+}
+
+// The fetched_at migration (ALTER TABLE ADD COLUMN, tolerating "duplicate
+// column") must be safe to run twice against the same database — the same
+// guarantee TestQuotaIndexMigrationIsIdempotent pins for the index
+// migration, here for the column.
+func TestFetchedAtColumnMigrationIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.db")
+
+	l1, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	l2, err := Open(path) // re-runs the ALTER TABLE ADD COLUMN fetched_at
+	if err != nil {
+		t.Fatalf("reopening a database that already has fetched_at must not fail: %v", err)
+	}
+	defer l2.Close()
+
+	rows, err := l2.db.Query(`PRAGMA table_info(quota_samples)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "fetched_at" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("want exactly one fetched_at column after two opens, got %d", count)
+	}
+
+	// The column must still work for writes/reads after the second open.
+	if err := l2.RecordQuota(Sample{
+		Ts: time.Now(), Account: "a", Window: "5h", Limit: 1, Used: 0.1, FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("RecordQuota after reopen: %v", err)
 	}
 }

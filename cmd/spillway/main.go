@@ -359,25 +359,7 @@ func runServer(args []string) error {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
 		for {
-			for _, a := range p.Accounts() {
-				for _, w := range a.QuotaWindows() {
-					// A reading past its reset is not current state (issue
-					// #135). Recording it would keep extending a flat spent
-					// line that SeedQuota discards on restart anyway — and,
-					// worse, keep its sample timestamp fresh, which is what
-					// let a 40-hour-old reading come back from every restart
-					// looking like it was taken a minute ago.
-					if w.Expired {
-						continue
-					}
-					if err := rl.RecordQuota(reqlog.Sample{
-						Ts: time.Now(), Account: a.Name, Window: w.Name,
-						Limit: w.Limit, Used: w.Used, ResetAt: w.ResetAt,
-					}); err != nil {
-						logger.Debug("quota sample failed", "account", a.Name, "err", err)
-					}
-				}
-			}
+			sampleQuota(p, rl, time.Now(), logger)
 			<-t.C
 		}
 	}()
@@ -558,6 +540,48 @@ func runServer(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// sampleQuota writes one quota_samples row per account/window, using each
+// window's own FetchedAt (issue #138) rather than the sampling time. now is
+// the sampling time (Ts), passed in explicitly rather than read from
+// time.Now() so a test can control it precisely — RecordQuota's own
+// sampleInterval throttle is timestamp-based, so a test simulating two
+// ticks needs to space them itself rather than racing the wall clock. It is
+// a plain function, not inlined in the ticker goroutine, so a test can call
+// it directly without spinning up a 30s ticker.
+//
+// Every window is recorded, including one QuotaWindows() reports Expired —
+// this used to skip those (issue #135's fix), on the reasoning that
+// recording them just extended a flat spent line that SeedQuota would
+// discard on restart anyway, while also keeping the row's timestamp
+// deceptively fresh. That reasoning had a gap once FetchedAt is honest:
+// SeedQuota discards a stale reading by checking the sample's OWN ResetAt
+// against now, and Account.retireCycleSiblingsLocked (issue #135) can move a
+// window's in-memory ResetAt into the past — retiring it — without that
+// window ever being re-measured. Skipping Expired windows here meant that
+// correction was never written down: the moment a window went from
+// "current" to "retired", sampling stopped, so the LAST row on disk for it
+// still carried the pre-retirement ResetAt (still ahead of now) — which is
+// exactly current enough for SeedQuota to reinstall it as spent, undoing
+// the retirement on every restart. Recording every window, expired or not,
+// lets a retirement's corrected ResetAt reach disk on the very next tick,
+// so SeedQuota's existing "past its own reset" check discards it like any
+// other stale reading. FetchedAt (not Ts) is what protects the freshness
+// illusion this used to guard against, so the skip is no longer needed for
+// that either. The one cost is a denser table for windows that never turn
+// over again — bounded by QuotaRetention (#104), not unbounded.
+func sampleQuota(p *pool.Pool, rl *reqlog.Log, now time.Time, logger *slog.Logger) {
+	for _, a := range p.Accounts() {
+		for _, w := range a.QuotaWindows() {
+			if err := rl.RecordQuota(reqlog.Sample{
+				Ts: now, Account: a.Name, Window: w.Name,
+				Limit: w.Limit, Used: w.Used, ResetAt: w.ResetAt, FetchedAt: w.FetchedAt,
+			}); err != nil {
+				logger.Debug("quota sample failed", "account", a.Name, "err", err)
+			}
+		}
+	}
 }
 
 // warnDeprecatedKeychainAccounts logs one line per configured account still

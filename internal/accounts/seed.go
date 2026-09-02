@@ -66,9 +66,17 @@ import (
 // sitting alongside it forever, which is the exact bug class
 // setWindowsSourced's own doc comment records for unlabelled "poll" writes.
 // The seed's age is still visible downstream regardless of source: FetchedAt
-// carries the original sample's timestamp rather than now, so both the
-// dashboard's relative-time display and needsProbe's own staleness check
-// see it for what it is.
+// carries the sample's own FetchedAt — the provider's measurement time, not
+// spillway's sampling time (issue #138) — so both the dashboard's
+// relative-time display and needsProbe's own staleness check see it for
+// what it is. Before #138's fix this used the sample's Ts (when the sampler
+// wrote the row, refreshed every tick whether or not the window was
+// re-measured), so a window nobody had re-measured in days could seed
+// looking as fresh as the moment of the restart — see reqlog.Sample's doc.
+// A sample from before the fetched_at column existed carries the zero
+// time.Time here (reqlog.scanSamples), which is the same "unknown, treat as
+// maximally stale" value a window that has never been measured at all
+// already carries — never mistaken for fresh.
 func SeedQuota(ctx context.Context, p *pool.Pool, rl *reqlog.Log, now time.Time, logger *slog.Logger) {
 	samples, err := rl.LatestQuotaSamples(ctx)
 	if err != nil {
@@ -86,7 +94,7 @@ func SeedQuota(ctx context.Context, p *pool.Pool, rl *reqlog.Log, now time.Time,
 		}
 		byAccount[s.Account] = append(byAccount[s.Account], pool.QuotaWindow{
 			Name: s.Window, Limit: s.Limit, Used: s.Used,
-			ResetAt: s.ResetAt, FetchedAt: s.Ts,
+			ResetAt: s.ResetAt, FetchedAt: s.FetchedAt,
 		})
 	}
 	for _, a := range p.Accounts() {

@@ -8,17 +8,42 @@ package reqlog
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
 // Sample is one observation of one quota window.
+//
+// Ts and FetchedAt answer different questions (issue #138). Ts is when
+// spillway's sampler wrote this row — it exists for pruning and for
+// throttling how often a row lands (sampleInterval), and it advances on
+// every sampler tick regardless of whether the window itself was
+// re-measured. FetchedAt is when the *provider* actually reported this
+// reading — the header's own timestamp, carried through from
+// pool.QuotaWindow.FetchedAt — and it only changes when a real response (or
+// probe, or poll) touches the window. Before this field existed, SeedQuota
+// had only Ts to install as a window's FetchedAt, so a window that hadn't
+// been re-measured in days still seeded looking as fresh as the last
+// sampler tick: exactly the illusion issue #135's fix depends on FetchedAt
+// NOT being under (retireCycleSiblingsLocked compares FetchedAt values to
+// tell "re-measured by this response" from "just sitting there").
+//
+// FetchedAt is nullable at the SQL layer (see migration below): a row
+// written before this column existed carries no honest measurement time at
+// all, and guessing one — falling back to Ts, say — would silently
+// reintroduce the exact illusion this field exists to remove. Such a row's
+// FetchedAt comes back as the zero time.Time, which every consumer already
+// treats as "unknown, treat as maximally stale" (the same value
+// QuotaWindow.FetchedAt would carry for a window that has genuinely never
+// been measured) — never as fresh.
 type Sample struct {
-	Ts      time.Time `json:"ts"`
-	Account string    `json:"account"`
-	Window  string    `json:"window"`
-	Limit   float64   `json:"limit"`
-	Used    float64   `json:"used"`
-	ResetAt time.Time `json:"resetAt,omitempty"`
+	Ts        time.Time `json:"ts"`
+	Account   string    `json:"account"`
+	Window    string    `json:"window"`
+	Limit     float64   `json:"limit"`
+	Used      float64   `json:"used"`
+	ResetAt   time.Time `json:"resetAt,omitempty"`
+	FetchedAt time.Time `json:"fetchedAt,omitempty"`
 }
 
 // sampleInterval throttles writes: quota headers arrive on every response,
@@ -46,6 +71,20 @@ func (l *Log) initQuota() error {
 		return err
 	}
 	if _, err = l.db.Exec(`CREATE INDEX IF NOT EXISTS quota_ts ON quota_samples (ts)`); err != nil {
+		return err
+	}
+	// Issue #138: fetched_at carries the provider's own measurement time,
+	// separate from ts (see Sample's doc). Added after the first release —
+	// existing databases need it too — so this runs unconditionally, the
+	// same pattern reqlog.go's Open uses for the requests table's own
+	// ALTER-added columns: tolerate "duplicate column" so reopening an
+	// already-migrated database is a no-op, not an error. Nullable and with
+	// no DEFAULT, deliberately: a row that predates this column has no
+	// honest measurement time to default to, and NULL is what lets
+	// scanSamples tell "never recorded" apart from "recorded as exactly
+	// this timestamp".
+	if _, err = l.db.Exec(`ALTER TABLE quota_samples ADD COLUMN fetched_at INTEGER`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
 		return err
 	}
 	// Issue #104: LatestQuotaSamples (startup seeding) filters on
@@ -98,15 +137,19 @@ func (l *Log) RecordQuota(s Sample) error {
 	if !s.ResetAt.IsZero() {
 		reset = s.ResetAt.UnixMilli()
 	}
-	_, err = l.db.Exec(`INSERT INTO quota_samples (ts, account, window, lim, used, reset_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		s.Ts.UnixMilli(), s.Account, s.Window, s.Limit, s.Used, reset)
+	var fetchedAt any
+	if !s.FetchedAt.IsZero() {
+		fetchedAt = s.FetchedAt.UnixMilli()
+	}
+	_, err = l.db.Exec(`INSERT INTO quota_samples (ts, account, window, lim, used, reset_at, fetched_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		s.Ts.UnixMilli(), s.Account, s.Window, s.Limit, s.Used, reset, fetchedAt)
 	return err
 }
 
 // QuotaSince returns samples newer than cutoff, oldest first.
 func (l *Log) QuotaSince(cutoff time.Time) ([]Sample, error) {
-	rows, err := l.db.Query(`SELECT ts, account, window, lim, used, reset_at
+	rows, err := l.db.Query(`SELECT ts, account, window, lim, used, reset_at, fetched_at
 		FROM quota_samples WHERE ts >= ? ORDER BY ts ASC`, cutoff.UnixMilli())
 	if err != nil {
 		return nil, err
@@ -156,7 +199,7 @@ func (l *Log) LatestQuotaSamples(ctx context.Context) ([]Sample, error) {
 }
 
 const latestQuotaSamplesQuery = `
-	SELECT q.ts, q.account, q.window, q.lim, q.used, q.reset_at
+	SELECT q.ts, q.account, q.window, q.lim, q.used, q.reset_at, q.fetched_at
 	FROM quota_samples q
 	JOIN (
 		SELECT account, window, MAX(ts) AS max_ts
@@ -184,13 +227,19 @@ func scanSamples(rows *sql.Rows) ([]Sample, error) {
 	for rows.Next() {
 		var s Sample
 		var ts int64
-		var reset *int64
-		if err := rows.Scan(&ts, &s.Account, &s.Window, &s.Limit, &s.Used, &reset); err != nil {
+		var reset, fetchedAt *int64
+		if err := rows.Scan(&ts, &s.Account, &s.Window, &s.Limit, &s.Used, &reset, &fetchedAt); err != nil {
 			return nil, err
 		}
 		s.Ts = time.UnixMilli(ts)
 		if reset != nil {
 			s.ResetAt = time.UnixMilli(*reset)
+		}
+		// NULL (a row from before fetched_at existed) leaves s.FetchedAt at
+		// its zero value — see Sample's doc for why that must never be
+		// treated as fresh.
+		if fetchedAt != nil {
+			s.FetchedAt = time.UnixMilli(*fetchedAt)
 		}
 		out = append(out, s)
 	}
