@@ -400,6 +400,34 @@ type outcome struct {
 	sessionHash string
 }
 
+// clientGone reports whether err is this request's own client going away
+// rather than anything an account did: the client's context is done AND that
+// is the error the failing call came back with.
+//
+// Both halves are load-bearing, in different ways (issue #142).
+//
+// The error alone is not enough. Today the outbound request carries
+// r.Context() and nothing else, so a context.Canceled out of RoundTrip can
+// only be the client — but the moment anything spillway-side wraps that
+// context (a per-attempt deadline, an internal cancel on shutdown, the hold
+// budget being applied to the request rather than to the wait), the error
+// stops saying WHO cancelled. Matching on it alone would then silently drop
+// spillway's own aborts: no rotation, no error to the client, nothing in the
+// log but a DEBUG line. Reading the client's context makes the answer come
+// from the fact that actually matters.
+//
+// The context alone is not enough either: a client can hang up in the same
+// instant an upstream connection genuinely dies, and that dial failure is
+// still the account's story to tell.
+//
+// errors.Is against ctxErr rather than context.Canceled covers a client
+// deadline as well as a cancel — whichever of the two ended the request is
+// the one that must match.
+func clientGone(r *http.Request, err error) bool {
+	ctxErr := r.Context().Err()
+	return ctxErr != nil && errors.Is(err, ctxErr)
+}
+
 // route runs the request through selection, injection and failover, writing
 // exactly one upstream response (or a synthesized error) to w. Returns the
 // outcome for logging.
@@ -633,9 +661,33 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 
 		resp, err := h.Transport.RoundTrip(out)
 		if err != nil {
+			// Released before every branch below, the early return
+			// included: the account has finished its part in this request
+			// either way, and skipping it on the new path would leak an
+			// inFlight slot for the life of the process (issue #142).
+			h.pool.Done(acct)
+			// The client hung up — Escape in Claude Code, an aborted
+			// subagent, a closed terminal. `out` carries the client's own
+			// context (buildRequest clones r with it), so that cancellation
+			// arrives here as an ordinary RoundTrip error, and the rotation
+			// below used to treat it as one: no account can serve a request
+			// whose client is gone, so it failed identically on the next
+			// account and walked the pool until `tried` was full, emitting
+			// EventRotatedConn and a WARN against every account it touched.
+			// Nothing was billed, but the rotation counts, the dashboard and
+			// the request log all recorded failures that were really one
+			// client hanging up (issue #142).
+			//
+			// Gated on the client's context being done as well as on the
+			// error — see clientGone. Returning without writing: there is
+			// nothing left to write to.
+			if clientGone(r, err) {
+				h.logger.Debug("client went away mid-request, dropping",
+					"account", name, "path", r.URL.Path, "err", err)
+				return finish("(cancelled)")
+			}
 			// No response headers received: an unambiguous pre-work signal,
 			// safe to retry on another account when the body is buffered (§6.6).
-			h.pool.Done(acct)
 			tried[name] = true
 			acct = nil
 			if buffered && len(tried) < len(h.pool.Accounts()) {

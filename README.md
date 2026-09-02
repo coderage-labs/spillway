@@ -848,6 +848,15 @@ are buffered for failover; everything else streams straight through, and
 failover only happens **before the first response byte** — mid-stream aborts
 are the client's own retry behaviour.
 
+A client that goes away mid-request — Escape in Claude Code, an aborted
+subagent, a closed terminal — is **dropped, not rotated**. The cancellation
+reaches spillway looking like any other pre-first-byte connection failure,
+but no account can serve a request whose client is gone, so rotating would
+fail identically on every remaining account and blame each one on the way
+past. Nothing is written back (there is nobody to write to), no rotation
+event is published and no account is named: the request log records it as
+`(cancelled)`, and the only trace is a DEBUG line.
+
 When every account is spent, `pool.exhaustedMode` decides: `fail` (pass the 429
 through), `hold` (park until the soonest reset, up to `pool.holdMax`), or
 `notify` (hold plus a loud log), the default. `spillway run` raises the child's
