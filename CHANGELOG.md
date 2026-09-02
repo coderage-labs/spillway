@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/coderage-labs/spillway/compare/v0.17.0...v0.18.0) (2026-09-02)
+
+
+### Features
+
+* notification channels — ntfy, webhook and Pushover destinations ([#101](https://github.com/coderage-labs/spillway/issues/101)) ([09960a1](https://github.com/coderage-labs/spillway/commit/09960a121845079c7ba8f3b50d462ef10f9e0675))
+
 ## [0.17.0](https://github.com/coderage-labs/spillway/compare/v0.16.0...v0.17.0) (2026-09-01)
 
 
