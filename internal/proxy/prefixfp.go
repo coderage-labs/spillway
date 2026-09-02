@@ -153,10 +153,13 @@ func fingerprintPrefix(body []byte) (fp prefixFingerprint) {
 		if names, ok := toolNames(tools); ok {
 			fp.ToolCount = len(names)
 			fp.ToolsOrderHash = shortHashList(names)
-			// Sort a COPY. Sorting names in place would be harmless today
-			// (it is our own slice) but would make the ordered hash depend
-			// on evaluation order, which is the exact class of bug this
-			// measurement exists to detect.
+			// Sort a COPY. In place would happen to work while the ordered
+			// hash is taken on the line above — which makes the ORDER of
+			// these two statements load-bearing and silently wrong to
+			// swap. Swapping them makes every request report its tools as
+			// already sorted, so ordering jitter reads as zero and the
+			// measurement agrees with whatever anyone already believed. A
+			// copy makes that impossible rather than merely unlikely.
 			sorted := make([]string, len(names))
 			copy(sorted, names)
 			sort.Strings(sorted)
