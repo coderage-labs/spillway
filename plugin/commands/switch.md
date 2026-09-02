@@ -42,7 +42,11 @@ each of these is a decision only they can make.
 
 - **"pinning there would spend money"** — that account is out of quota, so
   every request on it would serve from paid extra usage. Say plainly that
-  this will cost real money for as long as the pin is in place, and ask.
+  this will cost real money for as long as the pin is in place, and ask. Read
+  the rest of the line before summarising it: one form of this refusal says
+  the **provider** has extra usage enabled, which bills a pinned request even
+  though spillway's own `allowOverage` is off. Do not tell the user their
+  overage setting protects them — on a pin it does not.
 - **"pinning there changes provider mid-session"** — the sessions running now
   started on one provider and this account is the other. The client
   configured its capabilities from the first model it saw, so it may be

@@ -907,6 +907,21 @@ or if it would move a live session to another provider (§6.18: the client
 configured its capabilities from the first model it saw). Switching costs the
 prompt cache, which is per account.
 
+"Would serve from paid extra usage" is asked twice, because a pin skips
+selection and the two answers differ. First: would **spillway** choose to
+bill here — quota gone and `allowOverage` on. Second: would the **provider**
+bill here anyway — quota gone and the provider's own extra usage enabled, in
+which case the pinned request is served on it and charged whatever
+`allowOverage` says, since nothing about that setting reaches the provider.
+Only the second one was missing before, so a pin at a spent account with
+`allowOverage` off was accepted silently and the next request billed. Neither
+check uses `switchThreshold`: an account merely past it still has free quota
+and a pin exists to override it. Both are refused with the same message and
+the same `--force`, and an account whose extra usage the provider has
+**disabled** pins freely — the request there is refused, not billed. So does
+one whose extra usage state is still `unknown`; see [Extra
+usage](#extra-usage) for why.
+
 The pin is pool-wide: it is consulted before the sticky map, so it applies to
 every session at once. Sticky selection itself is **per session** — the session
 key hashes `metadata.user_id`, and Claude Code sends a JSON blob there
@@ -1104,6 +1119,24 @@ billing before the command returns, it does not wait for a restart. If no
 daemon is reachable the command still succeeds (the config is what a future
 `spillway server` reads at startup) and says so plainly instead of implying
 it took effect live.
+
+Two things `allowOverage` does **not** do, because both are the provider's
+decision and not spillway's. It does not turn the provider's extra usage off:
+if your account has it enabled, a request that reaches the provider with no
+quota left is served on it and charged. And it does not stop `spillway
+switch` being refused — the pin guard asks the provider-side question too, so
+naming a spent account whose provider will bill it needs `--force` even with
+`allowOverage` off. What `allowOverage` governs is tier 3 of ordinary
+selection: whether spillway will ever *route* there on its own.
+
+`unknown` is the one state on that path that does not refuse a pin. It cannot
+be resolved without spending a request on the account, so refusing would
+leave `--force` as the only way forward and teach it as a reflex — and
+`unknown` is the ordinary state of an account that has not been used yet, so
+refusing it would block the common case rather than the dangerous one. A
+pinned request on a spent account with no reading can be billed once; the
+`overage-in-use` header then makes the state known, with the usual `WARN`,
+notification and status-line marker, and the refusal applies from then on.
 
 `unknown` means no response has come back from that account yet this run.
 The state is read from provider headers and held in memory only, so it resets
