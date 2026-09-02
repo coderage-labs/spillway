@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.19.0](https://github.com/coderage-labs/spillway/compare/v0.18.0...v0.19.0) (2026-09-02)
+
+
+### Features
+
+* apply config changed outside the CLI without a restart ([#84](https://github.com/coderage-labs/spillway/issues/84)) ([9430731](https://github.com/coderage-labs/spillway/commit/9430731648d748f21ec667814f049fad1de9ab9e))
+* measure request-prefix instability against real cache spend (refs [#111](https://github.com/coderage-labs/spillway/issues/111)) ([361c755](https://github.com/coderage-labs/spillway/commit/361c7559a6487f96a324b99c4181fca7afb67699))
+
+
+### Fixes
+
+* decode Brotli responses so the usage sniffer stops recording zeros ([#126](https://github.com/coderage-labs/spillway/issues/126)) ([acc4702](https://github.com/coderage-labs/spillway/commit/acc47020fcfb11e2be583a57d2f22357db0ebbf0))
+* remove a data race in the loopback callback server and deflake its test ([#98](https://github.com/coderage-labs/spillway/issues/98)) ([fa3e7d8](https://github.com/coderage-labs/spillway/commit/fa3e7d8c8cf811fd297aab49a74baf53db0321a3))
+
+
+### Internal
+
+* make the byte-faithfulness guard actually compare bytes ([#128](https://github.com/coderage-labs/spillway/issues/128)) ([c197138](https://github.com/coderage-labs/spillway/commit/c197138cc7d3b1bc08fe3137bc8b327ee2a5956e))
+
 ## [0.18.0](https://github.com/coderage-labs/spillway/compare/v0.17.0...v0.18.0) (2026-09-02)
 
 
