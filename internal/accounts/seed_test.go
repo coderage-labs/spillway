@@ -188,3 +188,80 @@ func TestSeedQuotaBoundedByTimeoutOnASlowQuery(t *testing.T) {
 		t.Errorf("SeedQuota took %s past a nanosecond timeout — a slow seed must not delay startup", elapsed)
 	}
 }
+
+// Issue #138, the reported live scenario: a window's real header arrived
+// long ago and nothing has re-measured it since, but the sampler keeps
+// stamping a fresh Ts on the row every tick anyway. Across a restart,
+// SeedQuota must install the window's real measurement age (FetchedAt), not
+// the sampler's write time — otherwise the window looks as fresh as the
+// restart, indefinitely, which is exactly what let it survive five restarts
+// live (work's 7d-fable, header from 2026-08-31 20:04, still reading
+// fetchedAt ~08:46:58 after each one).
+//
+// Simulated across two restart cycles, per the task's evidence bar: seed
+// once, simulate more sampler ticks (still no re-measurement, Ts keeps
+// advancing), seed again — the installed FetchedAt must stay pinned to the
+// original measurement both times, never drifting toward "now".
+func TestSeedQuotaInstallsTheWindowsRealAgeNotTheSamplerTick(t *testing.T) {
+	l := openTestLog(t)
+	measuredAt := time.Now().Add(-40 * time.Hour).Truncate(time.Millisecond) // the real header's own timestamp
+	farFutureReset := measuredAt.Add(45 * time.Hour)
+
+	a := pool.NewAccount("work", pool.SourceYAML, "tok", "", 0, "")
+	a.Type = "claude-oauth"
+	p := pool.New([]*pool.Account{a}, measuredAt)
+
+	// Restart cycle 1: the sampler has been ticking every 30s since
+	// measuredAt without the window ever being re-measured. Each tick
+	// writes a fresh Ts but the true FetchedAt never moves.
+	sampleAt1 := measuredAt.Add(time.Hour)
+	if err := l.RecordQuota(reqlog.Sample{
+		Ts: sampleAt1, Account: "work", Window: "7d-fable",
+		Limit: 1, Used: 1, ResetAt: farFutureReset, FetchedAt: measuredAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restart1 := measuredAt.Add(2 * time.Hour)
+	SeedQuota(context.Background(), p, l, restart1, quietLogger())
+
+	got := windowsByName(a.QuotaWindows())["7d-fable"]
+	if got == nil {
+		t.Fatal("7d-fable was not seeded")
+	}
+	if !got.FetchedAt.Equal(measuredAt) {
+		t.Errorf("restart 1: FetchedAt = %v, want the original measurement time %v, not the sampler tick %v",
+			got.FetchedAt, measuredAt, sampleAt1)
+	}
+
+	// Restart cycle 2: more ticks have passed (Ts advances further still),
+	// still no re-measurement.
+	sampleAt2 := measuredAt.Add(30 * time.Hour)
+	if err := l.RecordQuota(reqlog.Sample{
+		Ts: sampleAt2, Account: "work", Window: "7d-fable",
+		Limit: 1, Used: 1, ResetAt: farFutureReset, FetchedAt: measuredAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a2 := pool.NewAccount("work", pool.SourceYAML, "tok", "", 0, "")
+	a2.Type = "claude-oauth"
+	p2 := pool.New([]*pool.Account{a2}, measuredAt)
+	restart2 := measuredAt.Add(31 * time.Hour)
+	SeedQuota(context.Background(), p2, l, restart2, quietLogger())
+
+	got2 := windowsByName(a2.QuotaWindows())["7d-fable"]
+	if got2 == nil {
+		t.Fatal("7d-fable was not seeded on the second restart")
+	}
+	if !got2.FetchedAt.Equal(measuredAt) {
+		t.Errorf("restart 2: FetchedAt = %v, want the original measurement time %v still, not sampler tick %v or restart time %v",
+			got2.FetchedAt, measuredAt, sampleAt2, restart2)
+	}
+}
+
+func windowsByName(ws []pool.QuotaWindow) map[string]*pool.QuotaWindow {
+	out := make(map[string]*pool.QuotaWindow, len(ws))
+	for i := range ws {
+		out[ws[i].Name] = &ws[i]
+	}
+	return out
+}

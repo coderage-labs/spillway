@@ -784,6 +784,24 @@ on the dashboard (a dash and "expired" in place of a level and a refill
 countdown) and in `spillway status`; the status line and the headroom
 history leave them out.
 
+**A window's age is when the provider measured it, not when spillway last
+looked (issue #138).** The 30s sampler records every window into
+`quota_samples` for the headroom chart, but a window nobody has re-measured
+has nothing new to report each tick — only `Sample.FetchedAt`, carried
+through from the window's own `FetchedAt`, says when it was actually last
+measured; `ts` is just when that row was written, and exists for pruning.
+Startup seeding installs `FetchedAt`, not `ts`, as the window's age, so a
+reading that is genuinely days old still looks days old after a restart
+instead of as fresh as the last sampler tick — which is what let a
+retirement above outlive the daemon that made it: with the sampler once
+skipping already-expired windows to avoid extending a stale line, a
+retirement's corrected (past) reset had no tick left to reach disk before
+the next restart, and the pre-retirement reading — still inside its
+original, un-expired reset — came back and re-locked the account out. The
+sampler now records every window regardless, so a retirement's correction
+is on disk within one tick and survives the next restart same as it would
+without one.
+
 **A confirmed 429 is stronger than "over threshold".** The above is all
 proactive — a *preference*, built from utilization headers, that still
 serves the request when nothing better exists. An actual quota-429 from
