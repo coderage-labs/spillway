@@ -386,6 +386,8 @@ type accountJSON struct {
 	// An account can be OverThreshold=false, FableSpent=true — fine for
 	// Sonnet/Opus, done for fable — and the two bits are how the dashboard
 	// says that instead of collapsing both families into one "spent" flag.
+	// Clears on its own once the fable window's reset passes (issue #135);
+	// the window itself is still listed, flagged expired.
 	FableSpent bool `json:"fableSpent,omitempty"`
 	// Overage: the provider says extra usage is available on this account.
 	// Paid is true only when it would actually be spent — available AND

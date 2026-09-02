@@ -39,6 +39,9 @@ type slWindow struct {
 	Limit   float64   `json:"limit"`
 	Used    float64   `json:"used"`
 	ResetAt time.Time `json:"resetAt"`
+	// Expired: past its reset with nothing re-measured since (issue #135).
+	// Absent from an older daemon's JSON, so it reads false there.
+	Expired bool `json:"expired"`
 }
 
 type slAccount struct {
@@ -63,9 +66,12 @@ func (a slAccount) display() string {
 }
 
 // headroom is the fraction of a window still available, or -1 when the
-// provider has reported nothing yet.
+// provider has reported nothing yet — or when what it reported has expired
+// (issue #135): either way there is no number to draw, and a stale spent
+// reading must neither print a 0% bar with a countdown nor sink the
+// account's ranking in pickAccount.
 func (w slWindow) headroom() float64 {
-	if w.Limit <= 0 {
+	if w.Expired || w.Limit <= 0 {
 		return -1
 	}
 	h := 1 - w.Used/w.Limit

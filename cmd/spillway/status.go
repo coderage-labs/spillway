@@ -39,6 +39,7 @@ func runStatus(jsonOut bool) error {
 			Limit   float64   `json:"limit"`
 			Used    float64   `json:"used"`
 			ResetAt time.Time `json:"resetAt"`
+			Expired bool      `json:"expired"` // issue #135: past its reset, unknown not spent
 		} `json:"quotaWindows"`
 	}
 	if err := api.get("/api/accounts", &accounts); err != nil {
@@ -79,6 +80,10 @@ func runStatus(jsonOut bool) error {
 		by := map[string]string{}
 		for _, w := range a.Windows {
 			if w.Limit <= 0 {
+				continue
+			}
+			if w.Expired {
+				by[w.Name] = "expired"
 				continue
 			}
 			cell := fmt.Sprintf("%d%%", int((1-w.Used/w.Limit)*100+0.5))

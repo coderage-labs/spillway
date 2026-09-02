@@ -602,7 +602,10 @@ function setLive(state, label) {
   el.dataset.state = state; el.textContent = label;
 }
 function headroom(w) {
-  if (!w || !(w.limit > 0)) return null;
+  // An expired reading (issue #135: past its reset, nothing re-measured it
+  // since) is unknown, not a level — the same null every other no-data path
+  // takes, so it draws a dash rather than a dry tank with a "refills 0s".
+  if (!w || w.expired || !(w.limit > 0)) return null;
   return Math.max(0, Math.min(1, 1 - (w.used / w.limit)));
 }
 
@@ -1174,6 +1177,7 @@ function renderTanks(list) {
       cyl.win.textContent = w.name;
       cyl.rst.className = "rst" + (beatsReset ? " alarm" : "");
       cyl.rst.innerHTML = beatsReset ? "dry " + fmtDur(dry)
+        : w.expired ? "expired"
         : (w.resetAt ? "refills " + fmtReset(w.resetAt) : "&nbsp;");
 
       const tr = document.createElement("tr");
@@ -1182,7 +1186,8 @@ function renderTanks(list) {
           esc(short(a.name)) + '</td>' +
         '<td class="dim">' + esc(w.name) + '</td>' +
         '<td class="num">' + (f === null ? "&mdash;" : pct + "%") + '</td>' +
-        '<td class="dim">' + esc(w.source === "headers" ? "measured"
+        '<td class="dim">' + esc(w.expired ? "expired"
+          : w.source === "headers" ? "measured"
           : w.source === "poll" ? "polled" : "unknown") + '</td>' +
         '<td class="num dim">' + (rate ? (rate * 100).toFixed(1) + "%" : "&mdash;") + '</td>' +
         '<td class="num ' + (beatsReset ? "bad" : "dim") + '">' +
@@ -1195,7 +1200,7 @@ function renderTanks(list) {
           ? (a.cacheHitRate * 100).toFixed(1) + "%" : "&mdash;") + '</td>' +
         '<td class="num dim">' + ((a.cacheCreateTokens || a.cacheReadTokens)
           ? (a.cacheCreateTokens || 0) + " / " + (a.cacheReadTokens || 0) : "&mdash;") + '</td>' +
-        '<td class="num dim">' + (w.resetAt ? fmtReset(w.resetAt) : "&mdash;") + '</td>' +
+        '<td class="num dim">' + (w.expired ? "expired" : w.resetAt ? fmtReset(w.resetAt) : "&mdash;") + '</td>' +
         '<td class="' + (a.state === "ok" ? "dim" : "bad") + '">' + esc(a.state) + '</td>';
       figures.appendChild(tr);
     }

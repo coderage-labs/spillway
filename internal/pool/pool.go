@@ -134,6 +134,50 @@ type QuotaWindow struct {
 	ResetAt   time.Time `json:"resetAt"` // zero when unknown
 	Source    string    `json:"source"`  // "headers" (anthropic responses) or "poll" (kimi /usages)
 	FetchedAt time.Time `json:"fetchedAt"`
+	// Expired is true when ResetAt has passed and nothing has re-measured
+	// the window since (issue #135) — a reading that no longer says anything
+	// about current state. Computed by QuotaWindows() on the copy it
+	// returns, never stored: a value a caller writes here is overwritten on
+	// the next read. Served over the wire rather than derived per client from
+	// resetAt, on the same reasoning as admin/state.go's Threshold: the
+	// selector's clock and the dashboard's must agree, and only one of them
+	// is here.
+	Expired bool `json:"expired,omitempty"`
+}
+
+// currentAt reports whether w still says something about the present
+// (issue #135): a reading is evidence only until the moment the provider said
+// the window would refill. After that spillway holds a number and no way to
+// know whether it is still true — for the account-wide windows the next
+// request re-measures them, but a spent 7d-fable only ever arrives on a fable
+// response, and being spent is exactly what stops fable being routed there,
+// so without this the reading was held for the life of the daemon.
+//
+// Three deliberate edges:
+//
+//   - A zero ResetAt stays current: a spent window whose reset is unknown
+//     keeps deprioritising the account. That is the idle probe's rule
+//     (accounts.wouldBill: never spend uninvited) and the opposite result to
+//     SeedQuota, which discards such a sample at startup. Both fail toward
+//     the side that costs nothing; the cost just sits on opposite sides —
+//     seeding a stale "spent" suppresses a probe that should happen, while
+//     routing on an unknown reset risks a refusal, or a bill.
+//   - A reading fetched at or after its own reset is the newest truth, not a
+//     stale one: Anthropic can report a reset that has already passed
+//     (anthropicReset anticipates exactly that), and treating such a fresh
+//     header as expired would let a fable request land, bill on extra usage,
+//     and repeat every turn.
+//   - now == ResetAt is expired, matching SeedQuota's !now.Before.
+//
+// Evaluated lazily at read time, the way WindowRejectedFor already applies
+// its deadline. Not done by dropping the row in setWindowsSourced: the row
+// still evidences when the window was last measured (the dashboard's age,
+// needsProbe's FetchedAt scan), and absence is not deletion (#100). Not
+// signalled to parked holds either: an over-threshold account is always
+// admitted by tier 2 or 3 of SelectExcept, so expiry can never turn a nil
+// selection into a non-nil one — there is nothing to wake.
+func (w QuotaWindow) currentAt(now time.Time) bool {
+	return w.ResetAt.IsZero() || now.Before(w.ResetAt) || !w.FetchedAt.Before(w.ResetAt)
 }
 
 // NewAccount builds an account.
@@ -662,6 +706,11 @@ func (p *Pool) ClearExhausted(a *Account) {
 // rejection immediately, rather than waiting on whatever utilization value
 // happened to arrive on the header — which issue #54 explicitly does not
 // trust to already be at/above the switch threshold.
+//
+// The forged row carries until as its ResetAt, so it expires together with
+// the windowRejected entry (issue #135) rather than outliving it: before
+// windows expired at all, the map half of this cleared on the deadline and
+// the row half kept the account fableSpent forever.
 func (p *Pool) MarkWindowRejected(a *Account, name string, until time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -929,12 +978,20 @@ func (a *Account) setWindowsSourced(source string, w []QuotaWindow) {
 	for i := range w {
 		w[i].Source = source
 	}
+	incoming := make(map[string]bool, len(w))
+	for _, nw := range w {
+		incoming[nw.Name] = true
+	}
 	for _, nw := range w {
 		replaced := false
 		for i := range a.windows {
 			if a.windows[i].Name == nw.Name {
+				old := a.windows[i]
 				a.windows[i] = nw
 				replaced = true
+				if turnedOver(old, nw) {
+					a.retireCycleSiblingsLocked(old, nw, incoming)
+				}
 				break
 			}
 		}
@@ -944,11 +1001,68 @@ func (a *Account) setWindowsSourced(source string, w []QuotaWindow) {
 	}
 }
 
+// Turnover detection (issue #135). Within one billing cycle a window's
+// utilization only rises; a reading that has fallen to (near) zero from a
+// materially higher one can only mean the cycle ended in between. The floor
+// and the drop together keep a limit change from counting: Anthropic's "50%
+// higher through <date>" boost lowers a utilization by a third, never to
+// nothing, and a window that was barely used (old below the drop) proves
+// nothing either way and falls through to plain reset expiry.
+const (
+	turnoverFloor = 0.05
+	turnoverDrop  = 0.10
+)
+
+// turnedOver reports that nw is a fresh reading of old's window taken after
+// old's cycle ended. Requires old to carry a reset: without one there is no
+// cycle to relate any sibling to.
+func turnedOver(old, nw QuotaWindow) bool {
+	if old.Limit <= 0 || nw.Limit <= 0 || old.ResetAt.IsZero() {
+		return false
+	}
+	before, after := old.Used/old.Limit, nw.Used/nw.Limit
+	return after <= turnoverFloor && before-after >= turnoverDrop
+}
+
+// retireCycleSiblingsLocked ends the cycle of every stored window that shared
+// old's reported reset and was not itself re-measured by this response
+// (issue #135). Measured live, 2026-09-01: an account's 7d went 0.89 -> 0.0
+// while the 7d-reset header stayed put at a value 31 hours ahead, and the
+// 7d-fable window — same reported reset, only ever re-measured by a fable
+// response, and the spent reading was what kept fable away — sat at 1.0
+// until someone pinned the account and sent a fable request by hand. The
+// provider's reset header lagged the turnover; the sibling's utilization did
+// not.
+//
+// "Shared the reset" is the only link used: no family knowledge, no
+// provider-specific pairing, just the provider's own statement that the two
+// windows refill at the same moment. The retired window's ResetAt becomes
+// the moment the turnover was observed — a measured time, not a guessed one
+// (#90 is why resets are not guessed) — so currentAt reads it as expired and
+// the next request for that family re-measures it. Assumes a.mu is held.
+func (a *Account) retireCycleSiblingsLocked(old, nw QuotaWindow, incoming map[string]bool) {
+	for i := range a.windows {
+		x := &a.windows[i]
+		if incoming[x.Name] || !x.ResetAt.Equal(old.ResetAt) || !x.FetchedAt.Before(nw.FetchedAt) {
+			continue
+		}
+		x.ResetAt = nw.FetchedAt
+	}
+}
+
 // QuotaWindows returns the latest provider quota state.
 func (a *Account) QuotaWindows() []QuotaWindow {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := append([]QuotaWindow(nil), a.windows...)
+	// Expired is stamped here for the same reason the sort is here: every
+	// consumer reads through this one function. Assigned on every copy, not
+	// set when true — a caller that round-trips a window it read back must
+	// not be able to store a stale flag (issue #135).
+	now := time.Now()
+	for i := range out {
+		out[i].Expired = !out[i].currentAt(now)
+	}
 	// Sorted here rather than at each display site (issue #106): the stored
 	// order is whatever setWindowsSourced last produced, which depends on
 	// arrival order and on which subset a response happened to carry, so it
@@ -962,11 +1076,23 @@ func (a *Account) QuotaWindows() []QuotaWindow {
 
 // OverThreshold reports whether ANY quota window is at/above the used
 // fraction (§6.5 predictive rotation: skip this account while another
-// eligible one exists).
+// eligible one exists). A window whose reset has passed no longer counts
+// (issue #135, QuotaWindow.currentAt).
 func (a *Account) OverThreshold(frac float64) bool {
+	return a.overThresholdAt(frac, time.Now())
+}
+
+// overThresholdAt is OverThreshold against an explicit clock, for tests.
+// Unlike the package's other lowercase twins (threshold, wouldBill) it is
+// NOT "assumes the lock is held": it takes a.mu itself, exactly as the
+// exported form did. The suffix marks the injected clock, nothing else.
+func (a *Account) overThresholdAt(frac float64, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, w := range a.windows {
+		if !w.currentAt(now) {
+			continue
+		}
 		if w.Limit > 0 && w.Used/w.Limit >= frac {
 			return true
 		}

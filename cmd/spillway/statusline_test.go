@@ -33,6 +33,9 @@ func TestHeadroomClampsAndReportsUnknown(t *testing.T) {
 		{win("5h", 2, 1), 0},  // over-reported usage clamps, never negative
 		{win("5h", 0, 0), -1}, // no limit reported: unknown, not full
 		{win("5h", -1, 1), 1}, // clamps the other way too
+		// Past its reset with nothing re-measured since (issue #135): unknown,
+		// not dry — a 0% bar here would be a stale number dressed as a fact.
+		{slWindow{Name: "5h", Used: 1, Limit: 1, Expired: true}, -1},
 	} {
 		// Tolerance, not equality: 1-0.42 is 0.5800000000000001 in float64.
 		if got := tc.w.headroom(); math.Abs(got-tc.want) > 1e-9 {

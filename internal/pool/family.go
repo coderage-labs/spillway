@@ -13,6 +13,13 @@ package pool
 // The fix is the same shape as capability.go's CanServe: look at the request
 // body, ask the provider what governs it, and let selection prefer rather
 // than refuse.
+//
+// A spent reading is only evidence until its own reset (issue #135). The
+// scanners here, and OverThreshold, skip a window whose ResetAt has passed —
+// QuotaWindow.currentAt, applied lazily at read time exactly as
+// WindowRejectedFor applies its deadline. Without that a spent 7d-fable was
+// held for the life of the daemon: only a fable response re-measures it, and
+// being spent is what kept fable away.
 
 import (
 	"encoding/json"
@@ -46,15 +53,23 @@ func modelOf(body []byte) string {
 // OverThreshold's old behaviour of scanning every recorded window, because
 // there is nothing to narrow by.
 func (a *Account) OverThresholdFor(model string, frac float64) bool {
+	return a.overThresholdForAt(model, frac, time.Now())
+}
+
+// overThresholdForAt is OverThresholdFor against an explicit clock, for
+// tests. It takes a.mu itself (the At suffix marks the injected clock, not a
+// held-lock precondition — see overThresholdAt). The Kimi fallback is taken
+// before the lock, as it always was: overThresholdAt locks on its own.
+func (a *Account) overThresholdForAt(model string, frac float64, now time.Time) bool {
 	gw := provider.For(a.Type).GoverningWindows
 	if gw == nil {
-		return a.OverThreshold(frac)
+		return a.overThresholdAt(frac, now)
 	}
 	governing := gw(model)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, w := range a.windows {
-		if w.Limit <= 0 || w.Used/w.Limit < frac {
+		if !w.currentAt(now) || w.Limit <= 0 || w.Used/w.Limit < frac {
 			continue
 		}
 		for _, name := range governing {
@@ -69,12 +84,20 @@ func (a *Account) OverThresholdFor(model string, frac float64) bool {
 // OverThresholdForWindow reports whether one specific window (by name) is
 // at/above frac, regardless of which model it governs. Used to surface a
 // named family's status in the dashboard/CLI (e.g. "fable") without
-// widening it into the general OverThreshold bit (#24 decision 3).
+// widening it into the general OverThreshold bit (#24 decision 3). A window
+// past its reset reads false here too (issue #135), so fableSpent clears on
+// its own.
 func (a *Account) OverThresholdForWindow(name string, frac float64) bool {
+	return a.overThresholdForWindowAt(name, frac, time.Now())
+}
+
+// overThresholdForWindowAt is OverThresholdForWindow against an explicit
+// clock, for tests. Takes a.mu itself.
+func (a *Account) overThresholdForWindowAt(name string, frac float64, now time.Time) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, w := range a.windows {
-		if w.Name == name && w.Limit > 0 && w.Used/w.Limit >= frac {
+		if w.Name == name && w.currentAt(now) && w.Limit > 0 && w.Used/w.Limit >= frac {
 			return true
 		}
 	}

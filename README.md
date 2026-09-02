@@ -749,6 +749,41 @@ traffic), and a separate `fableSpent` flag names the fable bucket
 specifically, so an account can show as healthy and fable-spent at once
 without the two meanings colliding.
 
+**A spent reading expires at its own reset.** A window is only evidence until
+the moment the provider said it would refill; after that spillway has a
+number and no way to know whether it is still true. For the account-wide
+windows this hardly matters — the next request on the account re-measures
+them — but a spent `7d-fable` reading has no such path out: it only arrives
+on a fable response, and being spent is exactly what stops fable being routed
+there (issue #135). Until the reset it deprioritises as described above.
+Once the reset passes the reading stops counting — for selection, for
+`overThreshold` and `fableSpent`, and for the "would this bill" check that
+keeps an overage-capable account out of the free tier — and the account is
+tried again on the ordinary rules; whatever headers come back replace the
+stale figure. The same applies to the row a fable-only 429 forges into the
+account's windows, which otherwise outlived the rejection it recorded. A
+reading with no reset at all stays spent: that is the rule the idle probe
+uses (never spend uninvited), and the opposite of what startup seeding does
+with such a row — the two agree on failing toward the side that costs
+nothing; the cost just sits on opposite sides.
+
+The provider's reset header can also lag the refill it announces. Measured
+live: an account's `7d` fell from 0.89 to 0.0 while its reported reset stayed
+put, thirty-one hours ahead — and its `7d-fable`, carrying the very same
+reset, sat at 1.0 for those thirty-one hours because nothing routed fable to
+it to find out otherwise. So a turnover observed on one window (a reading
+that has fallen to near zero from a materially higher one, which within a
+cycle can only mean the cycle ended) ends the cycle of every stored window
+that shared its reported reset and was not itself re-measured by the same
+response. No family knowledge is involved — the provider's own statement
+that two windows refill together is the only link — and no reset is guessed:
+the retired window's reset becomes the moment the turnover was seen.
+
+Expired windows still appear in `/api/accounts` (flagged `expired: true`),
+on the dashboard (a dash and "expired" in place of a level and a refill
+countdown) and in `spillway status`; the status line and the headroom
+history leave them out.
+
 **A confirmed 429 is stronger than "over threshold".** The above is all
 proactive — a *preference*, built from utilization headers, that still
 serves the request when nothing better exists. An actual quota-429 from
@@ -963,7 +998,11 @@ extra usage permitted, meant the next probe could itself be a charge. The
 daemon now seeds each account's last recorded reading from the request log on
 startup, provided it is still within its own reset window, so a restart shows
 last-known state immediately and only a genuinely never-seen account is
-probed unconditionally.
+probed unconditionally. The same rule now applies while running — a reading
+past its reset stops counting against the account (see "A spent reading
+expires at its own reset" above) — and the history sampler stops recording
+such a reading, so a restart never finds a stale spent row worth seeding in
+the first place.
 
 ### Settings
 
@@ -1208,7 +1247,9 @@ not supply one, and fails closed if it is required but missing.
   headroom-over-time chart with
   burn-rate projection, activity histogram, exact-figures table, spill events,
   request log
-- `GET /api/accounts` — state, quota windows, in-flight, last model served
+- `GET /api/accounts` — state, quota windows (each flagged `expired: true`
+  once its reset has passed with no fresh reading since), in-flight, last
+  model served
 - `GET /api/requests?limit=N` — recent requests
 - `GET /api/quota-history?hours=N` — headroom curves per account/window
 - `GET /api/activity?hours=N` — bucketed request counts
