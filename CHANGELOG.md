@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.19.2](https://github.com/coderage-labs/spillway/compare/v0.19.1...v0.19.2) (2026-09-02)
+
+
+### Fixes
+
+* record a window's real measurement time, not the sampler tick ([#138](https://github.com/coderage-labs/spillway/issues/138)) ([#149](https://github.com/coderage-labs/spillway/issues/149)) ([4967d4f](https://github.com/coderage-labs/spillway/commit/4967d4fe027f1216526382f5a53c5464267b4562))
+* refuse a pin the provider would bill, not just one spillway would ([#139](https://github.com/coderage-labs/spillway/issues/139)) ([#147](https://github.com/coderage-labs/spillway/issues/147)) ([dfc238b](https://github.com/coderage-labs/spillway/commit/dfc238be1893961874af70a1ba0a2bc8adf9a626))
+
 ## [0.19.1](https://github.com/coderage-labs/spillway/compare/v0.19.0...v0.19.1) (2026-09-02)
 
 
