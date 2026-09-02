@@ -30,6 +30,9 @@ const ACCOUNTS = [{
     { name: '5h', limit: 1, used: 0.20, resetAt: new Date(now + 7200e3).toISOString(), source: 'poll' },
     // Fully spent, refilling in two hours: the dry-tank countdown case.
     { name: '7d', limit: 1, used: 1, resetAt: new Date(now + 7200e3).toISOString(), source: 'poll' },
+    // Spent, but its reset passed an hour ago with nothing re-measuring it
+    // (issue #135): must read as unknown, never as 0% with "refills 0s".
+    { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now - 3600e3).toISOString(), source: 'headers', expired: true },
   ],
 }];
 const HISTORY = [{
@@ -215,6 +218,9 @@ eval(js);
 
   const ok = {
     'tank shows configured label': tanks.includes('work'),
+    // Issue #135: an expired window says so in the figures, and never
+    // fabricates a zero-second refill countdown.
+    'expired window says expired, not a countdown': figures.includes('expired') && !figures.includes('0s'),
     // Falls back to the domain, never the local part: both fixtures share
     // local part, so a local-part fallback would render them identically.
     'unlabelled tank falls back to domain': tanks.includes('example-two'),

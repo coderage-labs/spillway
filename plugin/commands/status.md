@@ -41,7 +41,10 @@ a status check, not a report.
 
 - **Can I work right now?** `state.usable`, and the headroom of the account
   that will serve next. `quotaWindows` carries `used`/`limit` per window —
-  report what is LEFT, matching the status line and dashboard.
+  report what is LEFT, matching the status line and dashboard. A window with
+  `expired: true` is a reading whose reset has passed with nothing
+  re-measuring it since: say "unknown", never "spent", and do not print its
+  percentage.
 - **Is anything wrong?** In descending order of importance:
   - `state.holding` — requests parked; say until when. This is why a session
     looks hung.

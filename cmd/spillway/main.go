@@ -361,6 +361,15 @@ func runServer(args []string) error {
 		for {
 			for _, a := range p.Accounts() {
 				for _, w := range a.QuotaWindows() {
+					// A reading past its reset is not current state (issue
+					// #135). Recording it would keep extending a flat spent
+					// line that SeedQuota discards on restart anyway — and,
+					// worse, keep its sample timestamp fresh, which is what
+					// let a 40-hour-old reading come back from every restart
+					// looking like it was taken a minute ago.
+					if w.Expired {
+						continue
+					}
 					if err := rl.RecordQuota(reqlog.Sample{
 						Ts: time.Now(), Account: a.Name, Window: w.Name,
 						Limit: w.Limit, Used: w.Used, ResetAt: w.ResetAt,
