@@ -1147,6 +1147,10 @@ not supply one, and fails closed if it is required but missing.
 - `GET /api/requests?limit=N` — recent requests
 - `GET /api/quota-history?hours=N` — headroom curves per account/window
 - `GET /api/activity?hours=N` — bucketed request counts
+- `GET /api/prefix-drift` — prompt-cache prefix instability: how often each
+  part of the request prefix changed between consecutive requests in a
+  session, and the cache-token volume that went with it (see "Prefix
+  instability" below)
 - `GET /api/events` — SSE stream of rotation/quota events
 - `POST /api/pin` `{"account":"…","force":false}` / `DELETE /api/pin` — pin
   selection to one account, or release it. `409` is a refusal `force` can
@@ -1184,6 +1188,42 @@ decode all just record zero, and never affect the response the client
 receives. The dashboard's "exact figures" table shows the resulting cache hit
 rate and cache-create/cache-read volume per account, beside burn/h and dry
 in.
+
+### Prefix instability
+
+Claude Code's prompt cache keys on a **byte-exact request prefix**. If the
+prefix shifts between turns — tools arriving in a different order, a system
+block changing, attachment blocks moving — the whole prefix is re-written at
+cache-create prices instead of read at cache-read prices, and that lands on
+your quota. Rewriting requests to stabilise it has been proposed (issue
+#111) on the strength of someone else's numbers; this is the measurement
+that says whether any of it is true of *your* traffic.
+
+**No request is mutated and no content is stored.** Per `POST /v1/messages`,
+spillway records eight more values alongside the usage counters: truncated
+SHA-256 hashes of the ordered tool-name list, the same list sorted, the
+tools array's raw bytes, the system block's raw bytes and the first
+message's content-block *type* sequence, plus the tool count, block count
+and prefix byte length. Hashes and integers only — no prompt text, no tool
+description, no tool input, no attachment path, nothing reconstructable.
+Parsing runs on the body spillway has already buffered for failover, and a
+body it cannot parse simply records empty fingerprints; it can never fail a
+request.
+
+The ordered/sorted pair is the point. Ordered changed while sorted held
+still means the tool *set* was identical and only its *order* jittered —
+the one thing deterministic tool sorting would fix. `GET /api/prefix-drift`
+reports, per kind of change and split by whether the account changed
+between the two requests (rotation cost versus in-session churn): how many
+consecutive-request pairs showed it, and the cache-create and cache-read
+volume that accompanied it. `none` is the control group — what a stable
+prefix costs anyway. `pairs_missing_usage` is the honesty column: responses
+in an encoding the usage sniffer cannot read (issue #126) record no token
+counts, and those pairs are counted separately rather than averaged in as
+zeros.
+
+Phase 2 — actually rewriting requests — is deliberately not built. §4
+permits four mutations and this adds none.
 
 The same database's `quota_samples` table — the headroom history behind the
 dashboard's chart and startup quota seeding — is pruned to the last **14

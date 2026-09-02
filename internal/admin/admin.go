@@ -285,6 +285,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleQuotaHistory(w, r)
 	case r.URL.Path == "/api/activity":
 		s.handleActivity(w, r)
+	case r.URL.Path == "/api/prefix-drift":
+		s.handlePrefixDrift(w, r)
 	case r.URL.Path == "/api/pin":
 		s.handlePin(w, r)
 	case r.URL.Path == "/api/settings":
@@ -602,6 +604,29 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, b)
+}
+
+// handlePrefixDrift serves issue #111 phase 1's measurement: how often each
+// part of the request prefix changed between consecutive requests in a
+// session, and what cache-creation volume went with it, split by whether
+// the account changed too. Read-only, same shape as every other diagnostic
+// endpoint here — no window parameter, because the requests table is not
+// pruned and the whole point is a body of evidence large enough to decide
+// whether #111's transforms are worth building.
+func (s *Server) handlePrefixDrift(w http.ResponseWriter, r *http.Request) {
+	if s.log == nil {
+		s.writeJSON(w, []reqlog.PrefixChange{})
+		return
+	}
+	out, err := s.log.PrefixDrift()
+	if err != nil {
+		http.Error(w, "read prefix drift", http.StatusInternalServerError)
+		return
+	}
+	if out == nil {
+		out = []reqlog.PrefixChange{}
+	}
+	s.writeJSON(w, out)
 }
 
 // handleSettings reads and writes the editable configuration subset.

@@ -105,12 +105,25 @@ func TestRedactionBySchema(t *testing.T) {
 	//
 	// Anything new must be justified the same way, which is the point of
 	// asserting the exact set.
+	// The eight prefix columns were added for issue #111 phase 1. They are
+	// derived from the REQUEST body, which makes them the second deliberate
+	// widening after #110's response counters, and they were allowed on the
+	// same terms: each is a truncated SHA-256 of a region or an integer
+	// counting things in it, and none of them can carry content. There is
+	// no column here that holds prompt text, a tool description, a tool
+	// input or an attachment path, because there is no column here that
+	// holds a value the request could have chosen the bytes of. The
+	// assertion below that every hash column reads back as hex is what
+	// stops that being merely an intention.
 	want := map[string]bool{
 		"ts": true, "account": true, "path": true, "status": true,
 		"duration_ms": true, "bytes": true, "event": true,
 		"model_asked": true, "model_served": true, "user_agent": true,
 		"session_hash": true, "input_tokens": true, "output_tokens": true,
 		"cache_creation_input_tokens": true, "cache_read_input_tokens": true,
+		"tool_count": true, "tools_order_hash": true, "tools_sorted_hash": true,
+		"tools_raw_hash": true, "system_hash": true, "first_msg_shape_hash": true,
+		"first_msg_blocks": true, "prefix_bytes": true,
 	}
 	if len(cols) != len(want) {
 		t.Errorf("columns = %v", cols)

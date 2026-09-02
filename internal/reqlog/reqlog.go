@@ -11,6 +11,15 @@
 // fields by construction (its target struct has no other fields to decode
 // into), and TestRedactionBySchema below, which pins the exact column set
 // so a future widening has to be just as deliberate as this one was.
+//
+// Issue #111 phase 1 added eight more columns, and they are not an
+// exception to the rule above — they are hashes and counts describing the
+// SHAPE of the request prefix (how many tools, in what order, how big),
+// derived from the request body but containing none of it. Truncated
+// SHA-256 of a region, or an integer counting things in it. No prompt text,
+// no tool description, no tool input, no attachment path, nothing
+// reconstructable. See internal/proxy/prefixfp.go for the computation and
+// prefixdrift.go here for the query they exist to make possible.
 package reqlog
 
 import (
@@ -86,6 +95,40 @@ type Entry struct {
 	OutputTokens             int64 `json:"output_tokens,omitempty"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens,omitempty"`
+
+	// Prefix fingerprints (issue #111, phase 1). Structural hashes and
+	// counts describing the REQUEST prefix — the region Anthropic's prompt
+	// cache keys on byte-exactly — so a query can ask which part of the
+	// prefix had changed when CacheCreationInputTokens spiked. Computed by
+	// internal/proxy.fingerprintPrefix from the body the proxy has already
+	// buffered for failover; empty/zero whenever the body was over the
+	// buffering cap, absent, or not parseable.
+	//
+	// These are hashes and counts ONLY. No prompt text, no tool
+	// description, no tool input, no attachment path — see the redaction
+	// note in this package's doc comment and TestRedactionBySchema.
+	//
+	// ToolsOrderHash vs ToolsSortedHash is the pair that matters: ordered
+	// changed while sorted held still means the tool SET was identical and
+	// only its ORDER jittered, which is the single instability #111's
+	// proposed tool sorting would actually fix. Nothing recorded before
+	// this could tell that apart from the tool set genuinely changing.
+	//
+	// The account this request was routed to — the other half of #111's
+	// "is the cache per account" question — needs no new column: it is the
+	// existing Account field above, which PrefixDrift joins against.
+	ToolCount         int    `json:"tool_count,omitempty"`
+	ToolsOrderHash    string `json:"tools_order_hash,omitempty"`
+	ToolsSortedHash   string `json:"tools_sorted_hash,omitempty"`
+	ToolsRawHash      string `json:"tools_raw_hash,omitempty"`
+	SystemHash        string `json:"system_hash,omitempty"`
+	FirstMsgShapeHash string `json:"first_msg_shape_hash,omitempty"`
+	FirstMsgBlocks    int    `json:"first_msg_blocks,omitempty"`
+	// PrefixBytes is the combined byte length of the system block, the
+	// tools array and messages[0] — a size for the region the hashes above
+	// cover, so a change can be read against how much prefix there was to
+	// re-write.
+	PrefixBytes int64 `json:"prefix_bytes,omitempty"`
 }
 
 // Log is an open request-log database.
@@ -112,6 +155,17 @@ var requestColumns = []migrationColumn{
 	{"output_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"cache_creation_input_tokens", "INTEGER NOT NULL DEFAULT 0"},
 	{"cache_read_input_tokens", "INTEGER NOT NULL DEFAULT 0"},
+	// Issue #111 phase 1: structural fingerprints of the request prefix.
+	// Hashes and counts only — see Entry's doc for what each one is and
+	// TestRedactionBySchema for why each was allowed.
+	{"tool_count", "INTEGER NOT NULL DEFAULT 0"},
+	{"tools_order_hash", "TEXT NOT NULL DEFAULT ''"},
+	{"tools_sorted_hash", "TEXT NOT NULL DEFAULT ''"},
+	{"tools_raw_hash", "TEXT NOT NULL DEFAULT ''"},
+	{"system_hash", "TEXT NOT NULL DEFAULT ''"},
+	{"first_msg_shape_hash", "TEXT NOT NULL DEFAULT ''"},
+	{"first_msg_blocks", "INTEGER NOT NULL DEFAULT 0"},
+	{"prefix_bytes", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // Open opens (creating if needed) the log at path with 0600 perms and WAL
@@ -170,11 +224,15 @@ func (l *Log) Record(e Entry) error {
 	}
 	_, err := l.db.Exec(`INSERT INTO requests
 		(ts, account, path, status, duration_ms, bytes, event, model_asked, model_served, user_agent,
-		 session_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 session_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+		 tool_count, tools_order_hash, tools_sorted_hash, tools_raw_hash, system_hash,
+		 first_msg_shape_hash, first_msg_blocks, prefix_bytes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.Ts.UnixMilli(), e.Account, e.Path, e.Status, e.DurationMs, e.Bytes, e.Event,
 		e.ModelAsked, e.ModelServed, e.UserAgent,
-		e.SessionHash, e.InputTokens, e.OutputTokens, e.CacheCreationInputTokens, e.CacheReadInputTokens)
+		e.SessionHash, e.InputTokens, e.OutputTokens, e.CacheCreationInputTokens, e.CacheReadInputTokens,
+		e.ToolCount, e.ToolsOrderHash, e.ToolsSortedHash, e.ToolsRawHash, e.SystemHash,
+		e.FirstMsgShapeHash, e.FirstMsgBlocks, e.PrefixBytes)
 	return err
 }
 
@@ -185,7 +243,9 @@ func (l *Log) Recent(limit int) ([]Entry, error) {
 	}
 	rows, err := l.db.Query(`SELECT ts, account, path, status, duration_ms, bytes, event,
 		model_asked, model_served, user_agent,
-		session_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+		session_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+		tool_count, tools_order_hash, tools_sorted_hash, tools_raw_hash, system_hash,
+		first_msg_shape_hash, first_msg_blocks, prefix_bytes
 		FROM requests ORDER BY ts DESC, rowid DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -197,7 +257,9 @@ func (l *Log) Recent(limit int) ([]Entry, error) {
 		var ts int64
 		if err := rows.Scan(&ts, &e.Account, &e.Path, &e.Status, &e.DurationMs, &e.Bytes, &e.Event,
 			&e.ModelAsked, &e.ModelServed, &e.UserAgent,
-			&e.SessionHash, &e.InputTokens, &e.OutputTokens, &e.CacheCreationInputTokens, &e.CacheReadInputTokens); err != nil {
+			&e.SessionHash, &e.InputTokens, &e.OutputTokens, &e.CacheCreationInputTokens, &e.CacheReadInputTokens,
+			&e.ToolCount, &e.ToolsOrderHash, &e.ToolsSortedHash, &e.ToolsRawHash, &e.SystemHash,
+			&e.FirstMsgShapeHash, &e.FirstMsgBlocks, &e.PrefixBytes); err != nil {
 			return nil, err
 		}
 		e.Ts = time.UnixMilli(ts)
