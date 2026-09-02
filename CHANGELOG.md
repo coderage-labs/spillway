@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.19.1](https://github.com/coderage-labs/spillway/compare/v0.19.0...v0.19.1) (2026-09-02)
+
+
+### Fixes
+
+* clamp negative headroom in spillway status ([#112](https://github.com/coderage-labs/spillway/issues/112)) ([#145](https://github.com/coderage-labs/spillway/issues/145)) ([1910bf0](https://github.com/coderage-labs/spillway/commit/1910bf06523dcd6c97b6bd369581f7d74379d3e5))
+* expire a spent quota window at its own reset instead of trusting it forever ([#137](https://github.com/coderage-labs/spillway/issues/137)) ([709d77e](https://github.com/coderage-labs/spillway/commit/709d77ecc12302df273778cb5dd18e407cd1eee0))
+* stop a cancelled client request rotating through the account pool ([#142](https://github.com/coderage-labs/spillway/issues/142)) ([4108454](https://github.com/coderage-labs/spillway/commit/4108454d390bd8004f225ab71e6c690b60155cda))
+
 ## [0.19.0](https://github.com/coderage-labs/spillway/compare/v0.18.0...v0.19.0) (2026-09-02)
 
 
