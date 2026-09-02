@@ -86,7 +86,7 @@ func runStatus(jsonOut bool) error {
 				by[w.Name] = "expired"
 				continue
 			}
-			cell := fmt.Sprintf("%d%%", int((1-w.Used/w.Limit)*100+0.5))
+			cell := fmt.Sprintf("%d%%", headroomPct(w.Used, w.Limit))
 			if !w.ResetAt.IsZero() {
 				cell += " · " + compactDur(time.Until(w.ResetAt))
 			}
@@ -126,4 +126,32 @@ func statusJSON(api *adminAPI) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+// headroomPct renders a window's remaining headroom as a whole percentage,
+// clamped to [0, 100] (issue #112).
+//
+// Anthropic reports utilization above 1.0 once an allowance is overshot, and
+// the parse in internal/provider/claude.go deliberately keeps that raw value:
+// how far past an allowance an account went is real signal. But "-8% left" is
+// not a quantity a reader can act on — 0% is the truth it is trying to
+// express — so the clamp belongs here, at the render, and nowhere upstream.
+//
+// The dashboard (headroom() in internal/admin/static/index.html) and the
+// status line (slWindow.headroom) already clamp. This is the third surface
+// derived from the same figure, and the reason it is a function rather than
+// an inline expression is that two of three surfaces agreeing looked, from
+// the outside, like the CLI reporting different data.
+func headroomPct(used, limit float64) int {
+	if limit <= 0 {
+		return 0
+	}
+	h := 1 - used/limit
+	if h < 0 {
+		h = 0
+	}
+	if h > 1 {
+		h = 1
+	}
+	return int(h*100 + 0.5)
 }
