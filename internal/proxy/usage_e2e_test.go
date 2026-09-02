@@ -70,10 +70,16 @@ func rawClient() *http.Client {
 // was doing its own unrequested gzip negotiation and transparently
 // unwrapping a stream that, in the cancellation test, never finishes.
 // Anthropic's real traffic never hits this (issue #121's own measurement
-// shows Content-Encoding: gzip surviving all the way to the client), which
-// only makes sense if the real Claude Code CLI sends its own explicit
-// Accept-Encoding — this header is standing in for that.
-func setExplicitAcceptEncoding(r *http.Request) { r.Header.Set("Accept-Encoding", "gzip") }
+// shows Content-Encoding: gzip surviving all the way to the client, and
+// #126's shows Content-Encoding: br doing the same), which only makes
+// sense if the real Claude Code CLI sends its own explicit
+// Accept-Encoding — this header is standing in for that, and lists both
+// codecs because that is what produces a br response upstream: spillway
+// forwards the client's Accept-Encoding verbatim (buildRequest clones the
+// inbound headers; Accept-Encoding is neither hop-by-hop nor a permitted
+// mutation), so the response encoding is always the client's own choice,
+// never spillway's.
+func setExplicitAcceptEncoding(r *http.Request) { r.Header.Set("Accept-Encoding", "gzip, br") }
 
 // postMessagesRaw is postMessages (failover_test.go), but via rawClient and
 // with an explicit Accept-Encoding — see rawClient and
@@ -126,11 +132,13 @@ func newUsageTestHandler(t *testing.T, upstreamURL string) (h *Handler, rl *reql
 //
 // Table-driven over Content-Encoding rather than a parallel test file
 // (issue #121 asked for this test to be extended, not duplicated): "plain"
-// is #110's original claim, unencoded; "gzip" is the same claim against the
-// bytes actually observed live from Anthropic (issue #121's own measurement
-// — every real response carries Content-Encoding: gzip), where the wire
-// bytes the client receives are the COMPRESSED ones and must stay that way
-// even though usage is now read from their decompressed content.
+// is #110's original claim, unencoded; "gzip" and "br" are the same claim
+// against the two encodings actually observed live from Anthropic (#121 and
+// #126 respectively), where the wire bytes the client receives are the
+// COMPRESSED ones and must stay that way even though usage is now read
+// from their decompressed content. The comparison below is a raw
+// bytes.Equal against the upstream's wire bytes, deliberately not a
+// decode-then-compare.
 func TestStreamedUsageRecordedByteIdenticalAndUndelayed(t *testing.T) {
 	plain := sseUsageBodyWithMarker()
 
@@ -141,6 +149,7 @@ func TestStreamedUsageRecordedByteIdenticalAndUndelayed(t *testing.T) {
 	}{
 		{name: "plain", enc: "", wire: []byte(plain)},
 		{name: "gzip", enc: "gzip", wire: gzipBytes(t, plain)},
+		{name: "br", enc: "br", wire: brotliBytes(t, plain)},
 	}
 
 	for _, tc := range cases {
@@ -203,6 +212,63 @@ func TestStreamedUsageRecordedByteIdenticalAndUndelayed(t *testing.T) {
 				t.Errorf("usage counters = %+v, want %+v", e, want)
 			}
 		})
+	}
+}
+
+// TestAcceptEncodingForwardedVerbatim pins the mechanism behind issue #126
+// and forecloses the wrong fix for it.
+//
+// Brotli arrives because the CLIENT asked for it: spillway clones the
+// inbound headers (buildRequest) and Accept-Encoding is neither hop-by-hop
+// nor one of the four permitted request mutations (README, "a proxy, never
+// a client"), so whatever the client negotiated is what upstream sees and
+// what comes back. That makes narrowing Accept-Encoding — dropping `br` so
+// the sniffer only ever meets codecs it knows — a request mutation outside
+// the permitted set, changing what the client asked for to suit spillway's
+// telemetry. This test fails if anyone ever does it, including as an
+// incidental side effect of some other header handling.
+func TestAcceptEncodingForwardedVerbatim(t *testing.T) {
+	// Deliberately awkward: multiple codecs, a q-value, and an explicit
+	// refusal of identity. Nothing about it may be normalised, reordered
+	// or trimmed.
+	const sent = "br;q=1.0, zstd;q=0.9, gzip;q=0.5, identity;q=0"
+
+	got := make(chan []string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case got <- r.Header.Values("Accept-Encoding"):
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	h, _, _ := newUsageTestHandler(t, upstream.URL)
+	front := httptest.NewServer(h)
+	defer front.Close()
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/v1/messages", strings.NewReader(testBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", sent)
+	resp, err := rawClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	select {
+	case vals := <-got:
+		if len(vals) != 1 || vals[0] != sent {
+			t.Errorf("upstream saw Accept-Encoding %q, want exactly [%q] — spillway rewrote the client's "+
+				"content negotiation, which is a request mutation outside the permitted set", vals, sent)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream never received the request")
 	}
 }
 
@@ -288,114 +354,129 @@ func TestTruncatedStreamRecordsZeroAndDoesNotFailRequest(t *testing.T) {
 	}
 }
 
-// TestTruncatedGzipRecordsZeroAndDoesNotFailRequest: issue #121's gzip path
-// through the same scenario as TestTruncatedStreamRecordsZeroAndDoesNotFailRequest
-// above — the connection dies with only half of a real gzip member ever
+// TestTruncatedEncodedStreamRecordsZeroAndDoesNotFailRequest: the
+// compressed paths (gzip, issue #121; br, issue #126) through the same
+// scenario as TestTruncatedStreamRecordsZeroAndDoesNotFailRequest above —
+// the connection dies with only half of a real compressed stream ever
 // sent, no trailer, no clean end. The client still gets exactly the bytes
 // that were flushed before the cut (untouched — decoding happens on the
 // sniffer's own copy, never the client's), and the log shows zeros rather
 // than a crash or a stale value.
-func TestTruncatedGzipRecordsZeroAndDoesNotFailRequest(t *testing.T) {
-	full := gzipBytes(t, sseUsageBodyWithMarker())
-	half := full[:len(full)/2]
+//
+// Driven off decodableEncodings itself rather than a hand-written list, so
+// a codec added to the production table is carried through this scenario
+// automatically instead of by whoever remembers to.
+func TestTruncatedEncodedStreamRecordsZeroAndDoesNotFailRequest(t *testing.T) {
+	for _, enc := range decodableEncodingNames() {
+		t.Run(enc, func(t *testing.T) {
+			full := encodeFor(t, enc, sseUsageBodyWithMarker())
+			half := full[:len(full)/2]
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Content-Encoding", "gzip")
-		w.WriteHeader(http.StatusOK)
-		w.Write(half)
-		if fl, ok := w.(http.Flusher); ok {
-			fl.Flush()
-		}
-		hj, ok := w.(http.Hijacker)
-		if !ok {
-			t.Error("test upstream ResponseWriter does not support Hijacker")
-			return
-		}
-		conn, _, err := hj.Hijack()
-		if err != nil {
-			t.Errorf("Hijack: %v", err)
-			return
-		}
-		conn.Close() // abrupt: no gzip trailer, no clean end
-	}))
-	defer upstream.Close()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Content-Encoding", enc)
+				w.WriteHeader(http.StatusOK)
+				w.Write(half)
+				if fl, ok := w.(http.Flusher); ok {
+					fl.Flush()
+				}
+				hj, ok := w.(http.Hijacker)
+				if !ok {
+					t.Error("test upstream ResponseWriter does not support Hijacker")
+					return
+				}
+				conn, _, err := hj.Hijack()
+				if err != nil {
+					t.Errorf("Hijack: %v", err)
+					return
+				}
+				conn.Close() // abrupt: no trailer, no clean end
+			}))
+			defer upstream.Close()
 
-	h, rl, _ := newUsageTestHandler(t, upstream.URL)
-	front := httptest.NewServer(h)
-	defer front.Close()
+			h, rl, _ := newUsageTestHandler(t, upstream.URL)
+			front := httptest.NewServer(h)
+			defer front.Close()
 
-	resp := postMessagesRaw(t, front.URL, `{"model":"claude","max_tokens":1}`)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200 (headers were sent before the cut)", resp.StatusCode)
-	}
-	got, _ := io.ReadAll(resp.Body) // a read error is expected — the connection was cut
-	if !bytes.Equal(got, half) {
-		t.Errorf("client bytes differ from what was flushed before the cut:\n got=%d bytes\nwant=%d bytes", len(got), len(half))
-	}
+			resp := postMessagesRaw(t, front.URL, `{"model":"claude","max_tokens":1}`)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status = %d, want 200 (headers were sent before the cut)", resp.StatusCode)
+			}
+			got, _ := io.ReadAll(resp.Body) // a read error is expected — the connection was cut
+			if !bytes.Equal(got, half) {
+				t.Errorf("client bytes differ from what was flushed before the cut:\n got=%d bytes\nwant=%d bytes", len(got), len(half))
+			}
 
-	e := waitForEntry(t, rl)
-	if e.InputTokens != 0 || e.OutputTokens != 0 || e.CacheCreationInputTokens != 0 || e.CacheReadInputTokens != 0 {
-		t.Errorf("usage counters = %+v, want all zero for a gzip member truncated mid-stream", e)
+			e := waitForEntry(t, rl)
+			if e.InputTokens != 0 || e.OutputTokens != 0 || e.CacheCreationInputTokens != 0 || e.CacheReadInputTokens != 0 {
+				t.Errorf("usage counters = %+v, want all zero for a %s stream truncated mid-stream", e, enc)
+			}
+		})
 	}
 }
 
-// TestCancelledGzipRequestTerminatesDecoder: the client cancels its request
-// context mid-stream, before the gzip member ever completes — a cancelled
-// request is the other termination path issue #121 calls out alongside an
-// early-ended stream. This must not hang the request handler waiting on
-// the decode goroutine: waitForEntry's deadline below is the actual proof —
-// a real deadlock (drainGzip stuck reading the pipe, or the handler stuck
-// in usage()) fails this test by timing out waiting for a log entry that
-// never arrives, not by asserting a wrong value.
-func TestCancelledGzipRequestTerminatesDecoder(t *testing.T) {
-	full := gzipBytes(t, sseUsageBodyWithMarker())
-	half := len(full) / 2
+// TestCancelledEncodedRequestTerminatesDecoder: the client cancels its
+// request context mid-stream, before the compressed stream ever completes
+// — a cancelled request is the other termination path issue #121 calls out
+// alongside an early-ended stream, and it applies to every codec in
+// decodableEncodings, hence the loop. This must not hang the request
+// handler waiting on the decode goroutine: waitForEntry's deadline below is
+// the actual proof — a real deadlock (drainDecoded stuck reading the pipe,
+// or the handler stuck in usage()) fails this test by timing out waiting
+// for a log entry that never arrives, not by asserting a wrong value.
+func TestCancelledEncodedRequestTerminatesDecoder(t *testing.T) {
+	for _, enc := range decodableEncodingNames() {
+		t.Run(enc, func(t *testing.T) {
+			full := encodeFor(t, enc, sseUsageBodyWithMarker())
+			half := len(full) / 2
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Content-Encoding", "gzip")
-		w.WriteHeader(http.StatusOK)
-		w.Write(full[:half])
-		if fl, ok := w.(http.Flusher); ok {
-			fl.Flush()
-		}
-		<-r.Context().Done() // released once the cancelled client's connection tears down
-	}))
-	defer upstream.Close()
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Content-Encoding", enc)
+				w.WriteHeader(http.StatusOK)
+				w.Write(full[:half])
+				if fl, ok := w.(http.Flusher); ok {
+					fl.Flush()
+				}
+				<-r.Context().Done() // released once the cancelled client's connection tears down
+			}))
+			defer upstream.Close()
 
-	h, rl, _ := newUsageTestHandler(t, upstream.URL)
-	front := httptest.NewServer(h)
-	defer front.Close()
+			h, rl, _ := newUsageTestHandler(t, upstream.URL)
+			front := httptest.NewServer(h)
+			defer front.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, front.URL+"/v1/messages", strings.NewReader(testBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// rawClient, not front.Client(), and an explicit Accept-Encoding: a
-	// client (or, via buildRequest's header clone, spillway's OWN outbound
-	// leg to upstream) that negotiates and transparently undoes gzip on its
-	// own would try to decompress this deliberately never-ending stream
-	// itself and block forever doing it — see setExplicitAcceptEncoding.
-	setExplicitAcceptEncoding(req)
-	resp, err := rawClient().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	buf := make([]byte, half)
-	if _, err := io.ReadFull(resp.Body, buf); err != nil {
-		t.Fatalf("reading first chunk: %v", err)
-	}
-	cancel()
-	resp.Body.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, front.URL+"/v1/messages", strings.NewReader(testBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			// rawClient, not front.Client(), and an explicit
+			// Accept-Encoding: a client (or, via buildRequest's header
+			// clone, spillway's OWN outbound leg to upstream) that
+			// negotiates and transparently undoes gzip on its own would try
+			// to decompress this deliberately never-ending stream itself
+			// and block forever doing it — see setExplicitAcceptEncoding.
+			setExplicitAcceptEncoding(req)
+			resp, err := rawClient().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, half)
+			if _, err := io.ReadFull(resp.Body, buf); err != nil {
+				t.Fatalf("reading first chunk: %v", err)
+			}
+			cancel()
+			resp.Body.Close()
 
-	e := waitForEntry(t, rl)
-	if e.InputTokens != 0 || e.OutputTokens != 0 || e.CacheCreationInputTokens != 0 || e.CacheReadInputTokens != 0 {
-		t.Errorf("usage counters = %+v, want all zero for a cancelled, incomplete gzip stream", e)
+			e := waitForEntry(t, rl)
+			if e.InputTokens != 0 || e.OutputTokens != 0 || e.CacheCreationInputTokens != 0 || e.CacheReadInputTokens != 0 {
+				t.Errorf("usage counters = %+v, want all zero for a cancelled, incomplete %s stream", e, enc)
+			}
+		})
 	}
 }
 

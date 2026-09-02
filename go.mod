@@ -3,6 +3,7 @@ module github.com/coderage-labs/spillway
 go 1.25.13
 
 require (
+	github.com/andybalholm/brotli v1.2.3
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/net v0.58.0
 	gopkg.in/yaml.v3 v3.0.1
