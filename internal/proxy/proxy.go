@@ -373,6 +373,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 			OutputTokens:             oc.usage.OutputTokens,
 			CacheCreationInputTokens: oc.usage.CacheCreationInputTokens,
 			CacheReadInputTokens:     oc.usage.CacheReadInputTokens,
+
+			// Issue #111 phase 1: structural fingerprints of the request
+			// prefix — hashes and counts, no content. See prefixfp.go.
+			ToolCount:         oc.prefix.ToolCount,
+			ToolsOrderHash:    oc.prefix.ToolsOrderHash,
+			ToolsSortedHash:   oc.prefix.ToolsSortedHash,
+			ToolsRawHash:      oc.prefix.ToolsRawHash,
+			SystemHash:        oc.prefix.SystemHash,
+			FirstMsgShapeHash: oc.prefix.FirstMsgShapeHash,
+			FirstMsgBlocks:    oc.prefix.FirstMsgBlocks,
+			PrefixBytes:       oc.prefix.PrefixBytes,
 		})
 	}
 }
@@ -398,6 +409,14 @@ type outcome struct {
 	// selection entirely (isUpgrade/isIdentityPath/isNonQuotaPath), since
 	// no session key is ever computed for them.
 	sessionHash string
+	// prefix is the structural fingerprint of the request PREFIX (issue
+	// #111 phase 1): hashes and counts only, never content. Zero unless
+	// the body was buffered AND a request log is wired up — see route.
+	// Set through finish() only, so the outcomes that never reached an
+	// upstream at all (pool exhausted, cross-provider incompatible) record
+	// no fingerprint: PrefixDrift compares requests that were served,
+	// which is the only place a prompt cache was ever consulted.
+	prefix prefixFingerprint
 }
 
 // route runs the request through selection, injection and failover, writing
@@ -486,6 +505,15 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		modelAsked = modelOf(body)
 	}
 	modelServed := modelAsked
+	// Prefix fingerprint (issue #111 phase 1), computed once from the SAME
+	// buffered bytes — never a second read, never a copy. Gated on a
+	// request log actually being wired up, so an installation that records
+	// nothing pays nothing for this. Pure measurement: nothing below reads
+	// prefix, and nothing in buildRequest is aware it exists.
+	var prefix prefixFingerprint
+	if buffered && h.hooks.Log != nil {
+		prefix = fingerprintPrefix(body)
+	}
 	// usage is set only by the writeResponse call site below, on the one
 	// branch that actually streams a genuine response to the client.
 	var usage usageTotals
@@ -518,7 +546,7 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		}
 		return outcome{account: account, event: event,
 			modelAsked: modelAsked, modelServed: modelServed,
-			usage: usage, sessionHash: sessionHash}
+			usage: usage, sessionHash: sessionHash, prefix: prefix}
 	}
 	rateTries := 0
 	for {
