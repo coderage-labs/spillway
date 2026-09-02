@@ -102,6 +102,15 @@ type Hooks struct {
 // SetHooks wires observability sinks. nil-safe to leave unset (tests).
 func (h *Handler) SetHooks(hooks Hooks) { h.hooks = hooks }
 
+// SetNotifier swaps NewHandler's default local-only Notifier for one with
+// channels configured (issue #101). Optional — a nil n is ignored, so a
+// caller that never invokes this keeps today's exact local-only behaviour.
+func (h *Handler) SetNotifier(n *notify.Notifier) {
+	if n != nil {
+		h.notifier = n
+	}
+}
+
 // NotifyCARegenerated tells this Handler that mitm.EnsureCA just replaced
 // the MITM CA in place — mitm.CA.Regenerated was true, never on an ordinary
 // restart with an unchanged host set (#70) or a first-ever install. Call
@@ -116,7 +125,7 @@ func (h *Handler) SetHooks(hooks Hooks) { h.hooks = hooks }
 func (h *Handler) NotifyCARegenerated() {
 	h.mitmFails.activate()
 	if h.notifier != nil {
-		h.notifier.Notify("mitm-ca-regenerated", "spillway: MITM certificate replaced",
+		h.notifier.NotifyLocal("mitm-ca-regenerated", "spillway: MITM certificate replaced",
 			"Any other Claude Code session already running through spillway will fail every "+
 				"request from now on — restart it.")
 	}
@@ -137,6 +146,22 @@ func (h *Handler) publish(e events.Event) {
 	if h.hooks.Events != nil {
 		h.hooks.Events.Publish(e)
 	}
+}
+
+// exhaustedMessage builds the actionable body for the "exhausted" notify
+// event: what happened and when it clears, never which account (issue #101
+// comment — a leaked ntfy topic must not be worth reading).
+func exhaustedMessage(p *pool.Pool) string {
+	reset, ok := p.EarliestReset()
+	if !ok {
+		return "All accounts exhausted"
+	}
+	wait := time.Until(reset).Round(time.Minute)
+	if wait < 0 {
+		wait = 0
+	}
+	return "All accounts exhausted, soonest reset " + reset.Local().Format("15:04") +
+		" (in " + wait.String() + ")"
 }
 
 // caIssuer mints per-host leaf certificates (mitm.CA; interface for tests).
@@ -548,6 +573,10 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 						modelAsked: modelAsked, modelServed: modelServed}
 				}
 				h.publish(events.Event{Type: reqlog.EventExhausted, Detail: "all accounts exhausted"})
+				if h.notifier != nil {
+					h.notifier.Notify(notify.EventExhausted, "pool-exhausted-all",
+						"spillway: all accounts exhausted", exhaustedMessage(h.pool))
+				}
 				writeJSON(w, http.StatusTooManyRequests,
 					`{"type":"error","error":{"type":"rate_limit_error","message":"spillway: all accounts exhausted"}}`)
 				return outcome{account: "(none available)", event: reqlog.EventExhausted,
@@ -566,7 +595,7 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 				h.publish(events.Event{Type: reqlog.EventOverage, Account: acct.Name,
 					Detail: "quota exhausted — serving on paid extra usage"})
 				if h.notifier != nil {
-					h.notifier.Notify("overage-"+acct.Name, "spillway: paying for extra usage",
+					h.notifier.NotifyLocal("overage-"+acct.Name, "spillway: paying for extra usage",
 						acct.Name+" is out of quota and is now billing for extra usage")
 				}
 			}
@@ -788,8 +817,12 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 				h.publish(events.Event{Type: reqlog.EventOverage, Account: name,
 					Detail: "extra usage refused: " + reason})
 				if h.notifier != nil {
-					h.notifier.Notify("overage-cap-"+name, "spillway: extra usage exhausted",
-						name+" has hit its extra usage limit ("+reason+")")
+					// Body deliberately names no account (issue #101 comment):
+					// an ntfy topic on the free tier has no access control, so
+					// a leaked topic must not be worth reading.
+					h.notifier.Notify(notify.EventOverageCap, "overage-cap-"+name,
+						"spillway: extra usage exhausted",
+						"Extra usage limit reached ("+reason+")")
 				}
 				onOverage = false
 			}

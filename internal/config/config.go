@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coderage-labs/spillway/internal/netaddr"
+	"github.com/coderage-labs/spillway/internal/notify"
 	"github.com/coderage-labs/spillway/internal/provider"
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,26 @@ type AccountConfig struct {
 	AccountUUID  string            `yaml:"accountUuid,omitempty"`
 	Upstream     string            `yaml:"upstream,omitempty"` // defaults per provider
 	ModelMap     map[string]string `yaml:"modelMap,omitempty"` // incoming model id → provider model id
+}
+
+// NotifyChannelConfig is one push-notification destination's metadata
+// (issue #101, §5: config holds metadata only). The credential — a webhook
+// URL, an ntfy topic, a Pushover token/user key — lives in the secret store
+// under notify.ChannelKey(Name), never here.
+type NotifyChannelConfig struct {
+	Name     string   `yaml:"name"`
+	Provider string   `yaml:"provider"`
+	Events   []string `yaml:"events,omitempty"`
+	// The fields below are never written by spillway itself — `spillway
+	// notify set` writes straight to the secret store. They exist on this
+	// struct only so a value someone hand-edits into the yaml is actually
+	// read (rather than silently ignored by yaml.Unmarshal) and can be
+	// caught and scrubbed by MigrateInlineSecrets, mirroring
+	// AccountConfig's AccessToken/RefreshToken above.
+	URL     string `yaml:"url,omitempty"`
+	Topic   string `yaml:"topic,omitempty"`
+	Token   string `yaml:"token,omitempty"`
+	UserKey string `yaml:"userKey,omitempty"`
 }
 
 // Config is the root of ~/.config/spillway.yaml.
@@ -143,6 +164,12 @@ type Config struct {
 	Log struct {
 		Level string `yaml:"level"`
 	} `yaml:"log"`
+	// Notify configures push-notification channels (issue #101). Off by
+	// default: no channels block means today's behaviour exactly — local
+	// desktop notifications only.
+	Notify struct {
+		Channels []NotifyChannelConfig `yaml:"channels,omitempty"`
+	} `yaml:"notify,omitempty"`
 }
 
 // DefaultProxyPort and DefaultProxyHost are the listener written on first
@@ -393,6 +420,41 @@ func (c *Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("log.level: %q must be debug, info, warn or error", c.Log.Level)
+	}
+	if err := validateNotifyChannels(c.Notify.Channels); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateNotifyChannels checks every channel's name, provider and events
+// (issue #101). A typo'd event name must fail config load loudly, naming
+// the valid set — silently never firing is the worst outcome for a feature
+// whose whole job is telling someone something is wrong.
+func validateNotifyChannels(channels []NotifyChannelConfig) error {
+	seen := map[string]bool{}
+	for i, ch := range channels {
+		where := fmt.Sprintf("notify.channels[%d]", i)
+		if ch.Name != "" {
+			where = fmt.Sprintf("notify.channels[%d] (%q)", i, ch.Name)
+		}
+		if ch.Name == "" {
+			return fmt.Errorf("%s: name must not be empty", where)
+		}
+		if seen[ch.Name] {
+			return fmt.Errorf("%s: duplicate channel name", where)
+		}
+		seen[ch.Name] = true
+		if !notify.ProviderKnown(ch.Provider) {
+			return fmt.Errorf("%s: provider %q must be one of %s", where, ch.Provider,
+				strings.Join(notify.KnownProviders(), ", "))
+		}
+		for _, e := range ch.Events {
+			if !notify.IsValidEvent(e) {
+				return fmt.Errorf("%s: event %q must be one of %s", where, e,
+					strings.Join(notify.ValidEvents(), ", "))
+			}
+		}
 	}
 	return nil
 }

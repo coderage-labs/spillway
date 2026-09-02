@@ -25,6 +25,8 @@ package proxy
 import (
 	"net/http"
 	"time"
+
+	"github.com/coderage-labs/spillway/internal/notify"
 )
 
 // wakeStagger bounds how long park delays after a capacity wake before
@@ -114,7 +116,7 @@ func (h *Handler) waitForReset(r *http.Request, deadline time.Time) bool {
 		// parked for possibly hours, and a log line does not reach someone
 		// who has walked away.
 		if h.notifier != nil {
-			h.notifier.Notify("pool-exhausted", "spillway: pool exhausted",
+			h.notifier.Notify(notify.EventHeld, "pool-held", "spillway: pool exhausted",
 				"Holding requests until "+reset.Local().Format("15:04")+
 					" ("+wait.Round(time.Minute).String()+")")
 		}

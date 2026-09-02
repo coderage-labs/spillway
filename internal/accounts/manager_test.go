@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coderage-labs/spillway/internal/notify"
 	"github.com/coderage-labs/spillway/internal/pool"
 	"github.com/coderage-labs/spillway/internal/secrets"
 
@@ -122,6 +124,70 @@ func TestRefreshDeadDisablesAccount(t *testing.T) {
 	}
 	if a.State() != pool.StateDisabled {
 		t.Errorf("state = %v, want disabled", a.State())
+	}
+}
+
+// Disabling an account (issue #101) must raise the "account-disabled"
+// event, and it must reach an actually-configured channel — this wires a
+// real webhook provider at an httptest server through the exported
+// notify.New/SetChannels API, the same path buildNotifier uses.
+func TestDisableNotifiesAccountDisabled(t *testing.T) {
+	type payload struct {
+		Event string `json:"event"`
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	received := make(chan payload, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p payload
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		received <- p
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := notify.New()
+	warnings := n.SetChannels(
+		[]notify.ChannelSpec{{Name: "test", Provider: "webhook", Events: []string{notify.EventAccountDisabled}}},
+		func(string) (notify.Destination, error) { return notify.Destination{URL: srv.URL}, nil },
+	)
+	if len(warnings) != 0 {
+		t.Fatalf("SetChannels warnings = %v, want none", warnings)
+	}
+
+	m := testManager(t, "http://unused", "", nil)
+	m.Notifier = n
+	// No refresh token and not a static key: refreshOne's "no refresh
+	// token, disabling" path.
+	a := pool.NewAccount("work", pool.SourceYAML, "old", "", expiringSoon(), "")
+
+	if err := m.EnsureFresh(context.Background(), a); err == nil {
+		t.Fatal("expected an error disabling an account with no refresh token")
+	}
+	if a.State() != pool.StateDisabled {
+		t.Fatalf("state = %v, want disabled", a.State())
+	}
+
+	select {
+	case p := <-received:
+		if p.Event != notify.EventAccountDisabled {
+			t.Errorf("event = %q, want %q", p.Event, notify.EventAccountDisabled)
+		}
+		if !strings.Contains(p.Body, "work") {
+			t.Errorf("body does not name the account: %q", p.Body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the account-disabled webhook")
+	}
+}
+
+// A Manager with no Notifier wired (the common case in every other test in
+// this file) must not panic when it disables an account.
+func TestDisableWithNoNotifierDoesNotPanic(t *testing.T) {
+	m := testManager(t, "http://unused", "", nil)
+	a := pool.NewAccount("work", pool.SourceYAML, "old", "", expiringSoon(), "")
+	if err := m.EnsureFresh(context.Background(), a); err == nil {
+		t.Fatal("expected an error disabling an account with no refresh token")
 	}
 }
 

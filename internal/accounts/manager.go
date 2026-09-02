@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coderage-labs/spillway/internal/config"
+	"github.com/coderage-labs/spillway/internal/notify"
 	"github.com/coderage-labs/spillway/internal/pool"
 	"github.com/coderage-labs/spillway/internal/provider"
 	"github.com/coderage-labs/spillway/internal/secrets"
@@ -31,6 +32,9 @@ type Manager struct {
 	Now        func() time.Time // testability; defaults to time.Now
 	// KimiAuthBase overrides the kimi token endpoint (tests; empty → default).
 	KimiAuthBase string
+	// Notifier raises the "account-disabled" event (issue #101) whenever
+	// this Manager disables an account below. nil-safe to leave unset.
+	Notifier *notify.Notifier
 
 	mu       sync.Mutex
 	inflight map[*pool.Account]*refreshCall
@@ -127,10 +131,12 @@ func (m *Manager) refreshOne(ctx context.Context, a *pool.Account) error {
 			a.Disable()
 			m.log().Error("static key rejected by upstream, account disabled — re-add the key (login/import)",
 				"account", a.Name)
+			m.notifyDisabled(a, "static key rejected; re-add the key")
 			return errors.New("account " + a.Name + ": static key rejected; re-add the key")
 		}
 		a.Disable()
 		m.log().Error("account has no refresh token, disabling", "account", a.Name)
+		m.notifyDisabled(a, "no refresh token")
 		return errors.New("account " + a.Name + ": no refresh token")
 	}
 
@@ -161,6 +167,7 @@ func (m *Manager) refreshOne(ctx context.Context, a *pool.Account) error {
 		a.Disable()
 		m.log().Error("refresh token rejected, account disabled — re-login required",
 			"account", a.Name)
+		m.notifyDisabled(a, "refresh token rejected — re-login required")
 		return err
 	}
 	if err != nil {
@@ -202,10 +209,26 @@ func (m *Manager) reloadKeychain(a *pool.Account) error {
 		a.Disable()
 		m.log().Error("keychain reload failed, account disabled — "+KeychainRemedy(a.Name),
 			"account", a.Name, "err", err)
+		m.notifyDisabled(a, "keychain reload failed — "+KeychainRemedy(a.Name))
 		return err
 	}
 	a.SetCredentials(o.AccessToken, o.RefreshToken, o.ExpiresAt)
 	m.log().Info("keychain credentials reloaded", "account", a.Name,
 		"expires", time.UnixMilli(o.ExpiresAt).UTC().Format(time.RFC3339))
 	return nil
+}
+
+// notifyDisabled raises the "account-disabled" event (issue #101). Named
+// with the account and why — unlike the ntfy/webhook message conventions
+// elsewhere in #101, an account's own label is not the kind of identity the
+// issue's "state and timing, not identity" rule is about (it names no
+// email, no subscription — just the label the user already gave it), and
+// without it the message can't be acted on at all.
+func (m *Manager) notifyDisabled(a *pool.Account, reason string) {
+	if m.Notifier == nil {
+		return
+	}
+	m.Notifier.Notify(notify.EventAccountDisabled, "account-disabled-"+a.Name,
+		"spillway: account disabled",
+		"Account "+a.Name+" disabled: "+reason)
 }

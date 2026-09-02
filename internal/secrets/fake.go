@@ -81,3 +81,11 @@ func (f *Fake) SetRaw(name string, v []byte) error {
 	f.raw[name] = v
 	return nil
 }
+
+// DeleteRaw implements Store.
+func (f *Fake) DeleteRaw(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.raw, name)
+	return nil
+}
