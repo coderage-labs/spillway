@@ -60,15 +60,30 @@ func notifyUsageErr() error {
 // must disable that one channel, never the daemon).
 func buildNotifier(cfg *config.Config, store secrets.Store) (*notify.Notifier, []string) {
 	n := notify.New()
-	if len(cfg.Notify.Channels) == 0 {
-		return n, nil
-	}
+	return n, setNotifyChannels(n, cfg, store)
+}
+
+// setNotifyChannels resolves cfg's channels onto an existing Notifier,
+// replacing whatever was there. Split out of buildNotifier for issue #84:
+// channels used to be read exactly once, at startup, so `spillway notify
+// set phone` wrote the config and the credential and then did nothing at
+// all until the daemon was restarted — the concrete case that motivated
+// watching the config file. Every reload path now goes through here.
+//
+// No channels calls SetChannels with an empty list rather than skipping it:
+// skipping was equivalent at startup (an unset channel list and an empty
+// one both mean "local desktop notification only"), but on a reload the
+// difference is whether removing the last channel actually stops it firing.
+//
+// Nothing secret passes through cfg: the config holds a channel's name,
+// provider and events (§5), and the credential comes from the secret store
+// via channelCredentialSource. The warnings returned name channels only.
+func setNotifyChannels(n *notify.Notifier, cfg *config.Config, store secrets.Store) []string {
 	specs := make([]notify.ChannelSpec, len(cfg.Notify.Channels))
 	for i, c := range cfg.Notify.Channels {
 		specs[i] = notify.ChannelSpec{Name: c.Name, Provider: c.Provider, Events: c.Events}
 	}
-	warnings := n.SetChannels(specs, channelCredentialSource(store))
-	return n, warnings
+	return n.SetChannels(specs, channelCredentialSource(store))
 }
 
 // channelCredentialSource adapts the secret store to notify.CredentialSource.
@@ -129,6 +144,11 @@ func runNotifySet(name string) error {
 		events = strings.Join(spec.Events, ",")
 	}
 	fmt.Printf("notify channel %q set (provider %s, events %s)\n", name, spec.Provider, events)
+	// Issue #84's motivating report: this wrote the config and the
+	// credential and then stopped, so the channel did nothing at all until
+	// the daemon was restarted — for a feature whose whole job is reaching
+	// someone who is not at the machine.
+	fmt.Println(liveApplyConfigEdit())
 	fmt.Println("run `spillway notify test", name, "` to send a real notification through it")
 	return nil
 }
@@ -342,5 +362,8 @@ func runNotifyRemove(name string) error {
 		return err
 	}
 	fmt.Println("removed:", name)
+	// Symmetrical with `notify set`: a channel removed from the config must
+	// stop firing on the running daemon, not at the next restart.
+	fmt.Println(liveApplyConfigEdit())
 	return nil
 }

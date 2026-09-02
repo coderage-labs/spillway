@@ -15,12 +15,23 @@
 // read from *somewhere* before anything could be signed.
 //
 // The fix is to notice that on-demand signing was never actually needed.
-// The full set of hosts spillway will ever terminate CONNECT for —
-// internal/proxy.Handler's allowedHosts — is known before the first
-// request reaches it: the global upstream plus every configured account's
-// upstream, fixed for the life of the process, because nothing adds an
-// account to a running pool (a config change needs a restart to take
-// effect — the same reasoning issue #46 relies on for its restart notice).
+// The set of hosts this CA can terminate CONNECT for is fixed at the moment
+// it is generated, and is known then: the global upstream, every registered
+// provider's default upstream (#88), and every configured account's
+// upstream override.
+//
+// Accounts DO now come and go on a running pool — `spillway login` adds one
+// live (#83/#87) and issue #84's config watcher applies an externally
+// edited accounts list — so the leaf set being fixed is a property of this
+// CA generation, not of the process. That is deliberate and enforced rather
+// than assumed: admin.UpstreamRestartRequired is the single rule both live
+// paths ask, and an account whose upstream host has no pre-minted leaf is
+// restart-only (covering it would mean regenerating the chain, which
+// strands every already-running proxied CLI on the old anchor — #70). An
+// ordinary account needs no leaf of its own anyway: every provider's
+// default host is minted up front regardless of which accounts exist that
+// day.
+//
 // So EnsureCA generates the CA, mints a leaf for every one of those hosts
 // up front, writes the CA cert and the leaf certs+keys to disk, and lets
 // the CA private key fall out of scope when it returns. There is no key at
@@ -135,10 +146,14 @@ func chainPath(pemPath string) string {
 // already trusts. Any host in hosts that has no stored leaf (a config
 // change added an account or upstream) forces a full regeneration: a new
 // CA, a new leaf for every host, all strand-risking exactly like any CA
-// replacement. That is accepted, per the issue: it only happens on a
-// deliberate config change that already needs a restart to take effect
-// (see #46), never on an upgrade with an unchanged host set — the failure
-// this issue actually exists to fix.
+// replacement. That is accepted, per the issue, because it can only happen
+// during a start: EnsureCA is called once, from runServer, and the live
+// paths that add an account to a running pool (#83/#87's admin endpoints,
+// #84's config watcher) never reach it — admin.UpstreamRestartRequired
+// keeps a host with no pre-minted leaf restart-only precisely so that this
+// regeneration stays a startup-time event. An upgrade with an unchanged
+// host set — the failure this issue actually exists to fix — reuses the
+// stored chain and strands nobody.
 //
 // Migration from a pre-#69 install (a pem on disk, a key in the keychain,
 // no leaf manifest) is NOT a special case here — on purpose. It is handled

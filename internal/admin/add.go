@@ -131,12 +131,38 @@ func (s *Server) handleAccountAdd(w http.ResponseWriter, r *http.Request) {
 }
 
 // checkUpstreamLive reports whether upstream needs a restart before
-// CONNECT-mode termination covers it. An empty upstream means "use the
-// global default", which was covered before this handler ever ran, so
-// there is nothing to check. s.hostCovered being unset (MITM not wired into
-// this Server, e.g. most tests) means "cannot promise CONNECT-mode
-// coverage" — conservatively flagged rather than silently assumed fine.
+// CONNECT-mode termination covers it, for this Server's MITM wiring.
 func (s *Server) checkUpstreamLive(upstream string) (restartRequired bool, reason string) {
+	return UpstreamRestartRequired(upstream, s.hostCovered)
+}
+
+// UpstreamRestartRequired is the one implementation of "can this account's
+// upstream be served live, or does it need a restart first?" — exported so
+// issue #84's config watcher asks the same question the same way rather
+// than growing a second copy of the rule that would drift from this one.
+//
+// After #88 the MITM chain is minted once, up front, for every host in
+// provider.DefaultUpstreamHosts() plus the configured set, and CA.Leaf is a
+// pure lookup that errors on anything else. So a host that already has a
+// pre-minted leaf is entirely live-safe; only a genuinely new host is
+// restart-only, because covering it means regenerating the chain, which
+// strands every already-running proxied CLI on the old anchor (#70).
+//
+// An empty upstream means "use the global default", which was covered
+// before anything called this, so there is nothing to check. covered being
+// nil (MITM not wired up — most tests, and a daemon whose CA failed to
+// load) means "cannot promise CONNECT-mode coverage": conservatively
+// flagged rather than silently assumed fine.
+//
+// The two callers act on the answer differently, deliberately.
+// handleAccountAdd still adds the account — a person ran `spillway login`
+// and is reading the reply, and the account genuinely does work in
+// base-URL mode — and returns this reason with restartRequired set. The
+// watcher refuses the add outright, because nobody is at a terminal to
+// read anything: a half-live account whose CONNECT traffic blind-tunnels
+// unpooled is exactly the silent wrong-behaviour an unattended reload must
+// not create.
+func UpstreamRestartRequired(upstream string, covered func(host string) bool) (restartRequired bool, reason string) {
 	if upstream == "" {
 		return false, ""
 	}
@@ -145,7 +171,7 @@ func (s *Server) checkUpstreamLive(upstream string) (restartRequired bool, reaso
 		return false, ""
 	}
 	host := u.Hostname()
-	if s.hostCovered != nil && s.hostCovered(host) {
+	if covered != nil && covered(host) {
 		return false, ""
 	}
 	return true, fmt.Sprintf(

@@ -105,7 +105,7 @@ func (a *adminAPI) do(method, path string, body io.Reader, v any) error {
 	resp, err := a.client.Do(req)
 	if err != nil {
 		// %w wraps ErrAdminUnreachable specifically (not just err) so a
-		// caller — issue #83's liveApplyAccountEdit/liveRemoveAccount in
+		// caller — issue #83's liveApplyConfigEdit/liveRemoveAccount in
 		// particular — can tell "nothing is listening, as expected while
 		// the daemon isn't running" apart from "a running daemon answered
 		// with a real problem" via errors.Is, rather than pattern-matching

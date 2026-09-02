@@ -517,6 +517,7 @@ pool:
   hideOverageFromClient: false # see "Hiding credit signals" below
 log:
   level: info
+watchConfig: true         # reload this file when anything else edits it — see below
 notify:
   channels:                # optional; empty/absent = local desktop notifications only
     - name: phone
@@ -537,6 +538,55 @@ accounts:
       claude-haiku-4-5-20251001: kimi-for-coding   # exact match wins
       claude-*: k3                                  # glob; longest pattern wins
 ```
+
+### Editing the config while spillway is running
+
+**A running daemon watches this file.** Change it with a text editor, a
+script, or a dotfile synced from another machine, and spillway picks the
+change up on its own — the same way its own CLI commands and the dashboard
+already did. A restart is a last resort, not the normal way to change
+something.
+
+What is applied is checked first: the file is only read once it has stopped
+changing (editors write in bursts, and spillway's own writes replace the
+file wholesale), and it must parse **and** validate before anything happens.
+A broken or half-written config leaves the running configuration exactly as
+it was and logs why. Nothing is re-applied when the file is rewritten with
+the same content — including spillway's own rewrites, and including a
+reformat that changes only whitespace, comments or key order.
+
+Every reload logs one line saying what it applied and what it could not:
+
+| Change | Applies live? |
+|---|---|
+| `pool.switchThreshold`, `crossProvider`, `allowOverage`, `stickyAcrossFamily`, `hideOverageFromClient` | **yes** |
+| An account's `label`, `priority`, `disabled`, `allowOverage` | **yes** |
+| Removing an account | **yes** — out of rotation immediately, before it can be selected again |
+| Adding an account (its credential already in the keychain) | **yes**, unless it names an `upstream` host spillway has no MITM leaf for — see below |
+| `notify.channels` | **yes** — a new channel starts firing, a removed one stops |
+| `log.level` | **yes** |
+| `upstream`, `proxy.*`, `admin.*`, `egress.*` | no — listeners and the proxy handler are built at startup |
+| `pool.exhaustedMode`, `holdMax`, `maxBufferBytes`, `probeOnStart`, `probeInterval`, `canaryInterval` | no — snapshotted at startup |
+| An existing account's `type`, `upstream`, `source` or `modelMap` | no |
+
+**The one refusal.** An account whose `upstream` names a host spillway has
+no certificate for cannot be added to a running daemon: covering a new host
+means regenerating the whole MITM chain, which strands every CLI already
+running against the old one. Rather than do that silently with nobody at a
+terminal, the reload **refuses that account**, keeps serving the accounts it
+already has, and logs what it refused and that a restart is needed. Every
+provider's normal upstream is covered from startup, so this only affects a
+genuinely custom host. (`spillway login`, where a person is reading the
+reply, still adds such an account and tells you the caveat.)
+
+Set `watchConfig: false` to turn watching off; the daemon then picks the
+file up only at startup, or when a `spillway` command or the dashboard tells
+it to. Turning it off takes effect on the running daemon; turning it back on
+needs a restart.
+
+Credentials are not part of any of this. A reload reads names, providers,
+events and flags from the yaml and every secret from the keychain, writes no
+secret to the file, and logs no destination, topic or token.
 
 ### Binding the proxy off loopback
 
@@ -1061,6 +1111,12 @@ spillway notify test phone      # sends a real notification, synchronously
 spillway notify list            # channels, events, whether a credential is present
 spillway notify remove phone    # deletes the config entry and its credential
 ```
+
+Each of these applies to a running daemon immediately — a channel you add
+starts firing without a restart, and one you remove stops. (It used not to:
+channels were read once at startup, so a newly configured channel stayed
+silent until the service was bounced. See "Editing the config while spillway
+is running".)
 
 ### ntfy topics and webhook URLs are credentials, not configuration
 
