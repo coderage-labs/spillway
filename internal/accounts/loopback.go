@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,10 +34,14 @@ const (
 
 // CallbackServer waits for the browser to deliver an authorization code.
 type CallbackServer struct {
-	lns  []net.Listener
-	srv  *http.Server
-	got  chan callbackResult
-	uri  string
+	lns []net.Listener
+	srv *http.Server
+	got chan callbackResult
+	uri string
+
+	// mu guards seen. Every bound family serves the same handler, so two
+	// callbacks arriving at once run finish on two goroutines.
+	mu   sync.Mutex
 	seen bool
 }
 
@@ -151,6 +156,16 @@ func StartCallback(state string) (*CallbackServer, error) {
 
 // finish answers the browser and delivers the result once. A second callback
 // (a refresh, a duplicated tab) must not overwrite the first.
+//
+// The once-only check is locked because concurrent callbacks are ordinary
+// here, not exotic: both loopback families are bound to the same handler, so
+// a browser that tries 127.0.0.1 and ::1, prefetches the URL, or simply has
+// the tab restored can run finish twice at once. Unlocked, both goroutines
+// could read seen as false and both send — and got holds one, so the second
+// send blocks forever, leaking its handler goroutine and hanging the
+// Shutdown in Close behind that still-active connection. Sending under the
+// lock is safe for the same reason: exactly one send ever reaches a channel
+// buffered for one, so it cannot block while holding it.
 func (cs *CallbackServer) finish(w http.ResponseWriter, res callbackResult) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// This page is the only part of spillway a browser ever renders besides
@@ -159,6 +174,8 @@ func (cs *CallbackServer) finish(w http.ResponseWriter, res callbackResult) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	fmt.Fprint(w, callbackPage(res.err))
 
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
 	if cs.seen {
 		return
 	}
