@@ -2,6 +2,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
@@ -164,6 +165,17 @@ type Config struct {
 	Log struct {
 		Level string `yaml:"level"`
 	} `yaml:"log"`
+	// WatchConfig makes a running daemon pick this file up when anything
+	// other than spillway's own CLI edits it — a text editor, a script, a
+	// synced dotfile (issue #84). Default on: the product requirement is
+	// that a restart is a last resort, and a config that only takes effect
+	// after one is the commonest way that promise breaks. Set false to opt
+	// out; the daemon then behaves exactly as it did before #84 and only
+	// picks the file up at startup or when the CLI/dashboard tells it to.
+	//
+	// A pointer so "absent" and "explicitly false" are distinguishable —
+	// same tri-state reason as Pool.ProbeOnStart.
+	WatchConfig *bool `yaml:"watchConfig,omitempty"`
 	// Notify configures push-notification channels (issue #101). Off by
 	// default: no channels block means today's behaviour exactly — local
 	// desktop notifications only.
@@ -197,7 +209,15 @@ func Defaults() Config {
 	c.Pool.MaxBufferBytes = 8 << 20
 	c.Pool.CanaryInterval = "2h"
 	c.Log.Level = "info"
+	watch := true
+	c.WatchConfig = &watch
 	return c
+}
+
+// WatchEnabled reports whether the daemon should watch this file for
+// external edits (issue #84). Absent means yes — see WatchConfig.
+func (c *Config) WatchEnabled() bool {
+	return c.WatchConfig == nil || *c.WatchConfig
 }
 
 // PoolProbeInterval parses Pool.ProbeInterval; 0 means startup-only.
@@ -276,6 +296,46 @@ func LoadFrom(path string) (*Config, error) {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+// ParseValidate parses and validates config bytes without touching the
+// filesystem at all (issue #84's watcher). Deliberately NOT LoadFrom: that
+// creates the file with defaults when it is missing, which is right at
+// startup and catastrophic for a watcher — a config deleted or momentarily
+// absent underneath a running daemon would be silently replaced by defaults
+// and then applied, emptying the running pool. It also parses exactly the
+// bytes the caller already hashed, so there is no window between deciding
+// the file has settled and reading it again.
+func ParseValidate(data []byte) (*Config, error) {
+	cfg, err := parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// Fingerprint is a content hash of a config's MEANING, not of the bytes it
+// came from: it hashes the canonical re-marshalling of a parsed config, so
+// two files that differ only in key order, indentation, comments or omitted
+// defaults fingerprint identically.
+//
+// Issue #84 uses this to not act on its own tail: the daemon rewrites this
+// file itself (a refreshed token's expiry, a dashboard settings write), and
+// a reload that re-applied every such rewrite would log noise forever and,
+// worse, make "did anything actually change" unanswerable. Hashing raw
+// bytes would not do — a formatting-only rewrite is not a change.
+func Fingerprint(c *Config) [32]byte {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		// Marshalling a Config cannot fail (no channels, funcs or cyclic
+		// values in it). Hash the error text rather than returning a fixed
+		// value, so an impossible failure can never read as "unchanged".
+		return sha256.Sum256([]byte("spillway-fingerprint-error:" + err.Error()))
+	}
+	return sha256.Sum256(data)
 }
 
 func parse(data []byte) (*Config, error) {

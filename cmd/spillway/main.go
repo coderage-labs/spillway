@@ -198,9 +198,13 @@ func runServer(args []string) error {
 		out = io.MultiWriter(os.Stderr, f)
 	}
 
-	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{
-		Level: parseLevel(cfg.Log.Level),
-	}))
+	// A LevelVar rather than a fixed level: log.level is one more thing
+	// that can change without a restart (issue #84), and turning debug on
+	// to diagnose something should not mean bouncing the daemon whose
+	// behaviour is being diagnosed. LevelVar is safe for concurrent use.
+	logLevel := new(slog.LevelVar)
+	logLevel.Set(parseLevel(cfg.Log.Level))
+	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: logLevel}))
 
 	// Issue #104: a silent hang anywhere between here and the two
 	// ListenAndServe/Serve calls below used to look, from outside, exactly
@@ -429,12 +433,17 @@ func runServer(args []string) error {
 		// A token left from an earlier non-loopback run would be misleading.
 		logger.Warn("could not remove stale admin token file", "path", tokenPath, "err", err)
 	}
+	// The one path a config becomes running state (issue #84). Both the
+	// admin settings endpoint below — the dashboard's own writes, and the
+	// POST the CLI sends after `accounts priority` / `accounts overage` /
+	// `notify set` — and the config-file watcher further down call this
+	// same applier, so what is live cannot depend on which of them asked.
+	applier := newLiveApplier(cfg, p, store, notifier, logLevel, logger)
+	applier.enableLiveMITM(handler.MITMCovers, handler.RefreshAllowedHosts)
 	// Live-apply the settings a dashboard write changes, so an edit does not
 	// need a restart (which would drop the SSE stream and re-probe).
 	adminHandler.EnableSettings(cfgPath, func(nc *config.Config) {
-		p.Apply(poolSettings(nc))
-		logger.Info("settings updated from dashboard",
-			"switchThreshold", nc.Pool.SwitchThreshold, "crossProvider", nc.Pool.CrossProvider)
+		applier.apply(nc, "dashboard")
 	})
 	adminSrv.Handler = adminHandler
 	// A unix socket is the tightest option (§5): file permissions replace
@@ -511,6 +520,19 @@ func runServer(args []string) error {
 	// Kimi quota state comes from polling /usages — no rate-limit headers
 	// exist to learn it from (§6.5).
 	accounts.StartUsagesPoller(ctx, p, logger)
+
+	// Issue #84: pick up the config file when something other than
+	// spillway's own CLI edits it. Tied to ctx so it stops with the daemon.
+	if cfg.WatchEnabled() {
+		watcher := newConfigWatcher(cfgPath, cfg, func(nc *config.Config) {
+			applier.apply(nc, "config file")
+		}, logger)
+		go watcher.run(ctx, configPollInterval)
+		logger.Info("watching the config file for external edits", "path", cfgPath)
+	} else {
+		logger.Info("not watching the config file (watchConfig: false) — "+
+			"an external edit takes effect at the next restart", "path", cfgPath)
+	}
 
 	go func() {
 		<-ctx.Done()

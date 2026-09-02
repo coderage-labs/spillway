@@ -431,9 +431,9 @@ func setOverage(cfgPath string, args []string) error {
 	}
 	// Issue #83: this is the setting that decides whether spillway spends
 	// money, so it must not silently keep billing after a user thinks they
-	// just turned it off. liveApplyAccountEdit reuses the same pool.Apply
+	// just turned it off. liveApplyConfigEdit reuses the same pool.Apply
 	// path the dashboard's own settings writes go through.
-	fmt.Println(liveApplyAccountEdit())
+	fmt.Println(liveApplyConfigEdit())
 	return nil
 }
 
@@ -459,6 +459,6 @@ func setPriority(cfgPath string, args []string) error {
 	}
 	fmt.Printf("%s: priority %d — lower is preferred, and an account is only\n"+
 		"  reached for when everything above it cannot serve\n", name, prio)
-	fmt.Println(liveApplyAccountEdit())
+	fmt.Println(liveApplyConfigEdit())
 	return nil
 }

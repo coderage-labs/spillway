@@ -27,14 +27,23 @@ import (
 // would be the "silently imply it applied live" issue #83 explicitly rules
 // out.
 
-// liveApplyAccountEdit tells a reachable daemon to re-read the config file
+// liveApplyConfigEdit tells a reachable daemon to re-read the config file
 // and re-apply it to the running pool — what POST /api/settings with no
 // body means. Used after `accounts priority`/`accounts overage`, which
 // write straight to the yaml (overage deliberately bypasses the dashboard's
 // PUT-shaped settings path — see config.SetAccountOverage's doc — so there
 // is no new payload to PUT, only an instruction to pick up what the file
-// now says).
-func liveApplyAccountEdit() string {
+// now says), and after `notify set`/`notify remove`, whose channels used to
+// be read once at startup (issue #84's motivating report).
+//
+// Issue #84's watcher would eventually pick all of these up on its own —
+// that is the whole point of it — but this stays, and stays first: it is
+// instant rather than up to two poll intervals later, it works when
+// watchConfig is off, and for `notify set` it is the ONLY thing that
+// notices a channel whose credential changed while its config entry did
+// not (the watcher compares the config, and the credential is not in it).
+// Both land in exactly the same place, liveApplier.apply.
+func liveApplyConfigEdit() string {
 	api, err := dialAdmin()
 	if err != nil {
 		return "not applied live: no daemon is currently running — this takes effect the next time `spillway server` starts"
@@ -107,7 +116,7 @@ type accountAddResult struct {
 // stale-credential gap: a running daemon used to keep serving the OLD
 // credential in memory until restarted even after a successful
 // re-authentication). A down daemon is a clean success, not an error, same
-// as liveApplyAccountEdit/liveRemoveAccount: the config and secret store
+// as liveApplyConfigEdit/liveRemoveAccount: the config and secret store
 // are already durably written by the time login.go calls this, and a
 // future `spillway server` start reads them correctly on its own.
 func liveAddAccount(req accountAddPayload) string {
