@@ -188,3 +188,17 @@ func (f *FileStore) GetRaw(name string) ([]byte, error) {
 
 // SetRaw stores a non-account blob.
 func (f *FileStore) SetRaw(name string, v []byte) error { return f.setRaw(name, v) }
+
+// DeleteRaw removes a non-account blob; a missing entry is not an error.
+func (f *FileStore) DeleteRaw(name string) error {
+	defer f.lock()()
+	m, err := f.load()
+	if err != nil {
+		return err
+	}
+	if _, ok := m[name]; !ok {
+		return nil
+	}
+	delete(m, name)
+	return f.save(m)
+}

@@ -214,6 +214,10 @@ that works over SSH.
 | `spillway accounts [remove <account>]` | List accounts, or remove one — `<account>` must be its exact name or exact label; a partial match is refused rather than guessed, since the wrong match deletes the wrong credential. Removal reaches a running daemon immediately — the account stops being selectable before this command returns, not at the next restart |
 | `spillway accounts overage <account> on\|off\|default` | Allow or forbid pay-as-you-go past quota for one account — resolved by name, label or a unique prefix/substring — see [Extra usage](#extra-usage). Applies to a running daemon immediately, in both directions |
 | `spillway accounts priority <account> <n>` | Order selection for one account — resolved by name, label or a unique prefix/substring; lower is preferred. Applies to a running daemon immediately |
+| `spillway notify set <channel>` | Prompt for a provider and its credential, and which events it should fire on; writes the credential to the secret store and the metadata to config — see [Notifications](#notifications) |
+| `spillway notify test <channel>` | Send a real notification through one channel, synchronously — the honest way to check it's wired up |
+| `spillway notify list` | Configured channels, their events, and whether a credential is present |
+| `spillway notify remove <channel>` | Delete a channel's config entry and its stored credential |
 | `spillway switch [<account>\|--auto] [--force]` | Point the pool at one account — resolved by name, label or a unique prefix/substring — until told otherwise; with no argument, reports what's pinned and what you could switch to |
 | `spillway login claude <account>` | Add a Claude account (OAuth PKCE), or re-authenticate an existing one — `<account>` resolves against existing accounts by name, label or a unique prefix/substring first, and only becomes a new account's name if nothing matches. Reaches a running daemon immediately: a new account is selectable before the command returns, and re-authenticating an existing one hot-swaps its credential in the running pool rather than leaving the daemon holding the stale one until restarted |
 | `spillway login kimi <account>` | Add a Kimi account (OAuth device flow), or re-authenticate an existing one — same resolution and live-apply behaviour as `login claude` |
@@ -513,6 +517,14 @@ pool:
   hideOverageFromClient: false # see "Hiding credit signals" below
 log:
   level: info
+notify:
+  channels:                # optional; empty/absent = local desktop notifications only
+    - name: phone
+      provider: ntfy        # os | webhook | ntfy | pushover
+      events: [exhausted, held, account-disabled]
+    - name: desktop
+      provider: os
+      events: [overage-cap]
 accounts:
   - name: you@example.com
     label: work             # what the dashboard and status line show
@@ -1006,6 +1018,98 @@ kind in the request log, a desktop notification, a red badge on the tank, and
 `£ N on extra usage` in the status line. The dashboard also shows how much of
 the allowance is gone — that is a second, slower cliff, and it refills on a
 billing period rather than at the quota window.
+
+## Notifications
+
+Spillway always raises a local desktop notification for the events below —
+`osascript` on macOS, `notify-send` on Linux, a toast on Windows. That is
+today's exact behaviour and nothing below changes it: **`notify.channels` is
+entirely opt-in.**
+
+The reason to add one: a held request has nothing else that can reach you.
+HTTP gives one response per request, so a request spillway is currently
+holding cannot itself carry a message — the only way to hear about it before
+you next look at the screen is an out-of-band channel.
+
+```yaml
+notify:
+  channels:
+    - name: phone
+      provider: ntfy
+      events: [exhausted, held, account-disabled]
+    - name: desktop
+      provider: os
+      events: [overage-cap]
+```
+
+Each channel is a `name`, a `provider`, and the `events` it wants — that's
+all that's in config. Everything else about a channel is a credential and
+lives in the secret store, never in the yaml:
+
+| Provider | Credential | Notes |
+|---|---|---|
+| `os` | none | The local desktop notification, as a channel like any other |
+| `webhook` | a URL, optionally a bearer token | Generic `POST` — covers Slack, Discord, or anything that takes JSON |
+| `ntfy` | a **topic** (the credential itself on ntfy.sh — see below), optionally a self-hosted base URL and a bearer token | [ntfy.sh](https://ntfy.sh) needs no account: install the app, subscribe to your topic |
+| `pushover` | an app token and a user key | Sends at emergency priority, repeated until acknowledged — the one thing that reliably wakes someone |
+
+Manage them with:
+
+```sh
+spillway notify set phone       # prompts for provider + credential + events
+spillway notify test phone      # sends a real notification, synchronously
+spillway notify list            # channels, events, whether a credential is present
+spillway notify remove phone    # deletes the config entry and its credential
+```
+
+### ntfy topics and webhook URLs are credentials, not configuration
+
+**On ntfy.sh's free tier there is no access control at all.** Anyone who
+knows your topic name can not only read your notifications but *publish to
+it* — a fake spillway alert on your phone. The topic **is** the whole
+security model, so:
+
+- generate it with something like `openssl rand -hex 16`, never a memorable
+  name;
+- for a reserved topic (paid tier) or a self-hosted server, `spillway notify
+  set` also takes an access token (`tk_...`), sent as a bearer
+  `Authorization` header — the same mechanism the `webhook` provider uses
+  for its own token.
+
+A Slack or Discord webhook URL is exactly as sensitive: possession of the
+URL is authorisation to post as that integration. Both are why these values
+never appear in `spillway.yaml` — a config file with only `name`/`provider`/
+`events` in it is safe to paste into a bug report, which is exactly when
+people paste configs.
+
+Because the transport is only as private as that guessed string, the default
+messages carry state and timing, never identity — *"All accounts exhausted,
+soonest reset 07:00 (in 6h12m)"*, never which account or its email address.
+The one exception is `account-disabled`, which names the account's own
+label (never an email) because the message is useless otherwise — you can't
+re-login an account you can't identify.
+
+### Events
+
+| Event | Fires when |
+|---|---|
+| `exhausted` | Every account is spent and a request was refused |
+| `held` | The first request has been parked waiting for a reset — the leading indicator, before a queue builds |
+| `overage-cap` | An account already billing for extra usage has hit its own limit there too |
+| `account-disabled` | An account's credential died and it dropped out of rotation |
+
+An unknown event name in `notify.channels` fails config load immediately,
+naming the valid set — a typo here would otherwise silently disable an
+alert, which is the worst failure mode for a feature whose whole job is
+telling you something is wrong.
+
+A channel with no credential yet (or one a broken keychain read couldn't
+retrieve) is disabled with a startup warning naming the channel and the
+`spillway notify set` command to fix it — the daemon still starts. A channel
+that is merely unreachable at send time never delays or fails the request
+that triggered it, and never stops another channel from getting the same
+notification; a pile-up still produces one notification per channel, not one
+per request.
 
 ## Behind a corporate proxy
 

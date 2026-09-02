@@ -30,9 +30,12 @@ type Store interface {
 	Set(name string, s Secrets) error
 	// Delete removes an account's secrets; missing is not an error.
 	Delete(name string) error
-	// GetRaw/SetRaw store non-account blobs (e.g. the MITM CA private key).
+	// GetRaw/SetRaw store non-account blobs (e.g. the MITM CA private key,
+	// or a notify channel's credential under "notify:<name>").
 	GetRaw(name string) ([]byte, error)
 	SetRaw(name string, v []byte) error
+	// DeleteRaw removes a non-account blob; missing is not an error.
+	DeleteRaw(name string) error
 }
 
 // Keyring is the OS-keychain Store. Key format: "account:<name>".
@@ -105,6 +108,14 @@ func (k *Keyring) GetRaw(name string) ([]byte, error) {
 func (k *Keyring) SetRaw(name string, v []byte) error {
 	if err := keyring.Set(k.service(), name, string(v)); err != nil {
 		return fmt.Errorf("keychain write %q: %w", name, err)
+	}
+	return nil
+}
+
+// DeleteRaw removes a non-account blob; a missing entry is not an error.
+func (k *Keyring) DeleteRaw(name string) error {
+	if err := keyring.Delete(k.service(), name); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return fmt.Errorf("keychain delete %q: %w", name, err)
 	}
 	return nil
 }

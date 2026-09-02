@@ -23,6 +23,7 @@ import (
 	"github.com/coderage-labs/spillway/internal/events"
 	"github.com/coderage-labs/spillway/internal/mitm"
 	"github.com/coderage-labs/spillway/internal/netaddr"
+	"github.com/coderage-labs/spillway/internal/notify"
 	"github.com/coderage-labs/spillway/internal/pool"
 	"github.com/coderage-labs/spillway/internal/proxy"
 	"github.com/coderage-labs/spillway/internal/reqlog"
@@ -99,6 +100,8 @@ func main() {
 		}
 	case "accounts":
 		err = runAccounts(os.Args[2:])
+	case "notify":
+		err = runNotify(os.Args[2:])
 	case "install", "uninstall":
 		err = runInstall(append([]string{os.Args[1]}, os.Args[2:]...))
 	case "statusline":
@@ -144,6 +147,10 @@ func usage() {
 		"       spillway login kimi <name>",
 		"       spillway accounts [remove <name>]",
 		"       spillway accounts overage <name> on|off|default   allow pay-as-you-go past quota",
+		"       spillway notify set <channel>                prompt for a provider + credential, write it",
+		"       spillway notify test <channel>               send a real notification through it",
+		"       spillway notify list                         channels, and whether a credential is present",
+		"       spillway notify remove <channel>",
 		"       spillway statusline                          print the status line (for Claude Code)",
 		"       spillway statusline [install|uninstall|status]",
 		"       spillway service [install|uninstall|status]  run the daemon under launchd",
@@ -213,11 +220,14 @@ func runServer(args []string) error {
 	if err != nil {
 		return err
 	}
-	if migrated, err := config.MigrateInlineSecrets(cfgPath, store); err != nil {
+	if migrated, migratedChannels, err := config.MigrateInlineSecrets(cfgPath, store); err != nil {
 		logger.Warn("secret migration failed", "err", err)
 	} else {
 		for _, name := range migrated {
 			logger.Info("migrated account secrets to keychain", "name", name)
+		}
+		for _, name := range migratedChannels {
+			logger.Info("migrated notify channel secret to keychain", "name", name)
 		}
 	}
 	// Migration may have scrubbed tokens from the file — reload.
@@ -227,7 +237,12 @@ func runServer(args []string) error {
 
 	warnDeprecatedKeychainAccounts(cfg, logger)
 
-	p, err := buildPool(cfg, store, logger, time.Now())
+	notifier, notifyWarnings := buildNotifier(cfg, store)
+	for _, w := range notifyWarnings {
+		logger.Warn(w)
+	}
+
+	p, err := buildPool(cfg, store, logger, time.Now(), notifier)
 	if err != nil {
 		return err
 	}
@@ -267,6 +282,10 @@ func runServer(args []string) error {
 		return err
 	}
 	handler.SetHooks(proxy.Hooks{Log: rl, Events: broker})
+	// Issue #101: the same Notifier buildNotifier gave the pool's token
+	// manager above, so exhausted/held/overage-cap and account-disabled
+	// share one dedup map and one channel list.
+	handler.SetNotifier(notifier)
 
 	// Keep credentials fresh regardless of traffic. EnsureFresh is a no-op
 	// until a token is within its refresh window, so this sweep is almost
@@ -541,12 +560,16 @@ func warnDeprecatedKeychainAccounts(cfg *config.Config, logger *slog.Logger) {
 // yaml + tokens in the secret store) into a pool and wires credential
 // recovery. With no accounts configured it falls back to the local claude
 // keychain login as a single account. Startup fails when nothing is usable.
-func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now time.Time) (*pool.Pool, error) {
+func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now time.Time, notifier *notify.Notifier) (*pool.Pool, error) {
 	cfgPath, err := config.Path()
 	if err != nil {
 		return nil, err
 	}
 	mgr := accounts.NewManager(cfgPath, accounts.DefaultSource(), store, logger)
+	// Issue #101: "account-disabled" fires wherever this Manager disables an
+	// account (dead refresh token, rejected static key, failed keychain
+	// reload).
+	mgr.Notifier = notifier
 
 	var accts []*pool.Account
 	for _, a := range cfg.Accounts {

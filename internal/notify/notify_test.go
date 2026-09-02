@@ -41,7 +41,7 @@ func testNotifier() (*Notifier, *recorder) {
 func TestNotifyCoalescesRepeats(t *testing.T) {
 	n, rec := testNotifier()
 	for i := 0; i < 5; i++ {
-		n.Notify("pool-exhausted", "t", "b")
+		n.Notify(EventExhausted, "pool-exhausted", "t", "b")
 	}
 	waitFor(t, &rec.count, 1)
 	if got := rec.count.Load(); got != 1 {
@@ -51,8 +51,8 @@ func TestNotifyCoalescesRepeats(t *testing.T) {
 
 func TestNotifyDistinctKeysAreIndependent(t *testing.T) {
 	n, rec := testNotifier()
-	n.Notify("a", "t", "b")
-	n.Notify("b", "t", "b")
+	n.Notify(EventExhausted, "a", "t", "b")
+	n.Notify(EventExhausted, "b", "t", "b")
 	waitFor(t, &rec.count, 2)
 	if got := rec.count.Load(); got != 2 {
 		t.Errorf("sent %d, want 2 — different subjects must not coalesce", got)
@@ -63,15 +63,32 @@ func TestNotifyDistinctKeysAreIndependent(t *testing.T) {
 }
 
 // Disabled platforms must be silent, not error, and callers must be able to
-// tell rather than assume a notification happened.
+// tell rather than assume a notification happened. This is the no-channels
+// default path (issue #101): SetChannels was never called, so Notify falls
+// back to the local platform notifier exactly as before channels existed.
 func TestDisabledNotifierIsSilent(t *testing.T) {
 	n := &Notifier{last: map[string]time.Time{}, Enabled: false}
 	sent := 0
 	n.send = func(context.Context, string, string) error { sent++; return nil }
-	n.Notify("k", "t", "b")
+	n.Notify(EventExhausted, "k", "t", "b")
 	time.Sleep(50 * time.Millisecond)
 	if sent != 0 {
 		t.Error("a disabled notifier must not send")
+	}
+}
+
+// NotifyLocal is the escape hatch for the two notifications outside the
+// channel-eligible event set (MITM cert replaced, started billing extra
+// usage) — it must still reach the local platform notifier, and still obey
+// the one shared dedup rule.
+func TestNotifyLocalSendsAndCoalesces(t *testing.T) {
+	n, rec := testNotifier()
+	for i := 0; i < 3; i++ {
+		n.NotifyLocal("mitm-ca-regenerated", "t", "b")
+	}
+	waitFor(t, &rec.count, 1)
+	if got := rec.count.Load(); got != 1 {
+		t.Errorf("sent %d, want 1", got)
 	}
 }
 
