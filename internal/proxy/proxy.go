@@ -599,7 +599,7 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 					if holdDeadline.IsZero() {
 						holdDeadline = time.Now().Add(h.holdMax)
 					}
-					if h.waitForReset(r, holdDeadline) {
+					if h.waitForReset(r, body, holdDeadline) {
 						// The hold waited out a reset, so the accounts that
 						// failed before this point may now succeed. `tried`
 						// means "failed in this round" — the wait starts a new

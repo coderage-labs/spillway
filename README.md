@@ -998,6 +998,20 @@ an unknown reset is not the same as a known-far-off one, and treating it
 that way would turn a possibly transient gap into an instant, unretryable
 error.
 
+The "soonest reset" a hold waits on is the soonest of two different things,
+and which ones count depends on the request (issue #140). An account-wide
+429 exhausts the account, so its reset is a fact about the whole pool. A
+family-scoped one — `fable`'s weekly bucket — deliberately does *not*
+exhaust the account (issue #54: Sonnet and Opus keep serving from it), so
+its deadline is a fact only about the windows that
+[govern](#per-family-quota-fable) the model asked for. A request parked because
+every account's `fable` window is rejected therefore waits on those
+per-window deadlines; a Sonnet request parked behind account-wide exhaustion
+waits on the exhaustion resets; and a mixed pool waits on whichever of the
+two lands first. Before this, a request blocked purely on family rejections
+saw no reset at all and slept the whole `holdMax` — hours, with its quota
+minutes away.
+
 A held request also wakes on new pool **capacity**, not only on the clock
 (issue #105). Waiting purely for the soonest reset means a pool that gains a
 usable account mid-hold is invisible to a request already parked — reported

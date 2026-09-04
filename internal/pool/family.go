@@ -151,3 +151,42 @@ func (a *Account) WindowRejectedUntil(name string) (time.Time, bool) {
 	}
 	return until, true
 }
+
+// earliestWindowRejectionFor reports the soonest deadline among the windows
+// governing model that upstream has confirmed rejected and that has not yet
+// passed (issue #140). It is WindowRejectedFor's question — "is this
+// account excluded for this model right now?" — asked for *when* rather
+// than *whether*, and it applies the identical deadline test
+// (until.After(now)) so the two can never disagree about which rejections
+// are live.
+//
+// A deadline already in the past is skipped rather than returned: an
+// expired rejection no longer excludes anything, so reporting it would hand
+// the hold a wake time it has already passed, and the hold treats that as
+// "re-select now" — which, if the account is still unusable for some other
+// reason, is a busy loop, not a wait.
+//
+// nil GoverningWindows (Kimi) has nothing to check, exactly as in
+// WindowRejectedFor: that provider's refusals go through account-wide
+// StateExhausted, which EarliestReset already covers.
+func (a *Account) earliestWindowRejectionFor(model string, now time.Time) (time.Time, bool) {
+	gw := provider.For(a.Type).GoverningWindows
+	if gw == nil {
+		return time.Time{}, false
+	}
+	governing := gw(model)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var earliest time.Time
+	ok := false
+	for _, name := range governing {
+		until, has := a.windowRejected[name]
+		if !has || !until.After(now) {
+			continue
+		}
+		if !ok || until.Before(earliest) {
+			earliest, ok = until, true
+		}
+	}
+	return earliest, ok
+}

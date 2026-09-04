@@ -187,7 +187,7 @@ func TestHoldWakeResumesAgainstOriginalDeadline(t *testing.T) {
 		if got != nil {
 			break
 		}
-		if !h.waitForReset(req, deadline) {
+		if !h.waitForReset(req, nil, deadline) {
 			break // expected: the 2s-out reset now exceeds `deadline`
 		}
 		clear(tried)

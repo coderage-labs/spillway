@@ -60,25 +60,41 @@ const maxWakeStagger = 2 * time.Second
 //     moment before the upstream's own clock agrees the window is over.
 const resetSlack = 250 * time.Millisecond
 
-// waitForReset parks the request until the soonest account reset, bounded by
-// deadline (holdMax from first exhaustion). Returns true when selection
-// should be re-tried (the reset arrived, or an unknown-reset budget
-// elapsed), false to fail now (mode disabled, a known reset beyond the
-// deadline, an unknown-reset budget already spent, or the client went
-// away).
-func (h *Handler) waitForReset(r *http.Request, deadline time.Time) bool {
+// waitForReset parks the request until the soonest reset that could let
+// THIS request through, bounded by deadline (holdMax from first
+// exhaustion). Returns true when selection should be re-tried (the reset
+// arrived, or an unknown-reset budget elapsed), false to fail now (mode
+// disabled, a known reset beyond the deadline, an unknown-reset budget
+// already spent, or the client went away).
+//
+// body is the buffered request body — the same bytes SelectExcept was just
+// handed. It is what makes the wait request-specific (issue #140): the
+// model in it decides which quota windows govern this request, and so which
+// per-window rejection deadlines are the ones it is actually waiting on.
+func (h *Handler) waitForReset(r *http.Request, body []byte, deadline time.Time) bool {
 	if h.holdMax <= 0 || h.exhaustedMode == "fail" {
 		return false
 	}
 	now := time.Now()
 	reset, ok := h.pool.EarliestReset()
+	// Issue #140: a family-scoped 429 never exhausts the account (#54 leaves
+	// it StateOK so the other families keep serving), so a request parked
+	// because every account is window-rejected for its model is invisible to
+	// EarliestReset — it reported ok=false and the request slept the whole
+	// holdMax with its real deadline minutes away. The wake time is the
+	// soonest of BOTH: a mixed pool (some accounts exhausted account-wide,
+	// others only window-rejected) can be unblocked by whichever lands
+	// first, and waking early only costs one re-selection.
+	if wreset, wok := h.pool.EarliestWindowReset(body); wok && (!ok || wreset.Before(reset)) {
+		reset, ok = wreset, true
+	}
 	if !ok {
-		// Nothing is exhausted with a reset we can reason about (e.g. every
-		// blocking account is disabled — there's no scheduled notion of
-		// "how long"). Issue #55's fail-fast only fires when we KNOW
-		// waiting is pointless; here we don't know that, and treating
-		// "unknown" as "far away" would turn a possibly-transient blip into
-		// an instant, unretryable error. Hold for the same bounded budget
+		// Neither an exhaustion nor a window rejection gives a reset we can
+		// reason about (e.g. every blocking account is disabled — there's no
+		// scheduled notion of "how long"). Issue #55's fail-fast only fires
+		// when we KNOW waiting is pointless; here we don't know that, and
+		// treating "unknown" as "far away" would turn a possibly-transient
+		// blip into an instant, unretryable error. Hold for the same bounded budget
 		// this request already committed to — today's pre-#55 behaviour —
 		// and let the deadline, not a guess, decide when to give up.
 		remaining := deadline.Sub(now)
