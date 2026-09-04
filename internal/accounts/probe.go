@@ -20,14 +20,19 @@ package accounts
 // per tick.
 //
 // Two suppressions, both deliberate. Disabled accounts are skipped outright.
-// So is an account whose quota is spent and whose stored reset has not passed
-// (wouldBill), and that one is a money question: with extra usage enabled such
-// an account answers a probe with a 200 and a charge, while the reading and
-// reset time already on file say everything the probe would (design doc §6.21,
-// "a probe must never be a purchase"). needsProbe returns true for an account
-// with no windows at all before ever reaching this guard, so on its own that
-// would let the first probe after a daemon restart bill (issue #34) — fixed
-// not here but one level up, by never actually starting a restart with zero
+// So is an account that would be CHARGED for the probe (wouldBill): its quota
+// spent, its stored reset still ahead, AND extra usage permitted for it, so
+// the provider answers with a 200 and a bill rather than a refusal (design
+// doc §6.21, "a probe must never be a purchase"). All three parts matter.
+// Until issue #152 the third was missing and the guard asked only "is it
+// spent?": with allowOverage off — the default, and the only setting that
+// spends money — a probe on a spent account cannot be charged, the provider
+// refuses it with a free 429, and that 429 carries the very quota headers a
+// wrong stored reading needs. The guard was declining a free request to avoid
+// a charge that could not occur. needsProbe returns true for an account with
+// no windows at all before ever reaching this guard, so on its own that would
+// let the first probe after a daemon restart bill (issue #34) — fixed not
+// here but one level up, by never actually starting a restart with zero
 // windows: SeedQuota (seed.go) installs last-known state from quota_samples
 // before the probe loop runs, so "no windows" means genuinely unknown again.
 //
@@ -79,13 +84,21 @@ func probeModel(a *pool.Account) string {
 // ProbeIdle sends one minimal request per account whose quota data is missing
 // or older than staleAfter, so a standby tank shows a current level instead of
 // "awaiting signal" or a reading from hours ago. Accounts that are serving get
-// fresh headers for free and are skipped, as are disabled ones and any whose
-// quota is spent and unreset — probing those costs money, not information
-// (see wouldBill).
+// fresh headers for free and are skipped, as are disabled ones and any where
+// the probe would be BILLED rather than refused — spent, unreset and with
+// extra usage permitted (see wouldBill). A spent account that cannot bill is
+// probed like any other: the worst it can cost is a 429, which refreshes the
+// reading rather than re-charging for it.
+//
+// The pool's allowOverage default is read once here and passed down rather
+// than being fetched inside needsProbe, so one sweep decides against one
+// consistent value of the money switch — the dashboard can flip it from
+// another goroutine mid-sweep.
 func ProbeIdle(ctx context.Context, p *pool.Pool, client *http.Client, defaultUpstream string,
 	staleAfter time.Duration, logger *slog.Logger) {
+	poolAllows := p.AllowOverage()
 	for _, a := range p.Accounts() {
-		if a.State() == pool.StateDisabled || !needsProbe(a, staleAfter) {
+		if a.State() == pool.StateDisabled || !needsProbe(a, poolAllows, staleAfter) {
 			continue
 		}
 		// An idle account's token expires with nothing to notice: no request
@@ -116,27 +129,44 @@ func ProbeIdle(ctx context.Context, p *pool.Pool, client *http.Client, defaultUp
 	}
 }
 
-// wouldBill reports that probing this account would be charged rather than
-// covered by the subscription.
+// wouldBill reports that probing this account would be charged, rather than
+// refused for free or covered by the subscription.
 //
-// This is not hypothetical. An account whose weekly window is spent but which
-// has extra usage available answers a probe with a 200 and a bill — so
-// `probeOnStart` plus `probeInterval` quietly bought a request every thirty
-// minutes, forever, to re-learn a fact already on file.
+// Two halves, both required.
 //
-// There is nothing to learn either way: if quota is gone the probe returns
-// the reading we already have, and if it is gone with overage on, we pay for
-// the privilege. The stored reset time is what says when to look again, so
-// waiting for it costs nothing.
+// CanOverage — can this account spend at all? Extra usage has to be permitted
+// for it, by its own opt-in or by pool.allowOverage. With that off, which is
+// the default and the only setting documented as spending money, a probe on a
+// spent account is answered with a 429: free, and carrying fresh quota
+// headers. Skipping it buys nothing and forgoes the one reading that can
+// correct a wrong one (issue #152).
 //
-// Only the windows the probe's OWN model draws on can make it bill. A spent
-// family the probe never engages says nothing about what the probe costs:
-// the probe asks for a small non-fable model, so a spent fable bucket cannot
-// charge it, and treating that as "would bill" would park an otherwise
-// healthy account's tank until that family reset — up to a week — while
-// nothing refreshed it. That was reachable before quota windows were
-// retained across readings and is the ordinary case now that they are.
-func wouldBill(a *pool.Account, now time.Time) bool {
+// readsSpent — is the subscription's own quota gone? While it is not, the
+// probe is covered whatever the overage setting says.
+//
+// The billing case is not hypothetical. An account whose weekly window is
+// spent but which has extra usage available answers a probe with a 200 and a
+// bill — so `probeOnStart` plus `probeInterval` quietly bought a request every
+// thirty minutes, forever, to re-learn a fact already on file.
+func wouldBill(a *pool.Account, poolAllows bool, now time.Time) bool {
+	if !a.CanOverage(poolAllows) {
+		return false // the provider refuses instead of charging: free
+	}
+	return readsSpent(a, now)
+}
+
+// readsSpent reports what the stored reading CLAIMS: that the probe's own
+// quota is gone and has not yet come back — a governing window at or past its
+// limit, with the reset it named still ahead (or never reported at all).
+//
+// Only the windows the probe's OWN model draws on count. A spent family the
+// probe never engages says nothing about what the probe would meet: the probe
+// asks for a small non-fable model, so a spent fable bucket cannot charge it,
+// and treating that as spent would park an otherwise healthy account's tank
+// until that family reset — up to a week — while nothing refreshed it. That
+// was reachable before quota windows were retained across readings and is the
+// ordinary case now that they are.
+func readsSpent(a *pool.Account, now time.Time) bool {
 	governing := map[string]bool{}
 	if gw := provider.For(a.Type).GoverningWindows; gw != nil {
 		for _, name := range gw(probeModel(a)) {
@@ -159,64 +189,139 @@ func wouldBill(a *pool.Account, now time.Time) bool {
 	if !spent {
 		return false
 	}
-	// now.Before(reset): still within the window that made it spent, so the
-	// stored reading already says what a probe would — wait for the reset
-	// instead of paying to re-learn it.
+	// now.Before(reset): still inside the window that made it spent. That is
+	// the reading's own account of itself, and where a probe would be billed
+	// it is the only account of itself available for free — but it is not
+	// proof. A window can refill before the reset it announced: Anthropic ran
+	// an ad-hoc reset for every user on 2026-09-04, outside the reset times
+	// its own headers had given, and #135 records a 7d falling to 0.0 while
+	// its reported reset stayed thirty-one hours ahead. So this is what the
+	// reading claims, not what is known. needsProbe re-measures the claim for
+	// free wherever a probe cannot be charged, and caps how long it goes
+	// unchallenged where one can (billedProbeAge).
 	//
 	// reset.IsZero(): no reset was ever recorded for the spent window (a
 	// provider that didn't report one), so there is no time to wait for and
 	// no way to tell "still spent" from "reset already happened but nobody
-	// looked". This deliberately still returns true — never probe rather
-	// than risk a bill — which means such an account's tank can go stuck
-	// until something other than a probe updates it (ordinary proxied
-	// traffic, which bills only because the request itself was real, still
-	// refreshes it via RecordQuota). The alternative, probing whenever the
-	// reset is unknown, would turn "unknown" into "bill every staleAfter
-	// tick forever" for any provider window that omits a reset — worse than
-	// a stuck tank against the one hard rule here (never spend uninvited),
-	// so this is the deliberate choice, not a latent bug.
+	// looked". This deliberately still counts as spent — never risk a bill on
+	// a guess — which, where a probe WOULD bill, means such an account's tank
+	// leans on the age cap and on ordinary proxied traffic (which bills only
+	// because the request itself was real) to move at all. The alternative,
+	// treating an unknown reset as refilled, would turn "unknown" into "bill
+	// every staleAfter tick forever" for any provider window that omits a
+	// reset — worse than a slow tank against the one hard rule here (never
+	// spend uninvited), so this is the deliberate choice, not a latent bug.
+	// Where the probe is free the distinction costs nothing either way:
+	// needsProbe re-measures on the ordinary cadence regardless.
 	return reset.IsZero() || now.Before(reset)
 }
 
-// needsProbe is true when we have no quota reading, or the newest one has
-// aged past staleAfter.
+// billedProbeAge is how long an account whose probe WOULD be billed may sit on
+// one stored reading before a single probe is bought to re-check it (issue
+// #152, the age cap).
 //
-// The wouldBill guard sits after the no-reading case, not before it, so on
-// its own it would only stop repeat probes: an account with no windows at
-// all would be probed even when that bills, which used to be one charge per
-// daemon restart (issue #34). Deliberately not fixed by moving the check
-// above the empty-windows return — that would leave a never-yet-probed
-// account's tank blank forever, since nothing else refreshes an idle
-// account. The actual fix is that "no windows" no longer happens on a normal
-// restart: SeedQuota (seed.go) installs last-known state from quota_samples
-// before this ever runs, so len(wins) == 0 here means the account genuinely
-// has never had a reading, not "we just restarted".
-func needsProbe(a *pool.Account, staleAfter time.Duration) bool {
+// Waiting for the reported reset assumes a window can only refill at the
+// moment its own header predicted, which readsSpent's comment records is
+// false. Where the probe is free, dropping that assumption costs nothing.
+// Where it is billed, dropping it entirely would reinstate issue #34's
+// charge-every-tick, and keeping it can park real capacity for days — three
+// accounts sat wrongly spent for up to five days after the 2026-09-04 ad-hoc
+// reset, with a fourth carrying all the traffic. So the wait is bounded
+// instead: one bought request per this interval is a far smaller cost than
+// days of wrongly-deprioritised capacity, and #138's FetchedAt is what makes
+// the reading's true age knowable in the first place.
+//
+// A multiple of the ordinary probe cadence, clamped at both ends so no
+// configured interval turns "about once a day" into "every few minutes" or
+// "not this week". staleAfter <= 0 is startup-only probing, which has no
+// cadence to scale from, so it takes the ceiling.
+func billedProbeAge(staleAfter time.Duration) time.Duration {
+	const (
+		factor  = 48 // 48 x the 30m default = one billed probe a day
+		floor   = 6 * time.Hour
+		ceiling = 24 * time.Hour
+	)
+	if staleAfter <= 0 || staleAfter >= ceiling {
+		return ceiling
+	}
+	d := factor * staleAfter
+	switch {
+	case d < floor:
+		return floor
+	case d > ceiling:
+		return ceiling
+	}
+	return d
+}
+
+// needsProbe is true when we have no quota reading, or the one we have is
+// worth re-measuring: aged past staleAfter, or claiming the account is spent
+// when finding out otherwise costs nothing.
+//
+// The money guard sits after the no-reading case, not before it, so on its own
+// it would only stop repeat probes: an account with no windows at all would be
+// probed even when that bills, which used to be one charge per daemon restart
+// (issue #34). Deliberately not fixed by moving the check above the
+// empty-windows return — that would leave a never-yet-probed account's tank
+// blank forever, since nothing else refreshes an idle account. The actual fix
+// is that "no windows" no longer happens on a normal restart: SeedQuota
+// (seed.go) installs last-known state from quota_samples before this ever
+// runs, so len(wins) == 0 here means the account genuinely has never had a
+// reading, not "we just restarted".
+func needsProbe(a *pool.Account, poolAllows bool, staleAfter time.Duration) bool {
 	wins := a.QuotaWindows()
 	if len(wins) == 0 {
 		return true
 	}
-	if wouldBill(a, time.Now()) {
-		return false
-	}
-	// A rejected re-probe (issue #90) sets NextProbeAt to enforce its own
-	// growing backoff, separately from — and possibly longer than —
-	// staleAfter; check it before the ordinary staleness comparison below so
-	// a repeatedly-rejected exhausted account is spaced out rather than
-	// re-probed every tick at the base interval.
-	if next := a.NextProbeAt(); !next.IsZero() && time.Now().Before(next) {
-		return false
-	}
-	if staleAfter <= 0 {
-		return false // periodic probing disabled: startup gap only
-	}
+	now := time.Now()
 	newest := time.Time{}
 	for _, w := range wins {
 		if w.FetchedAt.After(newest) {
 			newest = w.FetchedAt
 		}
 	}
-	return time.Since(newest) > staleAfter
+	if wouldBill(a, poolAllows, now) {
+		// This probe is a purchase. Hold off until the reading is old
+		// enough that one bought request beats going on believing it.
+		//
+		// newest.IsZero() is an UNKNOWN measurement time, not an infinitely
+		// old one — a sample seeded from a row written before #138 added
+		// fetched_at carries exactly that. Spending against it would buy a
+		// request on every daemon restart, which is issue #34 verbatim, so
+		// the cap holds off until there is a real measurement time to
+		// measure against. Elsewhere in this function an unknown FetchedAt
+		// counts as maximally stale, because there the mistake is free.
+		if newest.IsZero() || now.Sub(newest) < billedProbeAge(staleAfter) {
+			return false
+		}
+	}
+	// A rejected re-probe (issue #90) sets NextProbeAt to enforce its own
+	// growing backoff, separately from — and possibly longer than —
+	// staleAfter; check it before the staleness comparison below so a
+	// repeatedly-rejected exhausted account is spaced out rather than
+	// re-probed every tick at the base interval.
+	if next := a.NextProbeAt(); !next.IsZero() && now.Before(next) {
+		return false
+	}
+	// Not the same question as wouldBill above: this is what the reading
+	// claims regardless of who would pay, and below it is a reason to
+	// re-measure rather than a reason not to.
+	spent := readsSpent(a, now)
+	if staleAfter <= 0 {
+		// Periodic probing disabled: startup gap only. A reading that says
+		// "spent" is still a gap. It is the one reading nothing else can
+		// correct — no traffic is routed to a spent account, and #137's
+		// expiry cannot fire while its reset is ahead — and after a restart
+		// it is last-known state seeded from a previous run, not a
+		// measurement of now. Re-measuring it is what makes restarting the
+		// daemon the escape hatch users already expect it to be; where that
+		// would be billed, the age cap above has already had its say.
+		return spent
+	}
+	// Ordinary cadence, spent or not: a spent account is re-measured because
+	// its reading is the one that can be wrong in the direction nothing else
+	// checks, but never harder than an idle healthy one.
+	return now.Sub(newest) > staleAfter
 }
 
 // errProbeUnauthorized marks a 401 so the caller can try a credential

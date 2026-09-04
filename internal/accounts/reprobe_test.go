@@ -123,7 +123,7 @@ func TestNeedsProbeRespectsBackoffEvenPastOrdinaryStaleness(t *testing.T) {
 	// Grow it past staleAfter, the way a second rejected re-probe would.
 	p.MarkReprobeRejected(a, time.Now().Add(3*time.Hour), staleAfter)
 
-	if needsProbe(a, staleAfter) {
+	if needsProbe(a, false, staleAfter) {
 		t.Fatal("needsProbe = true, want false: NextProbeAt's backoff must hold even though " +
 			"the reading is already stale enough for the ordinary check alone to allow a re-probe")
 	}
@@ -131,17 +131,25 @@ func TestNeedsProbeRespectsBackoffEvenPastOrdinaryStaleness(t *testing.T) {
 
 // A probe must never be a purchase, including a re-probe of an exhausted
 // account (issue #90 explicitly extends, not replaces, that rule): an
-// account whose window is fully spent with extra usage possibly enabled
-// must not be probed while its own recorded reset is still in the future.
+// account whose window is fully spent AND whose extra usage is enabled must
+// not be probed while its own recorded reset is still in the future.
+//
+// The overage opt-in below is load-bearing since issue #152. It is what
+// makes this probe a purchase; without it the provider answers 429 for
+// free, and the probe is exactly the re-verification #90 asks for — see
+// TestExhaustedAccountThatCannotBillIsStillReprobed.
 func TestReprobeNeverBillsAnExhaustedAccount(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("a would-bill exhausted account must never be probed")
+		t.Errorf("a would-bill exhausted account must never be probed")
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	now := time.Now()
 	a := pool.NewAccount("would-bill", pool.SourceYAML, "tok", "", 0, srv.URL)
 	a.Type = "claude-oauth"
+	yes := true
+	a.SetAllowOverage(&yes)
 	a.SetQuotaWindows([]pool.QuotaWindow{
 		{Name: "5h", Limit: 1, Used: 1, ResetAt: now.Add(2 * time.Hour), FetchedAt: now.Add(-6 * time.Hour)},
 		{Name: "7d", Limit: 1, Used: 1, ResetAt: now.Add(9 * time.Hour), FetchedAt: now.Add(-6 * time.Hour)},

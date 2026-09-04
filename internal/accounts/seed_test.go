@@ -53,7 +53,7 @@ func TestSeedQuotaSuppressesProbeForASpentAccountWithOverage(t *testing.T) {
 	if len(a.QuotaWindows()) == 0 {
 		t.Fatal("seeding did not install any windows from quota_samples")
 	}
-	if needsProbe(a, 30*time.Minute) {
+	if needsProbe(a, false, 30*time.Minute) {
 		t.Error("a spent account seeded with a still-valid reading must not be probed — " +
 			"that is the request issue #34 says gets billed")
 	}
@@ -76,7 +76,7 @@ func TestSeedQuotaLeavesAnAccountWithNoSamplesProbeable(t *testing.T) {
 	if len(a.QuotaWindows()) != 0 {
 		t.Fatalf("seeding manufactured %d windows out of an empty quota_samples table", len(a.QuotaWindows()))
 	}
-	if !needsProbe(a, 30*time.Minute) {
+	if !needsProbe(a, false, 30*time.Minute) {
 		t.Error("an account with no samples at all must still be probed — unknown state must stay discoverable")
 	}
 }
@@ -109,7 +109,7 @@ func TestSeedQuotaDiscardsASampleWhoseResetHasPassed(t *testing.T) {
 	if len(a.QuotaWindows()) != 0 {
 		t.Fatalf("a sample past its reset should have been discarded, not seeded: %v", a.QuotaWindows())
 	}
-	if !needsProbe(a, 30*time.Minute) {
+	if !needsProbe(a, false, 30*time.Minute) {
 		t.Error("a stale, past-reset sample must not suppress a probe")
 	}
 }
@@ -151,7 +151,7 @@ func TestSeedQuotaRespectsAnExpiredContext(t *testing.T) {
 	if len(a.QuotaWindows()) != 0 {
 		t.Fatalf("an expired context must leave accounts unseeded (same as no samples), got %d windows", len(a.QuotaWindows()))
 	}
-	if !needsProbe(a, 30*time.Minute) {
+	if !needsProbe(a, false, 30*time.Minute) {
 		t.Error("an account that timed out during seeding must still be probeable, like a genuinely unknown one")
 	}
 }
