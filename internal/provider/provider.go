@@ -335,4 +335,15 @@ type Overage struct {
 	// "member_zero_credit_limit". Worth surfacing: most of these are a
 	// setting the user can change.
 	Reason string
+	// FetchedAt is when this reading was taken, the counterpart to
+	// QuotaWindow.FetchedAt (issue #138). Providers do not report it — the
+	// pool stamps it in setOverage from the same clock RecordQuota uses —
+	// but it lives on the reading rather than beside it so that every
+	// surface which already carries an Overage carries its age too.
+	//
+	// Zero means the age is unknown, which is NOT the same as "very old":
+	// issue #151's expiry deliberately refuses to fire on a zero, because
+	// expiring a refusal is the direction that can spend money and a guess
+	// is not grounds to spend.
+	FetchedAt time.Time
 }

@@ -811,7 +811,7 @@ func (p *Pool) RecordQuota(a *Account, h http.Header, now time.Time) {
 	// including ones that carry no window data.
 	if spec.OverageFromHeaders != nil {
 		if ov := spec.OverageFromHeaders(h); ov.Known {
-			a.setOverage(ov)
+			a.setOverage(ov, now)
 		}
 	}
 	if spec.WindowsFromHeaders == nil {
@@ -858,11 +858,109 @@ func (a *Account) EffectiveModelMap() map[string]string {
 	return out
 }
 
-// setOverage records what the provider last said about extra usage.
-func (a *Account) setOverage(ov provider.Overage) {
+// setOverage records what the provider last said about extra usage, stamped
+// with when it said it. The stamp is taken here rather than in the provider
+// parser for the same reason QuotaWindow.FetchedAt is (issue #138): headers
+// carry no measurement time, so the clock belongs to whoever received the
+// response.
+func (a *Account) setOverage(ov provider.Overage, now time.Time) {
+	ov.FetchedAt = now
 	a.mu.Lock()
 	a.overage = ov
 	a.mu.Unlock()
+}
+
+// overageRefusalTTL is how long a provider's "no, extra usage is not
+// available" is believed before it is re-tested (issue #151).
+//
+// The reading needs an expiry at all because a refusal suppresses the only
+// request that could replace it. CanOverage answers the provider's question
+// before the operator's — a cached no outranks allowOverage, which is right,
+// the provider really does have the last word — but selection needs
+// CanOverage true to send anything, and only a sent request brings fresh
+// headers. So "do not bother asking" is the one reading only asking can
+// clear. Live on 2026-09-04 that cost hours of 429s with allowOverage
+// correctly on, and cleared only on a daemon restart, which drops the
+// (memory-only, issue #150) reading and puts Known back to false.
+//
+// Overage.ResetAt cannot serve as the deadline: it is a billing period, so
+// it can be months out and says nothing about when a console setting
+// changed. Hence an age rule, which #138's FetchedAt work made possible.
+//
+// Thirty minutes, and deliberately far shorter than the 6-24h cap issue #152
+// put on a BILLED probe, because the two re-tests cost different things:
+//
+//   - #152 buys a request to re-measure a spent window. Being wrong there
+//     spends money, so it is rationed to about one a day.
+//   - Re-testing a refusal is, in the case that matters, free. If the
+//     provider still refuses, the request comes back a 429 or an ordinary
+//     quota rejection — no charge — and those headers re-stamp the reading,
+//     so a genuinely refusing provider is retried at most once per account
+//     per TTL, not hammered.
+//
+// The cost is even smaller than "one wasted request" makes it sound. Extra
+// usage is the last-resort tier: it is only reached once no account has free
+// headroom, which is precisely when the alternative to the re-test is
+// failing the request outright. A 429 that might have been a 200 is strictly
+// better than a 429 that could never have been anything else.
+//
+// Thirty minutes matches the default probe cadence — the pool's own rhythm
+// for "go and look again" — and bounds the user-visible stall at half an
+// hour against the hours actually observed. A constant rather than a setting
+// because there is no operator judgement to make here: nothing about the
+// number decides whether money is spent, only how quickly a change of mind
+// upstream is noticed.
+const overageRefusalTTL = 30 * time.Minute
+
+// expireStaleRefusal returns the reading CanOverage should judge on: the
+// stored one, unless it is a refusal old enough to be worth re-testing, in
+// which case an unknown one.
+//
+// Unknown is the target state on purpose. It is what a restart produces —
+// the workaround that actually unstuck the user — and it hands the decision
+// back to the operator's own setting: an explicit per-account opt-in is
+// honoured, while a pool-wide default alone still is not, because CanOverage
+// requires a confirmed header before acting on one. So an account nobody
+// singled out cannot become billable by this path; the residual risk is one
+// possibly-billed request on an account whose owner explicitly asked for
+// extra usage, which is the same bounded risk issue #139 documented and
+// accepted for pins.
+//
+// The stored reading is NOT modified. Overage() keeps returning the real
+// one, Reason and all: "member_zero_credit_limit" was the entire answer to
+// "why is my overage not working", and an expiry that quietly deleted it
+// would trade one diagnosis problem for another.
+//
+// A zero FetchedAt never expires. That is an unknown age, not an infinite
+// one, and treating unknown as expired is how #34 came to buy a request on
+// every daemon restart.
+func expireStaleRefusal(ov provider.Overage, now time.Time) provider.Overage {
+	if !ov.Known || ov.Available || ov.FetchedAt.IsZero() {
+		return ov
+	}
+	if now.Sub(ov.FetchedAt) <= overageRefusalTTL {
+		return ov
+	}
+	return provider.Overage{Utilization: -1} // as though the provider had never said
+}
+
+// OverageRefusal reports the provider's standing refusal to serve extra
+// usage on this account: its reason (possibly empty, if the provider gave
+// none) and whether one is in force at all.
+//
+// False once the refusal has aged past overageRefusalTTL, so this agrees
+// with what CanOverage just decided rather than with what is merely on file
+// — a surface that said "refused: member_zero_credit_limit" about a reading
+// spillway had already stopped believing would be a new way to be misled.
+func (a *Account) OverageRefusal() (string, bool) {
+	a.mu.Lock()
+	ov := a.overage
+	a.mu.Unlock()
+	ov = expireStaleRefusal(ov, time.Now())
+	if !ov.Known || ov.Available {
+		return "", false
+	}
+	return ov.Reason, true
 }
 
 // Overage reports the last known extra-usage state. Known is false until a
@@ -880,8 +978,11 @@ func (a *Account) Overage() provider.Overage {
 //
 // The three cases differ in who is asserting what:
 //
-//   - The provider said no. Believe it, whatever the config says: the request
-//     would be rejected anyway, and arguing costs a round trip.
+//   - The provider said no, recently. Believe it, whatever the config says:
+//     the request would be rejected anyway, and arguing costs a round trip.
+//     Only recently, though — past overageRefusalTTL the refusal expires to
+//     unknown and the cases below decide instead, because a cached no
+//     suppresses the only request that could ever replace it (issue #151).
 //   - The account is explicitly opted in. Try it, even with no confirming
 //     header. This is not optional: spillway will not probe a spent account
 //     precisely because that probe would be billed, so for the account that
@@ -892,9 +993,16 @@ func (a *Account) Overage() provider.Overage {
 //   - Only the pool-wide default is set. Then the user has singled nothing
 //     out, so require the provider to have confirmed it.
 func (a *Account) CanOverage(poolAllows bool) bool {
+	return a.canOverageAt(poolAllows, time.Now())
+}
+
+// canOverageAt is CanOverage with the clock injected, so the expiry of a
+// stale refusal is testable without sleeping for half an hour.
+func (a *Account) canOverageAt(poolAllows bool, now time.Time) bool {
 	a.mu.Lock()
 	ov, allow := a.overage, a.allowOverage
 	a.mu.Unlock()
+	ov = expireStaleRefusal(ov, now)
 	if ov.Known && !ov.Available {
 		return false
 	}
@@ -1370,10 +1478,20 @@ func (p *Pool) Add(a *Account) bool {
 	return true
 }
 
-// SetOverageForTest seeds the extra-usage state. Production code learns this
-// only from a provider response; tests need to arrange the state that a
-// response would have produced.
-func (a *Account) SetOverageForTest(ov provider.Overage) { a.setOverage(ov) }
+// SetOverageForTest seeds the extra-usage state as of now. Production code
+// learns this only from a provider response; tests need to arrange the state
+// that a response would have produced.
+func (a *Account) SetOverageForTest(ov provider.Overage) { a.setOverage(ov, time.Now()) }
+
+// SetOverageAtForTest seeds the extra-usage state as of an arbitrary time,
+// for tests about how a reading ages (issue #151's refusal expiry).
+func (a *Account) SetOverageAtForTest(ov provider.Overage, at time.Time) { a.setOverage(ov, at) }
+
+// CanOverageAtForTest exposes CanOverage's injected clock, so a test can ask
+// what the selector would decide at a given moment.
+func (a *Account) CanOverageAtForTest(poolAllows bool, now time.Time) bool {
+	return a.canOverageAt(poolAllows, now)
+}
 
 // AccountSettings is the subset of one account's config that the dashboard
 // can edit live. A plain DTO rather than *config.AccountConfig so this
@@ -1466,4 +1584,51 @@ func (p *Pool) Apply(s Settings) {
 		a.SetPriority(as.Priority)
 		a.SetAllowOverage(as.AllowOverage)
 	}
+}
+
+// OverageRefusals lists the distinct reasons the provider is currently
+// refusing to serve extra usage, across every account in the pool.
+//
+// For the "all accounts exhausted" path (issue #151). When the pool has run
+// dry and extra usage is switched on, "exhausted" is not the whole story:
+// the provider declining to sell more is a different problem with a
+// different fix, and the reason it gives — "member_zero_credit_limit" being
+// the one observed live — is usually a console setting the user can change
+// in a minute. It appeared in no surface anyone looks at, which is why
+// diagnosing it took six queries.
+//
+// Reasons only, never account names: this feeds a notification body as well
+// as the client's error, and issue #101 settled that a leaked notify topic
+// must not be worth reading. A refusal reason is a property of the
+// subscription's billing settings, not an identifier.
+//
+// Distinct and sorted so three accounts refused for the same reason read as
+// one fact rather than three, and so the message is stable between calls.
+// Expired refusals are excluded, because OverageRefusal already drops them:
+// a message naming a reading spillway has stopped believing would be a new
+// way to mislead.
+func (p *Pool) OverageRefusals() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	seen := map[string]bool{}
+	for _, a := range p.accounts {
+		reason, refused := a.OverageRefusal()
+		if !refused {
+			continue
+		}
+		if reason == "" {
+			// The provider refused without saying why. Still worth
+			// reporting: "the provider will not sell you more" is the
+			// actionable half; the reason is only the detail.
+			reason = "no reason given"
+		}
+		if seen[reason] {
+			continue
+		}
+		seen[reason] = true
+		out = append(out, reason)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -23,7 +23,7 @@ func overageRig(t *testing.T) (p *Pool, billable, healthy *Account) {
 	now := time.Now()
 	billable = NewAccount("billable", SourceYAML, "tok", "", 0, "")
 	billable.Type = "claude-oauth"
-	billable.setOverage(provider.Overage{Known: true, Available: true})
+	billable.setOverage(provider.Overage{Known: true, Available: true}, time.Now())
 	healthy = NewAccount("healthy", SourceYAML, "tok", "", 0, "")
 	healthy.Type = "claude-oauth"
 	p = New([]*Account{billable, healthy}, now)
@@ -112,7 +112,7 @@ func TestUnknownOverageStateIsNeverBilled(t *testing.T) {
 		t.Error("an account that has never responded was judged billable")
 	}
 	rejected := NewAccount("rejected", SourceYAML, "tok", "", 0, "")
-	rejected.setOverage(provider.Overage{Known: true, Available: false, Reason: "member_zero_credit_limit"})
+	rejected.setOverage(provider.Overage{Known: true, Available: false, Reason: "member_zero_credit_limit"}, time.Now())
 	if rejected.CanOverage(true) {
 		t.Error("an account the provider refused overage for was judged billable")
 	}
@@ -228,7 +228,7 @@ func TestProviderRefusalBeatsAnOptIn(t *testing.T) {
 	a := NewAccount("refused", SourceYAML, "tok", "", 0, "")
 	a.Type = "claude-oauth"
 	a.allowOverage = boolp(true)
-	a.setOverage(provider.Overage{Known: true, Available: false, Reason: "member_zero_credit_limit"})
+	a.setOverage(provider.Overage{Known: true, Available: false, Reason: "member_zero_credit_limit"}, time.Now())
 	p := New([]*Account{a}, now)
 	p.MarkExhausted(a, now.Add(4*time.Hour))
 
