@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.19.3](https://github.com/coderage-labs/spillway/compare/v0.19.2...v0.19.3) (2026-09-04)
+
+
+### Fixes
+
+* probe a spent window that costs nothing to re-measure ([#152](https://github.com/coderage-labs/spillway/issues/152)) ([#153](https://github.com/coderage-labs/spillway/issues/153)) ([23bf379](https://github.com/coderage-labs/spillway/commit/23bf379aafc977c11cffb92d28e3641531ec5243))
+* wake a family-rejected hold on its own window deadline ([#140](https://github.com/coderage-labs/spillway/issues/140)) ([#155](https://github.com/coderage-labs/spillway/issues/155)) ([9a40599](https://github.com/coderage-labs/spillway/commit/9a40599e212aba5d6afd47d68e52f303acb34581))
+
 ## [0.19.2](https://github.com/coderage-labs/spillway/compare/v0.19.1...v0.19.2) (2026-09-02)
 
 
