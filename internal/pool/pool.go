@@ -427,6 +427,61 @@ func (p *Pool) EarliestReset() (time.Time, bool) {
 	return earliest, ok
 }
 
+// EarliestWindowReset reports the soonest moment a confirmed per-window
+// rejection governing THIS request expires (issue #140).
+//
+// EarliestReset above answers only for accounts in StateExhausted, and a
+// family-scoped 429 deliberately never puts an account there: issue #54
+// leaves it StateOK so Sonnet/Opus keep serving and records the refusal in
+// windowRejected instead. So when every account is WindowRejectedFor the
+// model asked for, SelectExcept returns nil, the request parks — and
+// EarliestReset reports ok=false, because nobody is exhausted. The hold
+// then had no deadline to wait on and slept its whole holdMax budget, hours
+// past the moment the quota actually came back. This is the deadline it was
+// missing.
+//
+// Deliberately a separate method rather than a widening of EarliestReset:
+// that one is also read by the exhausted notification and the dashboard's
+// NextReset, both of which mean "the pool as a whole is spent until", a
+// model-independent statement. A window rejection is only a fact about one
+// family, so it belongs to the caller that knows which family it is waiting
+// for. internal/proxy/hold.go takes the soonest of the two.
+//
+// Takes the request body, not a model string, so the model is derived by
+// the same modelOf SelectExcept uses — the two must agree about what is
+// being waited for, and a second parse at the call site is exactly how they
+// would drift.
+//
+// ok=false when nothing governing this request is rejected (including every
+// deadline having already passed): the caller keeps whatever EarliestReset
+// told it, and an all-expired pool must not report a wake time in the past.
+//
+// StateDisabled accounts are skipped for the same reason EarliestReset only
+// walks the exhausted: a disabled account's window deadline says nothing
+// about when it can serve again — only re-authentication decides that, and
+// that path signals capacity (issue #105) rather than waiting on a clock.
+func (p *Pool) EarliestWindowReset(body []byte) (time.Time, bool) {
+	now := time.Now()
+	model := modelOf(body)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var earliest time.Time
+	ok := false
+	for _, a := range p.accounts {
+		if a.State() == StateDisabled {
+			continue
+		}
+		u, has := a.earliestWindowRejectionFor(model, now)
+		if !has {
+			continue
+		}
+		if !ok || u.Before(earliest) {
+			earliest, ok = u, true
+		}
+	}
+	return earliest, ok
+}
+
 // Select picks the account for a session: the sticky account if still
 // eligible and under the switch threshold, else the eligible, under-threshold
 // account with the fewest in-flight requests. Over-threshold is a PREFERENCE,
