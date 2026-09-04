@@ -49,6 +49,7 @@ type Canary struct {
 // Run checks every eligible idle account once.
 func (c *Canary) Run(ctx context.Context) []CanaryResult {
 	var out []CanaryResult
+	poolAllows := c.Pool.AllowOverage()
 	for _, a := range c.Pool.Accounts() {
 		if a.State() == pool.StateDisabled || a.Parked() {
 			continue
@@ -58,8 +59,11 @@ func (c *Canary) Run(ctx context.Context) []CanaryResult {
 		}
 		// A canary must never cost money. On an account with extra usage
 		// available and its quota spent, this "free health check" is a
-		// purchase — repeated on every sweep.
-		if wouldBill(a, time.Now()) {
+		// purchase — repeated on every sweep. Where extra usage is NOT
+		// permitted the same account refuses the canary for free (issue
+		// #152), and a 429 answers the only question a canary asks just as
+		// well as a 200 does: the credential authenticated.
+		if wouldBill(a, poolAllows, time.Now()) {
 			continue
 		}
 		// The canary reuses probeOne, which now also re-verifies an already

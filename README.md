@@ -762,10 +762,12 @@ keeps an overage-capable account out of the free tier — and the account is
 tried again on the ordinary rules; whatever headers come back replace the
 stale figure. The same applies to the row a fable-only 429 forges into the
 account's windows, which otherwise outlived the rejection it recorded. A
-reading with no reset at all stays spent: that is the rule the idle probe
-uses (never spend uninvited), and the opposite of what startup seeding does
-with such a row — the two agree on failing toward the side that costs
-nothing; the cost just sits on opposite sides.
+reading with no reset at all stays spent wherever re-measuring it would be
+charged: that is the rule the idle probe uses (never spend uninvited), and
+the opposite of what startup seeding does with such a row — the two agree on
+failing toward the side that costs nothing; the cost just sits on opposite
+sides. Where the probe is free the question does not arise, because the probe
+simply asks again.
 
 The provider's reset header can also lag the refill it announces. Measured
 live: an account's `7d` fell from 0.89 to 0.0 while its reported reset stayed
@@ -844,9 +846,9 @@ now also re-verifies an exhausted account while it stays exhausted: a
 healthy re-probe clears the bench immediately, and a re-probe that is
 rejected again extends it to the fresh deadline while growing — never
 resetting — its own probe backoff, so a genuinely spent account gets
-checked less often over time instead of every tick. This never bills:
-the same guard that stops an ordinary idle probe from paying to re-learn
-a spent window (see below) applies identically here.
+checked less often over time instead of every tick. This never bills
+uninvited: the same guard that stops an ordinary idle probe from paying
+to re-learn a spent window (see below) applies identically here.
 
 ### Hiding credit signals (Claude Code's silent model swap)
 
@@ -1021,9 +1023,40 @@ same schedule also re-verifies an exhausted account for as long as it stays
 exhausted (see "Exhausted accounts are re-probed" above), rather than a
 separate mechanism. This is spillway originating traffic rather than proxying
 it, so it is deliberately narrow: never for an account that already reported
-recently, never fatal on failure, never for an account whose quota is spent
-with a reset still ahead (that would risk billing, not just re-learning a
-figure already on file), and switchable off.
+recently, never fatal on failure, never where the request would be *charged*,
+and switchable off.
+
+That last one is a money rule, not a quota rule, and the difference matters
+(issue #152). A probe is charged only when the account's own quota is spent
+**and** extra usage is permitted for it — by `allowOverage` or its own
+override — in which case the provider answers 200 and bills. With extra usage
+off, which is the default, the same probe is refused with a 429: free, and
+carrying current quota headers. So a spent account that cannot bill is probed
+like any other, and the worst case is a refusal that corrects the reading.
+Until this was fixed the guard skipped every spent account, which meant the
+one reading nothing else can correct — no traffic is routed to a spent
+account, and a reading whose reset is still ahead does not expire — was also
+the one reading never re-measured. On 2026-09-04 Anthropic reset every user's
+quota outside the reset times its own headers had given; three accounts went
+on showing spent, one of them for a further five days, and restarting the
+daemon did not help because `probeOnStart` asked the same question.
+
+Where a probe *would* be charged the caution stays, but the reported reset is
+no longer treated as the only way a window can refill (it demonstrably is
+not — see the reset lag above). Such an account is left on its stored reading
+for at most a bounded interval — 48 × `probeInterval`, clamped to between 6
+and 24 hours — after which one probe is bought: a single small request is a
+far smaller cost than days of wrongly-deprioritised capacity. A window whose
+measurement time is unknown never triggers that, since an unknown age is not
+evidence of an old one and spending against it would be a charge per restart.
+
+A restart is also an escape hatch again. `probeOnStart` re-measures a seeded
+reading that says "spent" rather than trusting it, so a user who knows their
+quota came back early can restart the daemon and have spillway agree within
+seconds — free, unless extra usage is on, in which case the bounded interval
+above still governs. Accounts with headroom are still left alone at startup:
+their readings are believable and re-measuring them would be traffic nobody
+asked for.
 
 Quota windows live in memory, so a restart used to mean every tank went blank
 until the next probe or request — and, for an account that was spent with

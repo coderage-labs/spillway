@@ -136,20 +136,20 @@ func TestNeedsProbe(t *testing.T) {
 		FetchedAt: time.Now().Add(-2 * time.Hour)}})
 	blank := pool.NewAccount("blank", pool.SourceYAML, "t", "", 0, "")
 
-	if needsProbe(fresh, 30*time.Minute) {
+	if needsProbe(fresh, false, 30*time.Minute) {
 		t.Error("a fresh reading should not be re-probed")
 	}
-	if !needsProbe(stale, 30*time.Minute) {
+	if !needsProbe(stale, false, 30*time.Minute) {
 		t.Error("a stale reading should be re-probed")
 	}
-	if !needsProbe(blank, 30*time.Minute) {
+	if !needsProbe(blank, false, 30*time.Minute) {
 		t.Error("no reading at all should always be probed")
 	}
 	// Interval 0 = startup-only: never re-probe something we already have.
-	if needsProbe(stale, 0) {
+	if needsProbe(stale, false, 0) {
 		t.Error("interval 0 should disable staleness re-probing")
 	}
-	if !needsProbe(blank, 0) {
+	if !needsProbe(blank, false, 0) {
 		t.Error("interval 0 must still fill an account with no reading")
 	}
 }
@@ -212,6 +212,12 @@ func TestProbeSkipsAnAccountWhereItWouldBeBilled(t *testing.T) {
 	now := time.Now()
 	a := pool.NewAccount("spent", pool.SourceYAML, "tok", "", 0, "")
 	a.Type = "claude-oauth"
+	// Extra usage permitted: this is what makes the probe a purchase rather
+	// than a free refusal (issue #152). Without it the provider answers 429
+	// and the probe should go ahead — see
+	// TestSpentAccountIsProbedWhenTheProbeCannotBeBilled.
+	yes := true
+	a.SetAllowOverage(&yes)
 	a.SetQuotaWindows([]pool.QuotaWindow{
 		{Name: "5h", Limit: 1, Used: 0, ResetAt: now.Add(2 * time.Hour), FetchedAt: now.Add(-6 * time.Hour)},
 		{Name: "7d", Limit: 1, Used: 1, ResetAt: now.Add(9 * time.Hour), FetchedAt: now.Add(-6 * time.Hour)},
@@ -220,7 +226,7 @@ func TestProbeSkipsAnAccountWhereItWouldBeBilled(t *testing.T) {
 	if !needsProbeIgnoringCost(a, 30*time.Minute) {
 		t.Fatal("precondition: this account is not stale, so the test proves nothing")
 	}
-	if needsProbe(a, 30*time.Minute) {
+	if needsProbe(a, false, 30*time.Minute) {
 		t.Error("probed an account whose quota is gone — on extra usage that is a charge, " +
 			"and it re-reads a reset time already on file")
 	}
@@ -235,7 +241,7 @@ func TestProbeResumesAfterTheWindowResets(t *testing.T) {
 	a.SetQuotaWindows([]pool.QuotaWindow{
 		{Name: "7d", Limit: 1, Used: 1, ResetAt: now.Add(-time.Minute), FetchedAt: now.Add(-6 * time.Hour)},
 	})
-	if !needsProbe(a, 30*time.Minute) {
+	if !needsProbe(a, false, 30*time.Minute) {
 		t.Error("never probed again after the reset passed — the account would show " +
 			"as spent forever")
 	}
@@ -250,7 +256,7 @@ func TestProbeStillRunsForAHealthyStaleAccount(t *testing.T) {
 	a.SetQuotaWindows([]pool.QuotaWindow{
 		{Name: "7d", Limit: 1, Used: 0.4, ResetAt: now.Add(9 * time.Hour), FetchedAt: now.Add(-6 * time.Hour)},
 	})
-	if !needsProbe(a, 30*time.Minute) {
+	if !needsProbe(a, false, 30*time.Minute) {
 		t.Error("stopped probing a healthy account")
 	}
 }
