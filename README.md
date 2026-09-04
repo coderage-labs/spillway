@@ -1209,6 +1209,45 @@ on every restart and is normally filled in by the startup probe within
 seconds. It persists only if `probeOnStart` is off, the probe failed, or the
 account has never been used.
 
+### A refusal is re-tested after 30 minutes
+
+A provider refusal outranks `allowOverage`, which is right — the provider has
+the last word — but it used to be believed forever, and that made it
+self-sustaining. Selection needs extra usage to be permitted before it will
+send anything, and only a sent request brings fresh headers, so the reading
+that said "do not bother asking" was the one reading only asking could clear.
+Turning a credit limit back on in the provider's console changed nothing:
+spillway went on serving 429s until the daemon was restarted, which drops the
+in-memory reading and puts the state back to `unknown`.
+
+So a refusal now expires **30 minutes** after it was read, back to exactly
+that `unknown` — the state a restart produces. What happens next is decided
+by your own setting, unchanged: an account you named explicitly is tried
+again, while a pool-wide `allowOverage: true` alone still is not, because
+that path requires a confirmed header and an expired refusal is not one. No
+account becomes billable that you had not already singled out.
+
+Thirty minutes rather than the day-scale cap on a re-measuring probe, because
+re-testing a refusal is the cheap direction: if the provider still refuses,
+the request comes back a 429 — free — and those headers re-stamp the reading,
+so a provider that genuinely refuses is retried at most once per account per
+half hour. Extra usage is also the last-resort tier, reached only when
+nothing else has headroom, so the request the re-test might "waste" was going
+to fail anyway.
+
+The reason the provider gave is not discarded by the expiry. It is the whole
+answer to "why is my extra usage not working" — `member_zero_credit_limit`
+usually means a credit limit you can change in a minute — so it stays on the
+account, and `spillway status` now prints it under the table:
+
+```
+extra usage: you@example.com refused by the provider (member_zero_credit_limit), checked 12m ago
+```
+
+The same reason appears in the `all accounts exhausted` 429 body, in the
+exhaustion notification, and on the `pool exhausted` log line. It used to
+appear only in `/api/accounts`, where nothing but the dashboard looks.
+
 Nothing bills silently. A charged request gets a `WARN`, its own `overage`
 kind in the request log, a desktop notification, a red badge on the tank, and
 `£ N on extra usage` in the status line. The dashboard also shows how much of

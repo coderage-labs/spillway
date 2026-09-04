@@ -394,7 +394,21 @@ type accountJSON struct {
 	// permitted by config.
 	Overage       bool   `json:"overage,omitempty"`
 	OverageReason string `json:"overageReason,omitempty"`
-	Paid          bool   `json:"paid,omitempty"`
+	// OverageRefused is a refusal spillway is currently ACTING on, as
+	// opposed to OverageReason, which is the last thing the provider said
+	// whether or not it is still believed. The two differ once a refusal has
+	// aged past the point where it is re-tested (issue #151): the reason
+	// stays visible, because it is the answer to "why is my extra usage not
+	// working", while the refusal stops suppressing selection.
+	//
+	// This is the field a surface should key on to say "extra usage is
+	// blocked". `spillway status` does.
+	OverageRefused bool `json:"overageRefused,omitempty"`
+	// OverageCheckedAt is when the extra-usage reading was taken — the
+	// counterpart to QuotaWindow.FetchedAt. Absent until a response has said
+	// anything at all.
+	OverageCheckedAt *time.Time `json:"overageCheckedAt,omitempty"`
+	Paid             bool       `json:"paid,omitempty"`
 	// OverageUsed is the fraction of the extra-usage allowance consumed
 	// (0-1); -1 when the provider does not report it. At 1 the next billed
 	// request is refused, and unlike a quota window this refills on a
@@ -456,6 +470,10 @@ func (s *Server) accounts() []accountJSON {
 		if r := a.Overage().ResetAt; !r.IsZero() {
 			j.OverageResetAt = &r
 		}
+		if f := a.Overage().FetchedAt; !f.IsZero() {
+			j.OverageCheckedAt = &f
+		}
+		_, j.OverageRefused = a.OverageRefusal()
 		if a.Parked() {
 			j.State = "parked"
 			out = append(out, j)

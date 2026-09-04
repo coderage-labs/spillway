@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,13 +29,29 @@ func runStatus(jsonOut bool) error {
 	if jsonOut {
 		return statusJSON(api)
 	}
+	return statusTable(api, os.Stdout)
+}
+
+// statusTable renders the human view. Split out from runStatus, and taking
+// the sink, so a test can drive it against a stub admin server: dialAdmin
+// resolves the REAL config and the real daemon's listener, which no test may
+// go near.
+func statusTable(api *adminAPI, out io.Writer) error {
 	var accounts []struct {
 		Name           string `json:"name"`
 		Type           string `json:"type"`
 		State          string `json:"state"`
 		InFlight       int    `json:"inFlight"`
 		ExhaustedUntil string `json:"exhaustedUntil"`
-		Windows        []struct {
+		// OverageRefused/OverageReason drive the notes under the table
+		// (issue #151). Refused is the bit spillway is acting on; Reason is
+		// the provider's own words for why, and the whole answer to "why is
+		// my extra usage not working" — it used to live only in
+		// /api/accounts, where nothing but the dashboard looks.
+		OverageRefused   bool      `json:"overageRefused"`
+		OverageReason    string    `json:"overageReason"`
+		OverageCheckedAt time.Time `json:"overageCheckedAt"`
+		Windows          []struct {
 			Name    string    `json:"name"`
 			Limit   float64   `json:"limit"`
 			Used    float64   `json:"used"`
@@ -46,7 +63,7 @@ func runStatus(jsonOut bool) error {
 		return err
 	}
 	if len(accounts) == 0 {
-		fmt.Println("no accounts")
+		fmt.Fprintln(out, "no accounts")
 		return nil
 	}
 	// One column per quota window, in the order they are first seen. Accounts
@@ -101,7 +118,24 @@ func runStatus(jsonOut bool) error {
 		}
 		t.add(row...)
 	}
-	t.render(os.Stdout)
+	t.render(out)
+
+	// Extra-usage refusals go below the table rather than in a column: they
+	// are per-account but rare, so a column would be empty on every healthy
+	// pool while a note says more in the case that matters.
+	for _, a := range accounts {
+		if !a.OverageRefused {
+			continue
+		}
+		line := "extra usage: " + a.Name + " refused by the provider"
+		if a.OverageReason != "" {
+			line += " (" + a.OverageReason + ")"
+		}
+		if !a.OverageCheckedAt.IsZero() {
+			line += ", checked " + compactDur(time.Since(a.OverageCheckedAt)) + " ago"
+		}
+		fmt.Fprintln(out, line)
+	}
 	return nil
 }
 

@@ -152,16 +152,40 @@ func (h *Handler) publish(e events.Event) {
 // event: what happened and when it clears, never which account (issue #101
 // comment — a leaked ntfy topic must not be worth reading).
 func exhaustedMessage(p *pool.Pool) string {
-	reset, ok := p.EarliestReset()
-	if !ok {
-		return "All accounts exhausted"
+	msg := "All accounts exhausted"
+	if reset, ok := p.EarliestReset(); ok {
+		wait := time.Until(reset).Round(time.Minute)
+		if wait < 0 {
+			wait = 0
+		}
+		msg += ", soonest reset " + reset.Local().Format("15:04") +
+			" (in " + wait.String() + ")"
 	}
-	wait := time.Until(reset).Round(time.Minute)
-	if wait < 0 {
-		wait = 0
+	if note := overageRefusalNote(p); note != "" {
+		msg += "; " + note
 	}
-	return "All accounts exhausted, soonest reset " + reset.Local().Format("15:04") +
-		" (in " + wait.String() + ")"
+	return msg
+}
+
+// overageRefusalNote renders the pool's standing extra-usage refusals for a
+// user-facing message, or "" when the provider is not refusing (issue #151).
+//
+// The exhausted message said only that quota had run out, which is the same
+// sentence whether or not extra usage was switched on and being declined —
+// two different situations with two different fixes, and the second one is
+// usually a credit limit the user can change in a minute. The reason is
+// already on file; until now it appeared only in /api/accounts, where
+// nothing but the dashboard looks.
+//
+// Named accounts are deliberately absent: exhaustedMessage feeds a
+// notification body (issue #101 — a leaked ntfy topic must not be worth
+// reading), and OverageRefusals returns reasons only for that reason.
+func overageRefusalNote(p *pool.Pool) string {
+	reasons := p.OverageRefusals()
+	if len(reasons) == 0 {
+		return ""
+	}
+	return "provider is refusing extra usage (" + strings.Join(reasons, ", ") + ")"
 }
 
 // caIssuer mints per-host leaf certificates (mitm.CA; interface for tests).
@@ -614,7 +638,16 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 				if r.Context().Err() != nil {
 					return finish("(cancelled)") // client gone — nothing to write to
 				}
-				h.logger.Warn("pool exhausted", "path", r.URL.Path)
+				// The refusal reason rides along on the log line too: this
+				// is the moment a user goes looking, and the answer to "why
+				// is my extra usage not working" used to be nowhere in the
+				// log at all (issue #151).
+				overageNote := overageRefusalNote(h.pool)
+				if overageNote != "" {
+					h.logger.Warn("pool exhausted", "path", r.URL.Path, "overage", overageNote)
+				} else {
+					h.logger.Warn("pool exhausted", "path", r.URL.Path)
+				}
 				// Distinguish "nothing left" from "nothing that can serve
 				// THIS": a capability mismatch is not a rate limit, and
 				// reporting it as one sends the client into a pointless
@@ -628,13 +661,18 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 					return outcome{account: "(incompatible)", event: reqlog.EventExhausted,
 						modelAsked: modelAsked, modelServed: modelServed}
 				}
+				clientMsg := "spillway: all accounts exhausted"
+				if overageNote != "" {
+					clientMsg += " — " + overageNote
+				}
 				h.publish(events.Event{Type: reqlog.EventExhausted, Detail: "all accounts exhausted"})
 				if h.notifier != nil {
 					h.notifier.Notify(notify.EventExhausted, "pool-exhausted-all",
 						"spillway: all accounts exhausted", exhaustedMessage(h.pool))
 				}
 				writeJSON(w, http.StatusTooManyRequests,
-					`{"type":"error","error":{"type":"rate_limit_error","message":"spillway: all accounts exhausted"}}`)
+					`{"type":"error","error":{"type":"rate_limit_error","message":`+
+						jsonString(clientMsg)+`}}`)
 				return outcome{account: "(none available)", event: reqlog.EventExhausted,
 					modelAsked: modelAsked, modelServed: modelServed}
 			}
