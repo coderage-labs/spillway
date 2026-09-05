@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.19.4](https://github.com/coderage-labs/spillway/compare/v0.19.3...v0.19.4) (2026-09-05)
+
+
+### Fixes
+
+* give session_hash a key that identifies a session, not a client ([#141](https://github.com/coderage-labs/spillway/issues/141)) ([#160](https://github.com/coderage-labs/spillway/issues/160)) ([193e653](https://github.com/coderage-labs/spillway/commit/193e653ef4ae30c8b70325c8ee1e4939311512a7))
+* re-test a stale provider overage refusal instead of believing it forever ([#151](https://github.com/coderage-labs/spillway/issues/151)) ([#156](https://github.com/coderage-labs/spillway/issues/156)) ([2a70ddc](https://github.com/coderage-labs/spillway/commit/2a70ddc0b936eb447e15f1f0e78e684d4699fb62))
+
 ## [0.19.3](https://github.com/coderage-labs/spillway/compare/v0.19.2...v0.19.3) (2026-09-04)
 
 
