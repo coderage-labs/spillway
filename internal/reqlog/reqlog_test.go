@@ -98,10 +98,12 @@ func TestRedactionBySchema(t *testing.T) {
 	// exception to "never bodies" (see the package doc), and are token
 	// COUNTS — integers describing volume, not the credential tokens the
 	// banned-substring check below exists to catch. session_hash is an
-	// fnv32a hash of proxy.sessionKey's value, hashed again before it
-	// reaches this package, so nothing identifying (a raw client IP, in the
-	// no-user-id fallback case) is ever stored — see RotationCost for why
-	// it exists.
+	// fnv32a hash of proxy.sessionKeys' conversation key (issue #141),
+	// taken before it reaches this package, so nothing identifying (the
+	// client's session id, or a raw client IP in the no-metadata fallback
+	// case) is ever stored — see RotationCost for why it exists, and
+	// TestConversationKeyNeverReachesTheLogRaw in internal/proxy for the
+	// end-to-end proof that no raw identifier lands in a row.
 	//
 	// Anything new must be justified the same way, which is the point of
 	// asserting the exact set.

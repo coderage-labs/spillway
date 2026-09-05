@@ -7,10 +7,12 @@ package pool
 // demonstrate. And a user may simply want a piece of work kept on one
 // subscription, or steered off an account they are about to need elsewhere.
 //
-// Pool-wide rather than per-session, because the sticky key already is:
-// sessionKey hashes metadata.user_id, which is the same for every Claude Code
-// session on the machine. A per-session pin would need an identifier no caller
-// has, and today would not behave any differently.
+// Pool-wide rather than per-session. The sticky key is proxy.sessionKeys'
+// routing key — a hash of Claude Code's whole metadata.user_id blob, so it
+// does vary between client sessions (an earlier version of this comment said
+// it did not) — but a per-session pin would still need the caller to name a
+// session, and no caller has that identifier: `spillway switch` is typed at
+// a terminal, not sent by the client whose traffic it steers.
 
 import (
 	"errors"

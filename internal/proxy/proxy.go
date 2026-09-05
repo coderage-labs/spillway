@@ -11,7 +11,6 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -427,11 +426,12 @@ type outcome struct {
 	// classifiable-error branch, since there is no usage block worth
 	// reading in a synthesized or captured error response.
 	usage usageTotals
-	// sessionHash identifies this request's session (see sessionKey),
-	// hashed a second time before it leaves this package — never the raw
-	// value, which can be a client IP. Empty for paths that bypass pool
-	// selection entirely (isUpgrade/isIdentityPath/isNonQuotaPath), since
-	// no session key is ever computed for them.
+	// sessionHash identifies this request's CONVERSATION (issue #141 — see
+	// sessionKeys), not the account it was routed by, and is hashed before
+	// it leaves this package — never the raw value, which can be a client
+	// IP. Empty for paths that bypass pool selection entirely
+	// (isUpgrade/isIdentityPath/isNonQuotaPath), since no key is ever
+	// computed for them.
 	sessionHash string
 	// prefix is the structural fingerprint of the request PREFIX (issue
 	// #111 phase 1): hashes and counts only, never content. Zero unless
@@ -531,13 +531,17 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		}
 	}
 
-	session := sessionKey(r, body, buffered)
-	// Hashed a second time before it's ever recorded (issue #110): session
-	// is sometimes a raw client IP (sessionKey's no-user-id fallback), and
-	// the request log stores metadata, not identifying values. Computed
-	// once, like modelAsked below — it never changes across this request's
-	// retry loop.
-	sessionHash := hashSession(session)
+	// Two keys from one parse of the body (issue #141). session is the
+	// sticky-routing key and is what the pool sees; conversation is the
+	// finer analysis key and is all the request log sees. See
+	// conversation.go for why they are deliberately different things.
+	session, conversation := sessionKeys(r, body, buffered)
+	// Hashed before it's ever recorded (issue #110): conversation is
+	// sometimes a raw client IP (the no-metadata fallback) and otherwise a
+	// raw session id, and the request log stores metadata, not identifying
+	// values. Computed once, like modelAsked below — it never changes
+	// across this request's retry loop.
+	sessionHash := hashSession(conversation)
 
 	tried := map[string]bool{}
 	recovered := map[string]bool{}
@@ -1259,49 +1263,17 @@ func retryAfterSeconds(h http.Header) int {
 	return n
 }
 
-// sessionKey identifies a logical session for sticky selection: a hash of
-// metadata.user_id when the buffered body carries one, else the client IP.
+// hashSession collapses a session or conversation key down to an opaque
+// grouping key before it's ever eligible for the request log (issue #110):
+// the no-metadata fallback is a raw client IP and the session id in the
+// #141 path is a raw client-side identifier, and the log records metadata,
+// not values like those. The hash only needs to be stable and
+// collision-resistant enough to group "same conversation" requests for
+// RotationCost and PrefixDrift — not to be cryptographically strong.
 //
-// Claude Code does not send a bare user id there. It sends a JSON string:
-//
-//	{"device_id":"…","account_uuid":"…","session_id":"…"}
-//
-// Hashing it whole therefore yields one key per *session*, not per user or per
-// machine — measured 2026-08-23, two `claude -p` invocations produced
-// different keys. That is what makes concurrent sessions spread across
-// accounts rather than piling onto one, and it is why the tie-break on
-// in-flight count in better() is reachable at all.
-//
-// Two consequences worth keeping in mind. The account_uuid inside that blob is
-// rewritten per account (§4, mutation #2) — but the rewrite happens after this
-// runs, on the outgoing copy, so a session's key never shifts underneath it.
-// And a session that somehow omits metadata falls back to the client IP, which
-// on one machine means every such session shares a key.
-func sessionKey(r *http.Request, body []byte, buffered bool) string {
-	if buffered {
-		var v struct {
-			Metadata struct {
-				UserID string `json:"user_id"`
-			} `json:"metadata"`
-		}
-		if json.Unmarshal(body, &v) == nil && v.Metadata.UserID != "" {
-			h := fnv.New32a()
-			_, _ = h.Write([]byte(v.Metadata.UserID))
-			return "uid:" + strconv.FormatUint(uint64(h.Sum32()), 16)
-		}
-	}
-	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return "ip:" + ip
-	}
-	return "ip:" + r.RemoteAddr
-}
-
-// hashSession collapses a sessionKey value down to an opaque grouping key
-// before it's ever eligible for the request log (issue #110): sessionKey's
-// no-user-id fallback is a raw client IP, and the log records metadata, not
-// values a session key like that would leak. The hash only needs to be
-// stable and collision-resistant enough to group "same session" requests
-// for RotationCost — not to be cryptographically strong.
+// It doubles as the routing key's own hash step (sessionKeys builds
+// "uid:"+hashSession(userID)), which is why an empty input maps to "" —
+// there is nothing to group.
 func hashSession(s string) string {
 	if s == "" {
 		return ""

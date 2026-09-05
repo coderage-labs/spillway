@@ -943,13 +943,25 @@ one whose extra usage state is still `unknown`; see [Extra
 usage](#extra-usage) for why.
 
 The pin is pool-wide: it is consulted before the sticky map, so it applies to
-every session at once. Sticky selection itself is **per session** — the session
-key hashes `metadata.user_id`, and Claude Code sends a JSON blob there
-carrying `device_id`, `account_uuid` and a per-session `session_id`, so two
-windows on one machine get different keys and can sit on different accounts.
+every session at once. Sticky selection itself is **per session** — the
+routing key hashes the whole of `metadata.user_id`, and Claude Code sends a
+JSON blob there carrying an account uuid and a per-session `session_id`, so
+two windows on one machine get different keys and can sit on different
+accounts.
 
 (An earlier version of this paragraph said every session on the machine shared
 one key. Measured on 2026-08-23: they do not.)
+
+The request log's `session_hash` is a **different, finer** key (issue #141):
+it is the `session_id` on its own, hashed, so it does not move when anything
+else in the blob does. Routing deliberately keeps the coarser key — a
+session's subagents share one system prompt and one tool set, so keeping them
+on one account keeps them on one warm prompt cache, and splitting them per
+conversation would scatter them and pay cache-create prices. A Claude Code
+session is still not a conversation: subagents share their parent's id, and a
+resume or a compaction may reuse it. Reports that pair consecutive requests
+"within a session" (`GET /api/prefix-drift`, and `RotationCost`) are
+approximating, and the numbers should be read that way.
 
 A quota-429 marks the account exhausted until its reset and re-sends the
 buffered request on the next account, invisibly to the client. A transient
