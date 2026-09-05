@@ -101,6 +101,14 @@ type PrefixChange struct {
 // for AccountChanged=false and once for true, in that fixed order, with
 // zeros for kinds never observed.
 //
+// Pairing is within a session_hash, which is per Claude Code SESSION and
+// not per conversation (issue #141): subagents of one session share their
+// parent's id, so a pair can straddle two concurrent agents and report
+// their unrelated prefixes as drift. That is a known over-count, not a
+// silent one — and a large improvement on the pre-#141 key, which grouped
+// by client and straddled everything. Phase 2 must not read a drift rate
+// from this as if it were exact.
+//
 // Only requests that carry a fingerprint at all participate — a request
 // whose body was over the buffering cap, or was not parseable, has nothing
 // to compare and is skipped entirely rather than counted as a change.

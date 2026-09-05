@@ -75,14 +75,20 @@ type Entry struct {
 	// HTTP clients (python-requests, urllib, curl) are not, so this is only
 	// ever a hint, never something to gate or route on.
 	UserAgent string `json:"user_agent,omitempty"`
-	// SessionHash identifies the same logical session (proxy.sessionKey)
-	// across requests, WITHOUT storing the raw value that feeds it — that
-	// can be a client IP (see sessionKey's doc). It is an fnv32a hash of
-	// that value, hashed a second time before it ever reaches this package,
-	// kept only so a query can tell "this request's account differs from
-	// the previous request in the same session" (issue #110's rotation-cost
-	// question) apart from "a fresh session picked a fresh account", which
-	// looks identical without it. See RotationCost.
+	// SessionHash groups requests from the same Claude Code SESSION
+	// (proxy.sessionKeys' conversation key, issue #141), WITHOUT storing
+	// the raw value that feeds it — that is a client-side session id, or a
+	// client IP in the no-metadata fallback. It is an fnv32a hash of that
+	// value, taken before it ever reaches this package, kept only so a
+	// query can tell "this request's account differs from the previous
+	// request in the same session" (issue #110's rotation-cost question)
+	// apart from "a fresh session picked a fresh account", which looks
+	// identical without it. See RotationCost.
+	//
+	// It is NOT the key the pool routed by: routing stays per client blob
+	// on purpose (conversation.go). And a session is not a conversation —
+	// subagents share their parent's id, so consumers that pair
+	// consecutive rows within a session are approximating, and say so.
 	SessionHash string `json:"session_hash,omitempty"`
 	// InputTokens, OutputTokens, CacheCreationInputTokens and
 	// CacheReadInputTokens are the four counters from the response's

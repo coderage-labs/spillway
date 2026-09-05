@@ -69,6 +69,16 @@ func (l *Log) CacheStats() ([]CacheStat, error) {
 // not wired into the dashboard (out of scope for a proportionate change —
 // see the PR description) but is exercised directly by
 // TestRotationCostAttributesCorrectly.
+//
+// HEURISTIC, and knowingly so (issue #141). session_hash is per Claude Code
+// SESSION, which is the finest boundary anything on the wire offers — it is
+// not per conversation. Subagents of one session share their parent's id, a
+// resume or a /clear may reuse it, and a compaction certainly does. So
+// consecutive rows in one bucket can be two concurrent agents interleaving,
+// and an account change between them is attributed as a rotation cost when
+// it may just be two agents on two accounts. Before #141 the bucket was the
+// whole client (2 distinct values over 5,637 requests), which made this
+// wrong far more often; it is now approximate rather than meaningless.
 type RotationCost struct {
 	RotatedCacheCreationTokens int64
 	StableCacheCreationTokens  int64
