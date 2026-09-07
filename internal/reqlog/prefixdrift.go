@@ -101,6 +101,12 @@ type PrefixChange struct {
 // for AccountChanged=false and once for true, in that fixed order, with
 // zeros for kinds never observed.
 //
+// Over the rows the request log currently holds, which since issue #162 is
+// the last RequestRetention (14 days) rather than all of history. Nothing
+// here is reconstructable from request_totals — that rollup carries token
+// sums only, and drift is a property of consecutive ROWS — so a pair whose
+// rows have been pruned is gone from this report, not zeroed in it.
+//
 // Pairing is within a session_hash, which is per Claude Code SESSION and
 // not per conversation (issue #141): subagents of one session share their
 // parent's id, so a pair can straddle two concurrent agents and report

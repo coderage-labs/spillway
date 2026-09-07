@@ -364,10 +364,11 @@ func runServer(args []string) error {
 		}
 	}()
 
-	// Prune quota_samples on a timer (issue #104). initQuota already does
-	// this once at Open, which is enough for a process that gets restarted
-	// often (the Homebrew cask does this on every upgrade, #34) but not for
-	// one that stays up — this is the backstop for that case.
+	// Prune quota_samples (issue #104) and requests (issue #162) on a
+	// timer. reqlog.Open already does both once, which is enough for a
+	// process that gets restarted often (the Homebrew cask does this on
+	// every upgrade, #34) but not for one that stays up — this is the
+	// backstop for that case.
 	go func() {
 		t := time.NewTicker(quotaPruneInterval)
 		defer t.Stop()
@@ -377,6 +378,16 @@ func runServer(args []string) error {
 				logger.Warn("quota prune failed", "err", err)
 			} else if n > 0 {
 				logger.Debug("pruned old quota samples", "rows", n)
+			}
+			// Issue #162: the requests table needs the same backstop, for
+			// the same reason. Its token counters are rolled into
+			// request_totals by the same transaction that deletes the rows,
+			// so the dashboard's lifetime cache figures do not move.
+			n, err = rl.PruneRequests(time.Now().Add(-reqlog.RequestRetention))
+			if err != nil {
+				logger.Warn("request log prune failed", "err", err)
+			} else if n > 0 {
+				logger.Debug("pruned old request log rows", "rows", n)
 			}
 		}
 	}()

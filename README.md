@@ -1489,6 +1489,66 @@ table before; on one real installation it grew to 57,617 rows (40 MB)
 answering a question with 8 possible answers, and the unindexed query behind
 that answer is what caused issue #104's startup hang.
 
+### The request log's own indexes and retention
+
+The `requests` table carried **no index at all** until issue #162, which is
+what made the dashboard unusable rather than merely slow. `/api/requests`
+asks for the newest 100 rows; with nothing to read the table by time, SQLite
+sorted all 584,114 of them across 23 columns to produce them
+(`SCAN requests` + `USE TEMP B-TREE FOR ORDER BY`). Under the pure-Go SQLite
+driver that temp B-tree is built and spilled in Go, which turned about half a
+second of work into **102.8 s** on the live daemon — and since the dashboard
+polls five endpoints every 5 seconds with no guard against a previous cycle
+still running, the calls piled up, the database stayed permanently contended,
+and every other panel measured far worse than it was (`/api/quota-history`
+read as 12.8 s live and 0.012 s in isolation). Same driver amplification as
+#104, on the other table.
+
+Two indexes now exist, created at every open and idempotent:
+
+- `requests (ts)` — serves both the newest-first request list and the
+  activity histogram's `ts >= ?`. Plain `(ts)`, deliberately, not
+  `(ts DESC)`: an index on a rowid table stores `(ts, rowid)` ascending, so
+  walking it backwards satisfies `ORDER BY ts DESC, rowid DESC` with no sort
+  step at all, while a descending index leaves one behind. Measured on a
+  584,114-row fixture: **1.161 s → 0.0003 s**, plan
+  `SCAN requests USING INDEX requests_ts`.
+- `requests (account, input_tokens, output_tokens, cache_creation_input_tokens,
+  cache_read_input_tokens)` — a **covering** index for the per-account token
+  aggregate behind `/api/accounts`, answered from the index without visiting
+  the rows. **0.418 s → 0.101 s**, plan
+  `SCAN requests USING COVERING INDEX requests_account_tokens`.
+
+Building both on an existing unindexed database is a one-time cost on the
+startup path, before the listeners bind: measured at **1.22 s** for the
+584,114-row / 150 MB fixture (0.26 s + 0.96 s), against the 15 s startup
+watchdog threshold. Every subsequent open is ~0.6 ms.
+
+`requests` is also pruned to the last **14 days** now — same 2x margin over
+the 168-hour activity window, same "once at startup plus hourly" schedule as
+`quota_samples`. An index makes the newest-100 query independent of table
+size, but the per-account aggregate still scans every row, so without a
+bound the same curve simply resumes.
+
+That prune would have changed what a number on the dashboard means, so it
+does not: the per-account **cache hit rate and cache-create/cache-read
+volumes remain lifetime totals**. The same transaction that deletes a batch
+of rows first folds their four token counters into a `request_totals` rollup,
+one row per account, and the aggregate adds that back in — so the totals
+survive their rows, including for an account quiet long enough to have none
+left. The rollup holds an account name and four integers and nothing else, so
+it widens the redaction surface by nothing.
+
+What retention genuinely does narrow is the row-level diagnostics, which
+compare consecutive requests and cannot be reconstructed from sums:
+`/api/prefix-drift` and `RotationCost` now report the last 14 days rather
+than all of history. At the volume that motivated #162 that is still ~480k
+requests.
+
+The overlapping 5-second poll is left alone. Fixing the query removes the
+contention that made overlap hurt; adding request coalescing on top would be
+a second change with its own failure modes, and no measurement asking for it.
+
 ## Development
 
 ```sh
