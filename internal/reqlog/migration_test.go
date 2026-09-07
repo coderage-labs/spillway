@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Issue #110 added five columns (session_hash and four usage counters) to
@@ -73,9 +74,16 @@ func TestExistingDatabaseWithoutUsageColumnsUpgradesCleanly(t *testing.T) {
 	)`); err != nil {
 		t.Fatal(err)
 	}
+	// A ts inside RequestRetention: issue #162 prunes the table at every
+	// open, and a row dated 1970 (this fixture's original `ts` of 1000) is
+	// legitimately deleted before Recent ever sees it. Retention is not
+	// what this test is about — see
+	// TestOpenPrunesRowsOlderThanRequestRetention for that.
+	recent := time.Now().Add(-time.Hour).UnixMilli()
 	if _, err := raw.Exec(`INSERT INTO requests
 		(ts, account, path, status, duration_ms, bytes, event, model_asked, model_served, user_agent)
-		VALUES (1000, 'old-acct', '/v1/messages', 200, 500, 2048, 'served', 'sonnet', 'sonnet', 'claude-cli/1.0')`); err != nil {
+		VALUES (?, 'old-acct', '/v1/messages', 200, 500, 2048, 'served', 'sonnet', 'sonnet', 'claude-cli/1.0')`,
+		recent); err != nil {
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -171,8 +179,9 @@ func TestExistingDatabaseWithoutPrefixColumnsUpgradesCleanly(t *testing.T) {
 	if _, err := raw.Exec(`INSERT INTO requests
 		(ts, account, path, status, duration_ms, bytes, event, model_asked, model_served, user_agent,
 		 session_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
-		VALUES (1000, 'work', '/v1/messages', 200, 500, 2048, 'served', 'sonnet', 'sonnet',
-		        'claude-cli/2.1.0', 'abcd', 120, 340, 4165, 1816)`); err != nil {
+		VALUES (?, 'work', '/v1/messages', 200, 500, 2048, 'served', 'sonnet', 'sonnet',
+		        'claude-cli/2.1.0', 'abcd', 120, 340, 4165, 1816)`,
+		time.Now().Add(-time.Hour).UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {

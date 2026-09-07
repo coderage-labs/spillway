@@ -630,9 +630,14 @@ func (s *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 // part of the request prefix changed between consecutive requests in a
 // session, and what cache-creation volume went with it, split by whether
 // the account changed too. Read-only, same shape as every other diagnostic
-// endpoint here — no window parameter, because the requests table is not
-// pruned and the whole point is a body of evidence large enough to decide
-// whether #111's transforms are worth building.
+// endpoint here — no window parameter, because the whole point is a body of
+// evidence large enough to decide whether #111's transforms are worth
+// building, and the report is over whatever the request log holds.
+//
+// That used to be all of history. Since issue #162 the requests table is
+// pruned to reqlog.RequestRetention, so this reports the last 14 days — 14
+// days at the rate that motivated #162 is still ~480k requests, which is
+// ample for the question, but it is a window now and not a lifetime.
 func (s *Server) handlePrefixDrift(w http.ResponseWriter, r *http.Request) {
 	if s.log == nil {
 		s.writeJSON(w, []reqlog.PrefixChange{})

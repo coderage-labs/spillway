@@ -1,14 +1,25 @@
 package reqlog
 
+import "sort"
+
 // CacheStat is one account's aggregated token volume, for the dashboard's
 // cache hit rate and cache-create/cache-read columns (issue #110) — a burn
 // spike is explicable once these sit beside burn/h and dry-in, instead of
 // being a mystery the operator has to guess at.
 //
-// No time window: the requests table is not pruned (unlike quota_samples —
-// see QuotaRetention), so a lifetime aggregate is what's actually there.
-// Once #110's numbers show whether a rolling window is worth the added
-// complexity, this is the place to add one.
+// No time window: this is a lifetime total, and it stays one even though
+// the requests table is now pruned (issue #162, RequestRetention). It used
+// to be lifetime only because nothing ever deleted a row; it is lifetime
+// now because PruneRequests folds each account's four counters into
+// request_totals in the same transaction that deletes the rows, and
+// CacheStats adds that rollup back in below. The window over which the
+// numbers were collected is therefore unbounded, while the rows scanned to
+// produce them are bounded by RequestRetention.
+//
+// If a ROLLING window is ever wanted instead, it cannot be had by simply
+// filtering on ts — that would count the rollup twice over, or read as a
+// window while silently including everything before it. Drop the rollup
+// from this query in the same change.
 type CacheStat struct {
 	Account                  string
 	InputTokens              int64
@@ -30,16 +41,36 @@ func (c CacheStat) HitRate() *float64 {
 	return &r
 }
 
-// CacheStats aggregates token usage per account across every logged
-// request. Accounts with no requests yet are simply absent — the caller
-// (admin.accounts) already iterates the pool's account list and treats a
-// missing entry as "no data", the same way it already treats a missing
-// quota-history series.
-func (l *Log) CacheStats() ([]CacheStat, error) {
-	rows, err := l.db.Query(`SELECT account,
+// cacheStatsQuery is a package-level const so a test can run EXPLAIN QUERY
+// PLAN against the exact text CacheStats executes rather than a copy that
+// could drift from it (#104's shape, reused by #162).
+//
+// Naming the four SUM columns after the group key in requests_account_tokens
+// (see requestIndexes) makes this a COVERING index scan: the plan reads
+// `SCAN requests USING COVERING INDEX requests_account_tokens`, answering
+// the aggregate from the index without visiting the 23-column rows.
+const cacheStatsQuery = `SELECT account,
 		SUM(input_tokens), SUM(output_tokens),
 		SUM(cache_creation_input_tokens), SUM(cache_read_input_tokens)
-		FROM requests GROUP BY account`)
+		FROM requests GROUP BY account`
+
+// CacheStats aggregates token usage per account across every logged
+// request — including requests whose rows retention has since deleted,
+// whose counters live on in request_totals (see PruneRequests). Accounts
+// with no requests yet are simply absent — the caller (admin.accounts)
+// already iterates the pool's account list and treats a missing entry as
+// "no data", the same way it already treats a missing quota-history series.
+//
+// The rollup is added in Go rather than folded into the SQL as a UNION ALL
+// subquery on purpose: a subquery costs the covering-index plan above,
+// while this way the hot half of the work keeps a plan a test can assert,
+// and the other half is a handful of rows.
+func (l *Log) CacheStats() ([]CacheStat, error) {
+	pruned, err := l.requestTotals()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := l.db.Query(cacheStatsQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -51,9 +82,31 @@ func (l *Log) CacheStats() ([]CacheStat, error) {
 			&c.CacheCreationInputTokens, &c.CacheReadInputTokens); err != nil {
 			return nil, err
 		}
+		if p, ok := pruned[c.Account]; ok {
+			c.InputTokens += p.InputTokens
+			c.OutputTokens += p.OutputTokens
+			c.CacheCreationInputTokens += p.CacheCreationInputTokens
+			c.CacheReadInputTokens += p.CacheReadInputTokens
+			delete(pruned, c.Account)
+		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// An account whose every row has been pruned still has a lifetime
+	// total, and dropping it here would make the displayed number fall to
+	// zero after a quiet fortnight rather than hold at what was spent.
+	// Sorted so the returned order stays deterministic; map order is not.
+	rest := make([]string, 0, len(pruned))
+	for name := range pruned {
+		rest = append(rest, name)
+	}
+	sort.Strings(rest)
+	for _, name := range rest {
+		out = append(out, pruned[name])
+	}
+	return out, nil
 }
 
 // RotationCost splits cache-creation-token volume into what followed a
@@ -63,6 +116,12 @@ func (l *Log) CacheStats() ([]CacheStat, error) {
 // else. Requests with no session hash (identity/passthrough paths, or a
 // database from before this column existed) are excluded from both, since
 // there is nothing to compare them against.
+//
+// Unlike CacheStats above, this is NOT a lifetime figure: it pairs
+// consecutive rows, so it covers only what the table still holds — the last
+// RequestRetention (issue #162). request_totals cannot restore the
+// difference, because a rotation cost is a property of two adjacent rows
+// and the rollup keeps sums, not rows.
 //
 // This is the schema's answer to "can it attribute cost to rotation": yes,
 // via session_hash plus account, ordered by time within each session. It is

@@ -174,6 +174,39 @@ var requestColumns = []migrationColumn{
 	{"prefix_bytes", "INTEGER NOT NULL DEFAULT 0"},
 }
 
+// requestIndexes are the indexes on `requests` (issue #162). The table
+// carried none at all until then, which is what made the dashboard
+// unusable: Recent's `ORDER BY ts DESC, rowid DESC LIMIT 100` had to sort
+// every row in the table to return a hundred of them, and under
+// modernc.org/sqlite that temp B-tree is built and spilled in Go — the same
+// pure-Go amplification issue #104 hit on quota_samples, where 0.6s of C
+// SQLite became 103s of wall clock on the live daemon.
+//
+// Created after the ALTER loop above, deliberately: requests_account_tokens
+// indexes columns that loop adds, so it cannot exist before they do.
+// CREATE INDEX IF NOT EXISTS is idempotent, and harmless if a database
+// already carries an equivalent index under another name — SQLite simply
+// keeps both.
+var requestIndexes = []string{
+	// Recent (the dashboard's /api/requests, polled every 5s) and Activity
+	// (`WHERE ts >= ?`) both read the table by time and nothing else.
+	//
+	// Plain (ts), NOT (ts DESC, rowid DESC): SQLite rejects `rowid` in an
+	// index on a rowid table outright ("no such column: rowid"), and (ts
+	// DESC) alone is actively worse than (ts) here — it leaves `USE TEMP
+	// B-TREE FOR LAST TERM OF ORDER BY` in the plan, because a descending
+	// index's implicit rowid suffix still ascends. (ts) scanned backwards
+	// satisfies both terms, and the plan carries no sort step at all.
+	`CREATE INDEX IF NOT EXISTS requests_ts ON requests (ts)`,
+	// CacheStats' `GROUP BY account` summing four counters, also on the 5s
+	// poll (/api/accounts). Listing the four SUM columns after the group
+	// key makes this a COVERING index: the aggregate is answered from the
+	// index alone, without touching the 23-column rows.
+	`CREATE INDEX IF NOT EXISTS requests_account_tokens
+		ON requests (account, input_tokens, output_tokens,
+			cache_creation_input_tokens, cache_read_input_tokens)`,
+}
+
 // Open opens (creating if needed) the log at path with 0600 perms and WAL
 // journaling.
 func Open(path string) (*Log, error) {
@@ -207,7 +240,26 @@ func Open(path string) (*Log, error) {
 			return nil, fmt.Errorf("add %s column: %w", col.name, err)
 		}
 	}
-	if err := (&Log{db: db}).initQuota(); err != nil {
+	// Issue #162. Runs unconditionally at every open, same as the ALTER
+	// loop; IF NOT EXISTS makes a re-open a no-op. On a first open of an
+	// existing unindexed database this is a real one-time build — measured
+	// at 0.26s (requests_ts) + 0.96s (requests_account_tokens) on a
+	// 584k-row, 150MB fixture — which lands before the listeners bind, so
+	// it is bounded and well inside startupWatchdogTimeout rather than
+	// being the kind of open-ended scan #104's hang was. Every subsequent
+	// open costs nothing (measured 0.6ms).
+	for _, stmt := range requestIndexes {
+		if _, err := db.Exec(stmt); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("index requests: %w", err)
+		}
+	}
+	l := &Log{db: db}
+	if err := l.initRequestRetention(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("create request retention schema: %w", err)
+	}
+	if err := l.initQuota(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create quota schema: %w", err)
 	}
@@ -215,7 +267,7 @@ func Open(path string) (*Log, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Log{db: db}, nil
+	return l, nil
 }
 
 // Close closes the database.
@@ -242,17 +294,30 @@ func (l *Log) Record(e Entry) error {
 	return err
 }
 
+// recentQuery is a package-level const (rather than inlined) so a test can
+// run EXPLAIN QUERY PLAN against the exact text Recent executes, instead of
+// a hand-maintained copy that could drift from it — the same shape issue
+// #104 used for latestQuotaSamplesQuery. See
+// TestRecentQueryPlanUsesTheTsIndex.
+//
+// The ORDER BY is served entirely by requests_ts (see requestIndexes): an
+// index on a rowid table stores (ts, rowid) ordered ascending, so walking
+// it backwards yields exactly `ts DESC, rowid DESC` with no sort step. That
+// is why the plan reads `SCAN requests USING INDEX requests_ts` with no
+// temp B-tree, and why the tie-break column costs nothing.
+const recentQuery = `SELECT ts, account, path, status, duration_ms, bytes, event,
+		model_asked, model_served, user_agent,
+		session_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+		tool_count, tools_order_hash, tools_sorted_hash, tools_raw_hash, system_hash,
+		first_msg_shape_hash, first_msg_blocks, prefix_bytes
+		FROM requests ORDER BY ts DESC, rowid DESC LIMIT ?`
+
 // Recent returns the newest limit entries, newest first.
 func (l *Log) Recent(limit int) ([]Entry, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := l.db.Query(`SELECT ts, account, path, status, duration_ms, bytes, event,
-		model_asked, model_served, user_agent,
-		session_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
-		tool_count, tools_order_hash, tools_sorted_hash, tools_raw_hash, system_hash,
-		first_msg_shape_hash, first_msg_blocks, prefix_bytes
-		FROM requests ORDER BY ts DESC, rowid DESC LIMIT ?`, limit)
+	rows, err := l.db.Query(recentQuery, limit)
 	if err != nil {
 		return nil, err
 	}
