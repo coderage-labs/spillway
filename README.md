@@ -49,8 +49,10 @@ Read this before running it:
   lets a spent account keep serving on pay-as-you-go extra usage. It is off by
   default and every unknown state fails closed, but if you enable it, the
   charges are yours. See [Extra usage](#extra-usage).
-- **It handles OAuth tokens.** They live in your OS keychain and never touch
-  disk, and the code is here to read. Audit it rather than take that on trust.
+- **It handles OAuth tokens.** They use your OS keychain by default. On Linux,
+  a failed keychain availability probe triggers a plaintext file fallback
+  with mode 0600 and a warning — see [Where they are kept](#where-they-are-kept).
+  The code is here to read. Audit it rather than take that on trust.
 - **No warranty.** The MIT licence disclaims all of it — see
   [LICENCE](LICENSE). This software is provided as is.
 
@@ -70,7 +72,7 @@ pure Go and the dashboard is embedded in the binary.
 
 | | |
 |---|---|
-| **A system keychain** | Secrets never touch disk. macOS Keychain and Windows Credential Manager are built in. **Linux needs a running D-Bus Secret Service** — gnome-keyring, kwallet, KeePassXC. There is no file-based fallback, so on a headless box without one, `spillway login` fails at the point it tries to store the token. |
+| **Credential storage** | macOS Keychain and Windows Credential Manager are built in. Linux uses a D-Bus Secret Service — gnome-keyring, kwallet, KeePassXC — when available. If its availability probe fails, spillway warns and uses a plaintext `spillway-secrets.json` file beside the config, mode 0600. See [Where they are kept](#where-they-are-kept). |
 | **The vendor CLI** | `claude` on `PATH`, for `spillway run` and for `import`. Not needed if you point `ANTHROPIC_BASE_URL` at the proxy yourself. |
 
 **Optional**
@@ -489,8 +491,8 @@ failure recurring.
 ## Config
 
 `~/.config/spillway.yaml` (override with `SPILLWAY_CONFIG`), created with
-defaults on first run, mode 0600. **Tokens are not kept here** — they live in the OS
-keychain, and any inline tokens from an older config are migrated out at
+defaults on first run, mode 0600. **Tokens are not kept here** — they live in the
+[secret store](#where-they-are-kept), and any inline tokens from an older config are migrated out at
 startup, so this file settles to metadata only.
 
 ```yaml
@@ -562,7 +564,7 @@ Every reload logs one line saying what it applied and what it could not:
 | `pool.switchThreshold`, `crossProvider`, `allowOverage`, `stickyAcrossFamily`, `hideOverageFromClient` | **yes** |
 | An account's `label`, `priority`, `disabled`, `allowOverage` | **yes** |
 | Removing an account | **yes** — out of rotation immediately, before it can be selected again |
-| Adding an account (its credential already in the keychain) | **yes**, unless it names an `upstream` host spillway has no MITM leaf for — see below |
+| Adding an account (its credential already in the secret store) | **yes**, unless it names an `upstream` host spillway has no MITM leaf for — see below |
 | `notify.channels` | **yes** — a new channel starts firing, a removed one stops |
 | `log.level` | **yes** |
 | `upstream`, `proxy.*`, `admin.*`, `egress.*` | no — listeners and the proxy handler are built at startup |
@@ -585,8 +587,8 @@ it to. Turning it off takes effect on the running daemon; turning it back on
 needs a restart.
 
 Credentials are not part of any of this. A reload reads names, providers,
-events and flags from the yaml and every secret from the keychain, writes no
-secret to the file, and logs no destination, topic or token.
+events and flags from the yaml and every secret from the secret store, writes no
+secret to the yaml, and logs no destination, topic or token.
 
 ### Binding the proxy off loopback
 
@@ -611,7 +613,7 @@ token becomes mandatory, and a missing one fails closed.)
 processes refreshing the same account will invalidate each other. Every
 pooled account should be added with `spillway login claude <name>` (or
 `spillway login kimi <name>`) — that gives it its own OAuth grant, held in
-the keychain under spillway's own service, refreshed by the daemon and by
+spillway's secret store, refreshed by the daemon and by
 nothing else.
 
 - A background sweep refreshes any token within 5 minutes of expiry,
@@ -655,19 +657,20 @@ that is a one-account passthrough, not a way to add an account to the pool.
 
 ### Where they are kept
 
-The OS keychain: Keychain Services, Credential Manager, or Secret Service.
+The OS keychain by default: Keychain Services, Credential Manager, or Secret
+Service.
 
-**Linux without a desktop keyring is the exception.** Secret Service is a
-D-Bus service that a desktop provides and a server, a container or an SSH
-session does not, and spillway used to exit rather than start without it. It
-now falls back to `spillway-secrets.json` beside the config, 0600 in a 0700
-directory — the same way the `claude` CLI stores the same class of token on
-Linux. It says so, loudly, every time it does it.
+**Linux has a plaintext file fallback.** Secret Service runs over D-Bus and
+may be unavailable on a server, in a container or over SSH. If the keychain
+availability probe returns an error other than "entry not found", spillway
+falls back to `spillway-secrets.json` beside the config, mode 0600, creating
+its directory with mode 0700 if needed. This file is not encrypted. The CLI
+prints a warning once per process when it selects the fallback.
 
-It is a fallback, not a choice: it happens only where no keychain service is
-running at all. A locked macOS keychain or a dismissed Windows prompt is you
-declining, and spillway will fail rather than answer that by writing your
-tokens to a file.
+The probe does not distinguish a missing Linux keychain service from other
+keychain errors. macOS and Windows never use this fallback: a locked keychain
+or a dismissed credential prompt remains an error instead of causing tokens
+to be written to a file.
 
 ## Model mapping
 
