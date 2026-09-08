@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.5](https://github.com/coderage-labs/spillway/compare/v0.19.4...v0.19.5) (2026-09-08)
+
+
+### Documentation
+
+* clarify credential storage fallback ([45f3beb](https://github.com/coderage-labs/spillway/commit/45f3beb986edf0592f339785183f1cd8faba9c06))
+
 ## [0.19.4](https://github.com/coderage-labs/spillway/compare/v0.19.3...v0.19.4) (2026-09-07)
 
 
