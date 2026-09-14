@@ -27,10 +27,50 @@ import (
 	"time"
 
 	"github.com/coderage-labs/spillway/internal/admin"
+	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/events"
 	"github.com/coderage-labs/spillway/internal/pool"
 	"github.com/coderage-labs/spillway/internal/reqlog"
 )
+
+// setAttachEnv points this process's proxy environment at addr — or, with an
+// empty addr, at nothing at all.
+//
+// The clears come FIRST and the set comes LAST, and that order is load
+// bearing on Windows. Go reads and writes the environment there through
+// GetEnvironmentVariableW/SetEnvironmentVariableW (syscall/env_windows.go),
+// which are CASE-INSENSITIVE, so HTTPS_PROXY and https_proxy are one
+// variable: setting the upper-case name and then clearing the lower-case one
+// wipes what was just set. A test that did it in that order left the session
+// unattached, runStatusline returned at the attach check before any HTTP, and
+// the whole point of the test evaporated — silently on Windows, invisibly
+// everywhere else. Callers assert attachedToSpillway afterwards rather than
+// trusting this to have worked.
+func setAttachEnv(t *testing.T, addr string) {
+	t.Helper()
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ANTHROPIC_BASE_URL"} {
+		t.Setenv(k, "")
+	}
+	if addr != "" {
+		t.Setenv("HTTPS_PROXY", addr)
+	}
+}
+
+// mustBeAttached fails unless runStatusline will treat this process as going
+// through the configured proxy. Without it, every "the line rendered" test
+// can pass or fail for a reason it never names — see setAttachEnv.
+func mustBeAttached(t *testing.T, want bool) {
+	t.Helper()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if got := attachedToSpillway(cfg); got != want {
+		t.Fatalf("attachedToSpillway = %v, want %v — the proxy environment did not take "+
+			"effect, so this test would be measuring the wrong branch (HTTPS_PROXY=%q)",
+			got, want, os.Getenv("HTTPS_PROXY"))
+	}
+}
 
 // statuslineFixture stands up the real admin server over a real request log
 // with n accounts and rows of logged traffic, writes a config naming it, and
@@ -87,9 +127,7 @@ func statuslineFixture(t *testing.T, accountCount, rowsPerAccount int) (hits *at
 	}
 	t.Setenv("SPILLWAY_CONFIG", cfgPath)
 	t.Setenv("NO_COLOR", "1")
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ANTHROPIC_BASE_URL"} {
-		t.Setenv(k, "")
-	}
+	setAttachEnv(t, "")
 	return hits, proxyPort
 }
 
@@ -99,7 +137,8 @@ func statuslineFixture(t *testing.T, accountCount, rowsPerAccount int) (hits *at
 // /api/accounts handler and the actual 350ms client.
 func TestStatuslineRendersWhenTheDaemonAnswersInBudget(t *testing.T) {
 	hits, port := statuslineFixture(t, 8, 50)
-	t.Setenv("HTTPS_PROXY", fmt.Sprintf("http://127.0.0.1:%d", port))
+	setAttachEnv(t, fmt.Sprintf("http://127.0.0.1:%d", port))
+	mustBeAttached(t, true)
 
 	got := captureStdout(t, func() {
 		if err := runStatusline(nil); err != nil {
@@ -133,7 +172,8 @@ func TestStatuslineRendersWhenTheDaemonAnswersInBudget(t *testing.T) {
 func TestStatuslineStaysSilentAndOfflineForASessionNotOnSpillway(t *testing.T) {
 	hits, _ := statuslineFixture(t, 8, 50)
 	// Proxied somewhere that is emphatically not spillway.
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+	setAttachEnv(t, "http://127.0.0.1:3128")
+	mustBeAttached(t, false)
 
 	got := captureStdout(t, func() {
 		if err := runStatusline(nil); err != nil {
@@ -161,9 +201,9 @@ func TestStatuslineAlwaysMarksAnUnreachableDaemon(t *testing.T) {
 	}
 	t.Setenv("SPILLWAY_CONFIG", cfgPath)
 	t.Setenv("NO_COLOR", "1")
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ANTHROPIC_BASE_URL"} {
-		t.Setenv(k, "")
-	}
+	setAttachEnv(t, "")
+	// Unattached on purpose: --always is what makes this render anyway.
+	mustBeAttached(t, false)
 
 	got := captureStdout(t, func() {
 		if err := runStatusline([]string{"--always"}); err != nil {
@@ -182,7 +222,8 @@ func TestStatuslineAlwaysMarksAnUnreachableDaemon(t *testing.T) {
 // anything new.
 func TestStatuslineStaysSilentForAReachableDaemonWithNoAccounts(t *testing.T) {
 	hits, port := statuslineFixture(t, 0, 0)
-	t.Setenv("HTTPS_PROXY", fmt.Sprintf("http://127.0.0.1:%d", port))
+	setAttachEnv(t, fmt.Sprintf("http://127.0.0.1:%d", port))
+	mustBeAttached(t, true)
 
 	got := captureStdout(t, func() {
 		if err := runStatusline(nil); err != nil {

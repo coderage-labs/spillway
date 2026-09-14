@@ -555,15 +555,27 @@ func TestAttachedHonoursAConfiguredPort(t *testing.T) {
 // A leading flag is not a subcommand. `statusline --always` printed
 // `unknown statusline action "--always"` straight into the prompt.
 func TestStatuslineFlagIsNotASubcommand(t *testing.T) {
-	t.Setenv("SPILLWAY_CONFIG", filepath.Join(t.TempDir(), "spillway.yaml"))
-	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "ANTHROPIC_BASE_URL"} {
-		t.Setenv(k, "")
+	// An explicit config naming a dead admin address. This used to write no
+	// config at all, which made config.Load synthesise the defaults — and
+	// those name 127.0.0.1:7657, the real admin port, so `--always` sent the
+	// test at whatever daemon the developer had running. Harmless while the
+	// failure path printed nothing; since it now prints a marker, it would
+	// also have leaked escape codes into the test output.
+	cfgPath := filepath.Join(t.TempDir(), "spillway.yaml")
+	if err := os.WriteFile(cfgPath, []byte(
+		"admin:\n  addr: 127.0.0.1:1\nproxy:\n  host: 127.0.0.1\n  port: 61990\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// No daemon to reach, so this renders nothing either way; what matters is
-	// that it is not an error.
-	if err := runStatusline([]string{"--always"}); err != nil {
-		t.Errorf("--always treated as an action: %v", err)
-	}
+	t.Setenv("SPILLWAY_CONFIG", cfgPath)
+	setAttachEnv(t, "")
+	// No daemon to reach, so what it renders is beside the point; what
+	// matters is that it is not an error. Captured rather than let loose,
+	// since the unreachable marker would otherwise land in the test output.
+	captureStdout(t, func() {
+		if err := runStatusline([]string{"--always"}); err != nil {
+			t.Errorf("--always treated as an action: %v", err)
+		}
+	})
 	if err := runStatusline([]string{"instal"}); err == nil {
 		t.Error("a mistyped subcommand should still be an error")
 	}
@@ -638,10 +650,15 @@ func TestStatuslineMarksAnUnreachableDaemonRatherThanVanishing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("SPILLWAY_CONFIG", cfgPath)
-	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:61987")
-	t.Setenv("https_proxy", "")
-	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("NO_COLOR", "1")
+	// Clears first, then the set — see setAttachEnv. Written the other way
+	// round, this test passed on Unix and failed on Windows, where
+	// HTTPS_PROXY and https_proxy are the same variable and the clear wiped
+	// the set: the session was never attached, runStatusline returned before
+	// any HTTP, and "printed nothing" meant something entirely different
+	// from what the test claimed to be measuring.
+	setAttachEnv(t, "http://127.0.0.1:61987")
+	mustBeAttached(t, true)
 
 	got := captureStdout(t, func() {
 		if err := runStatusline(nil); err != nil {
