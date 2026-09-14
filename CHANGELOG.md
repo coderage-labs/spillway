@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.19.5](https://github.com/coderage-labs/spillway/compare/v0.19.4...v0.19.5) (2026-09-14)
+
+
+### Fixes
+
+* /api/accounts maintains per-account totals instead of recomputing them ([#165](https://github.com/coderage-labs/spillway/issues/165)) ([#172](https://github.com/coderage-labs/spillway/issues/172)) ([db72a20](https://github.com/coderage-labs/spillway/commit/db72a201d7541fc80aae4fa487264414c261d6af))
+* bound the daemon log and stop duplicating the request database ([#173](https://github.com/coderage-labs/spillway/issues/173)) ([15ae93a](https://github.com/coderage-labs/spillway/commit/15ae93ac6ad8b9e744299f90f886f7eb2598080e))
+* **proxy:** match identity path collections, not just their items ([#170](https://github.com/coderage-labs/spillway/issues/170)) ([eb5f3ce](https://github.com/coderage-labs/spillway/commit/eb5f3ce437d320d569ff22c369a1f4f85759d497))
+
+
+### Documentation
+
+* clarify credential storage fallback ([45f3beb](https://github.com/coderage-labs/spillway/commit/45f3beb986edf0592f339785183f1cd8faba9c06))
+
 ## [0.19.4](https://github.com/coderage-labs/spillway/compare/v0.19.3...v0.19.4) (2026-09-07)
 
 
