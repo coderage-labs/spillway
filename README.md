@@ -348,11 +348,21 @@ incident occurred in, so it would keep the dependency this issue removes,
 just one release later. That old keychain entry is left in place, never read
 again.
 
-Identity-bound paths — `/v1/oauth/token`, `/v1/code/*`, `/v1/environments/*`,
-`/v1/sessions/*`, `/api/oauth/files/*`, `/api/oauth/file_upload`, and WebSocket
-upgrades (`/v1/session_ingress/ws*`) — relay with the client's own credential
-verbatim: no injection, no pool, no rewrite. That is what keeps Remote Control
-and the CLI's own token refresh working through the proxy.
+Identity-bound paths — `/v1/oauth/token`, `/api/oauth/file_upload`, the whole
+of `/v1/code`, `/v1/environments`, `/v1/sessions` and `/api/oauth/files`
+(**the collection endpoint itself as well as everything under it**), and
+WebSocket upgrades (`/v1/session_ingress/ws*`) — relay with the client's own
+credential verbatim: no injection, no pool, no rewrite. That is what keeps
+Remote Control and the CLI's own token refresh working through the proxy.
+
+Those four are matched as trees, base-or-base-slash, rather than as `X/`
+prefixes (issue #166). Written as prefixes they silently excluded the
+collection endpoint, which is where the item is created: live traffic showed
+the exact path `/v1/sessions` served by 8 different pooled accounts while
+every `/v1/sessions/<id>` call on those same sessions went out as a
+passthrough, so the two halves of one session disagreed about whose it was.
+The match stops at a segment boundary, so `/v1/sessionsfoo` is not identity
+bound — and inference paths (`POST /v1/messages`) never are.
 
 **Confirmed non-quota paths get the same treatment (issue #91).**
 `/api/event_logging/v2/batch`, `/api/claude_code/settings`, and
