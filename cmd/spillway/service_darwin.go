@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +21,20 @@ func servicePlistPath() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", serviceLabel+".plist"), nil
 }
 
-func serviceLogPaths() (out, errPath string, err error) {
+// serviceLogPaths returns the two log files the agent involves.
+//
+// daemonLog is spillway's own, opened and rotated by the daemon itself
+// (issue #171). launchdLog is where launchd redirects the process's streams:
+// it catches what exists before the logger does and what the Go runtime
+// prints on the way down — a panic, a bind failure — and nothing else.
+//
+// They MUST be different paths. The 236 MB of #171 was a file launchd
+// redirected stderr to, which is precisely the file spillway cannot rotate:
+// the descriptor belongs to launchd, so renaming the file leaves launchd
+// appending to the renamed inode while the fresh one stays empty. Pointing
+// both at one path would be worse than the bug — two writers, one of them
+// moving the file under the other.
+func serviceLogPaths() (daemonLog, launchdLog string, err error) {
 	home, herr := os.UserHomeDir()
 	if herr != nil {
 		return "", "", herr
@@ -33,19 +47,32 @@ func serviceLogPaths() (out, errPath string, err error) {
 	if serviceLabel != "dev.coderage.spillway" {
 		base = serviceLabel
 	}
-	return filepath.Join(dir, base+".log"), filepath.Join(dir, base+".err.log"), nil
+	return filepath.Join(dir, base+".log"), filepath.Join(dir, base+".launchd.log"), nil
+}
+
+// legacyErrLog is the file older plists redirected stderr to, and the one
+// that reached 236 MB. Nothing writes it after this version reinstalls the
+// agent; install says so rather than deleting somebody's log for them.
+func legacyErrLog() (string, error) {
+	daemonLog, _, err := serviceLogPaths()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(daemonLog, ".log") + ".err.log", nil
 }
 
 // plistXML renders the launchd agent. KeepAlive restarts the daemon if it
 // dies; RunAtLoad starts it at login.
-func plistXML(binPath, outLog, errLog string) string {
+func plistXML(binPath, daemonLog, launchdLog string) string {
 	esc := func(s string) string {
 		r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 		return r.Replace(s)
 	}
-	// launchd redirects the streams itself, so the daemon needs no log flag.
+	// The daemon is told to open its own log, and launchd's redirect goes
+	// somewhere else: only one writer per file, and the busy one is the file
+	// spillway can rotate. See serviceLogPaths.
 	var progArgs string
-	for _, a := range serverArgs("") {
+	for _, a := range serverArgs(daemonLog) {
 		progArgs += "\n    <string>" + esc(a) + "</string>"
 	}
 	return `<?xml version="1.0" encoding="UTF-8"?>
@@ -60,8 +87,8 @@ func plistXML(binPath, outLog, errLog string) string {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>` + esc(outLog) + `</string>
-  <key>StandardErrorPath</key><string>` + esc(errLog) + `</string>
+  <key>StandardOutPath</key><string>` + esc(launchdLog) + `</string>
+  <key>StandardErrorPath</key><string>` + esc(launchdLog) + `</string>
 </dict>
 </plist>
 `
@@ -96,28 +123,59 @@ func serviceInstall() error {
 	if err != nil {
 		return err
 	}
-	outLog, errLog, err := serviceLogPaths()
+	daemonLog, launchdLog, err := serviceLogPaths()
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(outLog), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(daemonLog), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(plist, []byte(plistXML(bin, outLog, errLog)), 0o644); err != nil {
+	if err := os.WriteFile(plist, []byte(plistXML(bin, daemonLog, launchdLog)), 0o644); err != nil {
 		return err
 	}
 	// Replace any previous registration; bootout failure is fine when
 	// nothing was loaded.
+	//
+	// This is also the whole of the upgrade from a pre-#171 agent, and the
+	// order is what keeps it safe: bootout stops the old daemon and closes
+	// the descriptors launchd held on the old paths, and only the daemon
+	// bootstrap starts afterwards passes --log-file. There is never a
+	// moment when two processes write one log file, and the old file is
+	// left exactly as it is — not rotated, not truncated, not moved.
 	_, _ = launchctl("bootout", launchdTarget())
 	if out, err := bootstrapService(plist); err != nil {
 		return fmt.Errorf("launchctl bootstrap: %v: %s", err, out)
 	}
 	fmt.Printf("service installed: %s\n", plist)
-	fmt.Printf("logs: %s\n", outLog)
+	fmt.Printf("logs: %s\n", daemonLog)
+	fmt.Printf("startup and crash output: %s\n", launchdLog)
+	reportLegacyErrLog(os.Stdout)
 	return nil
+}
+
+// reportLegacyErrLog tells an upgrading user about the file that used to
+// hold everything and now holds nothing.
+//
+// Said rather than done: that file is 236 MB of the user's history on the
+// machine this issue came from, and an installer that silently deletes a
+// log — even a stale one — is not a trade worth making for a tidy Logs
+// folder. Nothing writes it once the new plist is loaded, so removing it is
+// safe whenever they get round to it.
+func reportLegacyErrLog(w io.Writer) {
+	path, err := legacyErrLog()
+	if err != nil {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() == 0 {
+		return
+	}
+	fmt.Fprintf(w, "note: %s (%d MB) is no longer written — spillway now rotates its own log.\n",
+		path, fi.Size()>>20)
+	fmt.Fprintf(w, "      delete it when you no longer want the history:  rm %s\n", path)
 }
 
 // bootstrapService loads the plist, retrying briefly. launchd needs a moment

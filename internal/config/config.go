@@ -164,6 +164,17 @@ type Config struct {
 	} `yaml:"pool"`
 	Log struct {
 		Level string `yaml:"level"`
+		// MaxSizeMB and MaxFiles bound the daemon's own log file (issue
+		// #171, where it had reached 236 MB with nothing on the machine
+		// able to shrink it). MaxFiles counts the live file, so the total
+		// on disk never exceeds MaxSizeMB * MaxFiles.
+		//
+		// They apply only where spillway opens the file itself — the
+		// launchd agent and the Windows task, both of which pass
+		// `--log-file`. A systemd unit logs to journald, which has its own
+		// retention, and a terminal session writes to the terminal.
+		MaxSizeMB int `yaml:"maxSizeMB,omitempty"`
+		MaxFiles  int `yaml:"maxFiles,omitempty"`
 	} `yaml:"log"`
 	// WatchConfig makes a running daemon pick this file up when anything
 	// other than spillway's own CLI edits it — a text editor, a script, a
@@ -209,6 +220,14 @@ func Defaults() Config {
 	c.Pool.MaxBufferBytes = 8 << 20
 	c.Pool.CanaryInterval = "2h"
 	c.Log.Level = "info"
+	// 10 MB across 5 generations: 50 MB worst case, sized for the volume
+	// AFTER the per-request line moved to debug (#171). At the default
+	// level the file now grows by quota probes and token refreshes — a few
+	// hundred lines a day — so five generations is months of history; with
+	// `log.level: debug` turned on to watch traffic live, 10 MB is still
+	// tens of thousands of request lines before the oldest rolls off.
+	c.Log.MaxSizeMB = 10
+	c.Log.MaxFiles = 5
 	watch := true
 	c.WatchConfig = &watch
 	return c
@@ -480,6 +499,15 @@ func (c *Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("log.level: %q must be debug, info, warn or error", c.Log.Level)
+	}
+	// Refused rather than quietly treated as "no rotation": a log file with
+	// no bound is the defect this config exists to prevent, and a typo'd 0
+	// that silently restores it would be indistinguishable from the bug.
+	if c.Log.MaxSizeMB < 1 {
+		return fmt.Errorf("log.maxSizeMB: %d must be at least 1", c.Log.MaxSizeMB)
+	}
+	if c.Log.MaxFiles < 1 {
+		return fmt.Errorf("log.maxFiles: %d must be at least 1", c.Log.MaxFiles)
 	}
 	if err := validateNotifyChannels(c.Notify.Channels); err != nil {
 		return err

@@ -152,7 +152,7 @@ Supported, with two differences and one caveat.
 | Config, CA, request log | `~/Library/Application Support/spillway/` | `~/.config/spillway/` | `%AppData%\spillway\` |
 | Background daemon | launchd agent | systemd **user** unit | Task Scheduler task |
 | Credential storage | Keychain | Secret Service, else a 0600 file | Credential Manager |
-| Daemon log | `~/Library/Logs/spillway.log` | `journalctl --user -u spillway` | `%LocalAppData%\spillway\spillway.log` |
+| Daemon log | `~/Library/Logs/spillway.log` (rotated) | `journalctl --user -u spillway` | `%LocalAppData%\spillway\spillway.log` (rotated) |
 
 All three come from `os.UserConfigDir()`.
 
@@ -529,6 +529,8 @@ pool:
   hideOverageFromClient: false # see "Hiding credit signals" below
 log:
   level: info
+  maxSizeMB: 10             # rotate the daemon's own log at this size
+  maxFiles: 5               # generations kept, including the live file
 watchConfig: true         # reload this file when anything else edits it — see below
 notify:
   channels:                # optional; empty/absent = local desktop notifications only
@@ -576,7 +578,8 @@ Every reload logs one line saying what it applied and what it could not:
 | Removing an account | **yes** — out of rotation immediately, before it can be selected again |
 | Adding an account (its credential already in the secret store) | **yes**, unless it names an `upstream` host spillway has no MITM leaf for — see below |
 | `notify.channels` | **yes** — a new channel starts firing, a removed one stops |
-| `log.level` | **yes** |
+| `log.level` | **yes** — including turning the per-request line on and off, see [The daemon log](#the-daemon-log) |
+| `log.maxSizeMB`, `log.maxFiles` | no — the log file is opened once at startup |
 | `upstream`, `proxy.*`, `admin.*`, `egress.*` | no — listeners and the proxy handler are built at startup |
 | `pool.exhaustedMode`, `holdMax`, `maxBufferBytes`, `probeOnStart`, `probeInterval`, `canaryInterval` | no — snapshotted at startup |
 | An existing account's `type`, `upstream`, `source` or `modelMap` | no |
@@ -1561,6 +1564,60 @@ requests.
 The overlapping 5-second poll is left alone. Fixing the query removes the
 contention that made overlap hurt; adding request coalescing on top would be
 a second change with its own failure modes, and no measurement asking for it.
+
+## The daemon log
+
+**macOS and Windows: spillway opens its own log file and rotates it.**
+`log.maxSizeMB` (default 10) is the size each file may reach; `log.maxFiles`
+(default 5) is how many generations are kept, counting the live one, so the
+worst case on disk is 50 MB. The live file is `spillway.log` and the
+archives are `spillway.log.1` … `spillway.log.4`, oldest last. On Linux the
+daemon is a systemd user unit and logs to journald, which has its own
+retention — nothing here applies.
+
+Rotation has to be done by spillway itself. A service manager that redirects
+the process's output — launchd's `StandardErrorPath`, a shell's `>>` — keeps
+that file's descriptor open, so renaming the file leaves the service manager
+appending to the renamed copy while the new one stays empty forever. Only
+the process that opened a file can roll it, which is why the launchd agent
+now passes `--log-file` and points its own redirect at
+`~/Library/Logs/spillway.launchd.log` instead. That second file gets startup
+and crash output only — a panic, a port it could not bind — and is the first
+place to look if the daemon will not start at all.
+
+**There is no line per request at the default level.** Every proxied request
+is already in `spillway-requests.db` with more structure than a log line
+carries and with retention of its own, and the duplicate copy was 99.5% of a
+236 MB log file (issue #171). What is left is what happened *to* the daemon:
+quota probes, token refreshes, rotations, refused accounts, config reloads.
+
+**To get the per-request tail back**, set `log.level: debug`:
+
+```sh
+# ~/.config/spillway.yaml
+log:
+  level: debug
+```
+
+It applies to the running daemon — no restart — so you can turn it on,
+`tail -f ~/Library/Logs/spillway.log`, watch the traffic, and set it back to
+`info` when you are done. The dashboard's request list and
+`/api/requests` show the same traffic without touching the log at all.
+
+### Upgrading an already-installed service
+
+Run `spillway service install` again (`spillway install` does it too). It
+rewrites the launchd agent and reloads it; the daemon then owns and rotates
+its own log.
+
+Until you do, nothing changes: an older agent definition still redirects
+stderr the way it always did, and the new binary keeps writing there. There
+is never a moment when two writers share one file.
+
+The file the old agent wrote, `~/Library/Logs/spillway.err.log`, is left
+exactly as it is — not rotated, not truncated, not moved — and simply stops
+growing. `service install` prints its size and the command to remove it;
+delete it whenever you no longer want the history.
 
 ## Development
 

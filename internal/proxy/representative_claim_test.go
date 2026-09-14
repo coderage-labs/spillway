@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func (b *syncBuffer) String() string {
 // test can inspect — the real h.logger the Handler is actually
 // constructed with, not a decoy, so a passing assertion here means the
 // production code path (proxy.go's call to h.claims.check) really ran.
-func newClaimRig(t *testing.T, respHeaders map[string]string) (front *httptest.Server, log *syncBuffer) {
+func newClaimRig(t *testing.T, respHeaders map[string]string) (front *httptest.Server, log *syncBuffer, served *atomic.Int64) {
 	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for k, v := range respHeaders {
@@ -61,41 +62,51 @@ func newClaimRig(t *testing.T, respHeaders map[string]string) (front *httptest.S
 	// nil HandlerOptions defaults to LevelInfo — the same default the
 	// running daemon uses — so this proves Warn/Info actually surface
 	// without needing Debug turned on, and that Debug-only output (the
-	// existing "quota signal" line) would NOT appear this way.
+	// "quota signal" line, and since #171 the per-request line) would NOT
+	// appear this way.
 	logger := slog.New(slog.NewTextHandler(log, nil))
 	h, err := NewHandler(&cfg, logger, p)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
-	front = httptest.NewServer(h)
+	// served counts completed serve() calls. The barrier used to be the
+	// trailing `msg=request` line, which stopped working the moment that
+	// line moved to debug (#171) — and it never was the right signal: a
+	// test that waits on a log line can only ever test a logger that is
+	// switched on. Counting the handler's own returns is the same barrier
+	// with none of the coupling.
+	served = new(atomic.Int64)
+	front = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r)
+		served.Add(1)
+	}))
 	t.Cleanup(front.Close)
-	return front, log
+	return front, log, served
 }
 
 // postAndWait issues one request and blocks until this handler's serve()
 // has fully finished logging it server-side, not just until the client got
 // its response.
 //
-// proxy.go's serve() writes its trailing `msg=request` summary line AFTER
-// route() (and so after h.claims.check, called from inside route()) has
-// already run — but also after the response bytes are already flushed to
-// the client, which is what postMessages waits for (see waitForEntry in
-// quota_e2e_test.go for the same gap on the request-log hook). Polling for
-// that trailing line, rather than asserting immediately, is what makes the
-// count in the dedup test deterministic instead of racy on a loaded runner.
-func postAndWait(t *testing.T, url string, log *syncBuffer, wantRequests int) {
+// h.claims.check runs inside route(), which serve() calls — but the
+// response bytes reach the client before serve() returns, and postMessages
+// only waits for those (see waitForEntry in quota_e2e_test.go for the same
+// gap on the request-log hook). Polling the handler's completion count,
+// rather than asserting immediately, is what makes the count in the dedup
+// test deterministic instead of racy on a loaded runner.
+func postAndWait(t *testing.T, url string, served *atomic.Int64, log *syncBuffer, wantRequests int) {
 	t.Helper()
 	resp := postMessages(t, url, testBody)
 	resp.Body.Close()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if strings.Count(log.String(), "msg=request") >= wantRequests {
+		if served.Load() >= int64(wantRequests) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %d requests to finish server-side logging; got:\n%s",
-				wantRequests, log.String())
+			t.Fatalf("timed out waiting for %d requests to finish server-side; got %d. log:\n%s",
+				wantRequests, served.Load(), log.String())
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -105,8 +116,8 @@ func postAndWait(t *testing.T, url string, log *syncBuffer, wantRequests int) {
 // — e.g. every Haiku response, per issue #25) must produce no
 // representative-claim log line whatsoever: absence is not a finding.
 func TestRepresentativeClaimAbsentHeaderIsNoOp(t *testing.T) {
-	front, log := newClaimRig(t, nil)
-	postAndWait(t, front.URL, log, 1)
+	front, log, served := newClaimRig(t, nil)
+	postAndWait(t, front.URL, served, log, 1)
 
 	if strings.Contains(log.String(), "representative-claim") {
 		t.Errorf("log mentions representative-claim with no header present:\n%s", log.String())
@@ -120,14 +131,14 @@ func TestRepresentativeClaimAbsentHeaderIsNoOp(t *testing.T) {
 // decision ("deprioritising on any governing candidate is defensible")
 // means this is a confirmation of the guess, not evidence against it.
 func TestRepresentativeClaimMatchingClaimLogsNothing(t *testing.T) {
-	front, log := newClaimRig(t, map[string]string{
+	front, log, served := newClaimRig(t, map[string]string{
 		"Anthropic-Ratelimit-Unified-Representative-Claim": "five_hour",
 	})
 	resp := postMessages(t, front.URL, fableReqBody)
 	resp.Body.Close()
 
 	deadline := time.Now().Add(5 * time.Second)
-	for strings.Count(log.String(), "msg=request") < 1 && time.Now().Before(deadline) {
+	for served.Load() < 1 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
@@ -140,10 +151,10 @@ func TestRepresentativeClaimMatchingClaimLogsNothing(t *testing.T) {
 // unknown — recognisably different from a mismatch, and it must not crash
 // or silently disappear.
 func TestRepresentativeClaimUnrecognisedValueLogsAsUnknown(t *testing.T) {
-	front, log := newClaimRig(t, map[string]string{
+	front, log, served := newClaimRig(t, map[string]string{
 		"Anthropic-Ratelimit-Unified-Representative-Claim": "some_future_bucket_name",
 	})
-	postAndWait(t, front.URL, log, 1)
+	postAndWait(t, front.URL, served, log, 1)
 
 	out := log.String()
 	if !strings.Contains(out, "representative-claim") || !strings.Contains(out, "unrecognised") {
@@ -161,12 +172,12 @@ func TestRepresentativeClaimUnrecognisedValueLogsAsUnknown(t *testing.T) {
 // once per request — the flood guard issue #53 asks for so a busy,
 // steadily-disagreeing account doesn't bury the one useful line.
 func TestRepresentativeClaimDedupSuppressesRepeat(t *testing.T) {
-	front, log := newClaimRig(t, map[string]string{
+	front, log, served := newClaimRig(t, map[string]string{
 		"Anthropic-Ratelimit-Unified-Representative-Claim": "some_future_bucket_name",
 	})
 
 	for i := 1; i <= 3; i++ {
-		postAndWait(t, front.URL, log, i)
+		postAndWait(t, front.URL, served, log, i)
 	}
 
 	n := strings.Count(log.String(), "representative-claim")
