@@ -21,6 +21,7 @@ import (
 	"github.com/coderage-labs/spillway/internal/admin"
 	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/events"
+	"github.com/coderage-labs/spillway/internal/logfile"
 	"github.com/coderage-labs/spillway/internal/mitm"
 	"github.com/coderage-labs/spillway/internal/netaddr"
 	"github.com/coderage-labs/spillway/internal/notify"
@@ -180,22 +181,25 @@ func runServer(args []string) error {
 	// process, so ending the task killed the shell and orphaned the daemon,
 	// still holding the port. Writing the log here means the task can run
 	// the binary directly and stopping the task stops the daemon.
+	//
+	// It is also the only way the daemon's log can be bounded (issue #171).
+	// A stream the service manager redirected belongs to the service
+	// manager: spillway cannot rotate a file whose descriptor it did not
+	// open, because renaming it leaves the redirect writing to the renamed
+	// inode. Opening the file here means spillway owns it and logfile can
+	// cap it — which is why the launchd plist now passes this flag and
+	// points its own StandardErrorPath somewhere else.
 	var out io.Writer = os.Stderr
 	if path := flagValue(args, "--log-file"); path != "" {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
-		}
-		f, ferr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		f, ferr := logfile.Open(path, int64(cfg.Log.MaxSizeMB)<<20, cfg.Log.MaxFiles)
 		if ferr != nil {
-			return fmt.Errorf("open log file: %w", ferr)
+			return ferr
 		}
 		defer f.Close()
 		// Kept for the fatal-error path in main, which runs after this
 		// function has returned its error.
 		fatalLog = f
-		// Both: a terminal invocation with --log-file should still show
-		// something, and under the task stderr goes nowhere anyway.
-		out = io.MultiWriter(os.Stderr, f)
+		out = daemonLogOut(f, os.Stderr)
 	}
 
 	// A LevelVar rather than a fixed level: log.level is one more thing
@@ -778,4 +782,39 @@ func flagValue(args []string, name string) string {
 
 // fatalLog is the log file `server --log-file` opened, so the error that ends
 // the process lands there rather than only on stderr.
-var fatalLog *os.File
+var fatalLog io.WriteCloser
+
+// daemonLogOut is where the logger writes once the daemon owns a log file.
+//
+// A terminal invocation with --log-file should still show something on the
+// terminal. Under a service manager it must not: there stderr is a file
+// spillway does not own and cannot rotate, so a copy of every line lands in
+// a file nothing will ever bound — which is exactly how #171's 236 MB
+// accumulated.
+func daemonLogOut(f io.Writer, stderr *os.File) io.Writer {
+	if duplicateToStderr(stderr) {
+		return io.MultiWriter(stderr, f)
+	}
+	return f
+}
+
+// duplicateToStderr reports whether a daemon that already writes to
+// --log-file should ALSO write every line to stderr.
+//
+// Only when stderr is a terminal, i.e. somebody is watching it. Under
+// launchd and the Windows Scheduled Task stderr is a plain file, and that
+// file is the one thing spillway cannot rotate — it was opened by the
+// service manager. Copying the log there gives the machine a second,
+// unbounded transcript of a file that is already bounded, which is issue
+// #171 reintroduced through the back door.
+//
+// A character device is the test: a tty is one, /dev/null is one (harmless
+// — writes there cost nothing and keep nothing), and a redirect to a file
+// is not.
+func duplicateToStderr(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}

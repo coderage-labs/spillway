@@ -191,3 +191,64 @@ func TestDefaultsBindLoopbackAndValidate(t *testing.T) {
 		t.Fatalf("Defaults().Validate() = %v, want nil", err)
 	}
 }
+
+// A config file written before #171 has no log.maxSizeMB and no
+// log.maxFiles. Those files are on every machine that already runs the
+// daemon, and the bound has to arrive for them without anyone editing
+// anything — a default of zero would read as "no bound", which is the bug.
+func TestExistingConfigsInheritTheLogBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spillway.yaml")
+	// Exactly what a pre-#171 file's log block looks like.
+	if err := os.WriteFile(path, []byte("log:\n  level: info\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if cfg.Log.MaxSizeMB != Defaults().Log.MaxSizeMB {
+		t.Errorf("log.maxSizeMB = %d for a config that predates the key; want the default %d",
+			cfg.Log.MaxSizeMB, Defaults().Log.MaxSizeMB)
+	}
+	if cfg.Log.MaxFiles != Defaults().Log.MaxFiles {
+		t.Errorf("log.maxFiles = %d for a config that predates the key; want the default %d",
+			cfg.Log.MaxFiles, Defaults().Log.MaxFiles)
+	}
+	if cfg.Log.MaxSizeMB < 1 || cfg.Log.MaxFiles < 1 {
+		t.Fatal("the inherited bound does not bound anything")
+	}
+}
+
+// An explicit setting is honoured — the knob is a knob, not decoration.
+func TestLogBoundIsConfigurable(t *testing.T) {
+	cfg, err := ParseValidate([]byte("log:\n  level: info\n  maxSizeMB: 2\n  maxFiles: 3\n"))
+	if err != nil {
+		t.Fatalf("ParseValidate: %v", err)
+	}
+	if cfg.Log.MaxSizeMB != 2 || cfg.Log.MaxFiles != 3 {
+		t.Fatalf("log bound = %d MB x %d files; want the configured 2 MB x 3",
+			cfg.Log.MaxSizeMB, cfg.Log.MaxFiles)
+	}
+}
+
+// Zero must be refused rather than quietly meaning "unlimited": an
+// unbounded log file is the defect, so the config cannot have a spelling
+// that restores it by accident.
+func TestValidateRejectsAnUnboundedLog(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"zero size", "log:\n  level: info\n  maxSizeMB: 0\n", "log.maxSizeMB"},
+		{"negative size", "log:\n  level: info\n  maxSizeMB: -1\n", "log.maxSizeMB"},
+		{"zero generations", "log:\n  level: info\n  maxFiles: 0\n", "log.maxFiles"},
+		{"negative generations", "log:\n  level: info\n  maxFiles: -2\n", "log.maxFiles"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseValidate([]byte(tc.yaml))
+			if err == nil {
+				t.Fatal("accepted a log configuration that bounds nothing")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %s", err, tc.want)
+			}
+		})
+	}
+}
