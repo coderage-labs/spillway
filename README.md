@@ -267,6 +267,13 @@ part of. Attachment is read from `HTTPS_PROXY` (or `ANTHROPIC_BASE_URL`)
 pointing at the configured listener. Pass `--always` in the command if you
 want it regardless.
 
+A session that **is** attached but whose daemon does not answer within the
+line's 350 ms budget shows `⛁ —` and nothing else. That one glyph exists
+because the two silences used to be identical: when `/api/accounts` slowed
+past the budget the line vanished, which looks exactly like a session that
+is not on spillway, so a latency regression read as a deleted feature. An
+unattached session still prints nothing and never opens a connection.
+
 ### Claude Code plugin
 
 ```sh
@@ -1551,6 +1558,29 @@ requests.
 The overlapping 5-second poll is left alone. Fixing the query removes the
 contention that made overlap hurt; adding request coalescing on top would be
 a second change with its own failure modes, and no measurement asking for it.
+
+### The per-account totals are maintained, not recomputed
+
+Indexing bought a constant factor and the retention bound capped the rows,
+but the per-account aggregate was still O(rows): **695,969 rows measured
+0.747 s** through `modernc.org/sqlite` even on the covering index. That is
+what `/api/accounts` cost per call, against a status line whose entire HTTP
+budget is 350 ms — so the status line stopped rendering at all.
+
+These are display totals that move only when a request is logged, so they are
+now maintained incrementally: one aggregate at startup seeds them, every
+`Record` adds to them, and `/api/accounts` reads them. Cost is independent of
+both table size and account count, measured at **microseconds** at 584,110
+rows, and asserted as a statement count rather than a duration — a latency
+threshold is a flake, not a fact about the fix.
+
+This is exact rather than a cache with a staleness window, and the reason is
+the rollup above: the lifetime figure is `SUM(requests) + SUM(request_totals)`,
+and a prune adds to the second exactly what it removes from the first. The
+only event that can move it is a new request. So there is no refresh interval
+and no number on screen that is up to one interval old — which memoising on
+the existing 30 s quota sampler would have meant, beside a dashboard that
+polls every 5 s.
 
 ## Development
 

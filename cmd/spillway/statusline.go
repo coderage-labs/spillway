@@ -8,8 +8,13 @@ package main
 //   - It must NOT read stdin. Claude Code pipes JSON to the status line, but
 //     this may be composed inside another script that already consumed it;
 //     blocking on a closed pipe freezes the status line.
-//   - It must be fast and silent on failure. It re-runs on every render, so a
-//     stopped daemon has to cost nothing and print nothing — never an error.
+//   - It must be fast and quiet on failure. It re-runs on every render, so a
+//     stopped daemon has to cost nothing and say almost nothing — never an
+//     error message. "Almost" rather than "nothing" since issue #165: a
+//     session that IS proxied through a daemon that cannot answer gets one
+//     dim glyph, because printing literally nothing made that case identical
+//     to a session that is not on spillway at all. A session that is not on
+//     spillway still prints nothing, and never even opens a connection.
 //   - Colour degrades: truecolor gradient, then 256, then none, driven by the
 //     environment rather than assumed.
 
@@ -343,12 +348,44 @@ func runStatusline(args []string) error {
 	list, aErr = fetchAccounts(addr, token)
 	<-done
 
-	if aErr != nil || len(list) == 0 {
-		return nil // daemon down or nothing configured: print nothing at all
+	if aErr != nil {
+		// The daemon did not answer within statusTimeout. Say SOMETHING
+		// (issue #165).
+		//
+		// This used to `return nil` alongside the empty-pool case, and that
+		// is what made a 400ms latency regression read as a deleted
+		// feature: a status line that cannot reach the daemon was
+		// byte-for-byte identical to one deliberately staying quiet because
+		// the session is not proxied. The two silences were never the same
+		// thing, and they are not even decided in the same place — a
+		// session that is not on spillway has already returned above,
+		// before any HTTP happens at all. So nothing here can make an
+		// unattached session noisy; execution only reaches this line when
+		// the client WAS told to proxy through spillway (or asked with
+		// --always) and spillway did not answer, which is a fact worth one
+		// glyph.
+		//
+		// One dim glyph is the whole budget. No colour, no error text, no
+		// "connection refused" — those belong in `spillway status`, not in
+		// a prompt that redraws on every keystroke.
+		fmt.Print(unreachable(detectPalette()))
+		return nil
+	}
+	if len(list) == 0 {
+		// Reachable, and it says there are no accounts. That is a
+		// configuration state the dashboard and `spillway status` both
+		// explain properly; the prompt stays out of it.
+		return nil
 	}
 	fmt.Print(render(detectPalette(), list, st, time.Now()))
 	return nil
 }
+
+// unreachable is what the line renders when the daemon did not answer in
+// time: the pool glyph the healthy line opens with, and an em dash where the
+// account and the bars would be. Recognisably spillway, recognisably
+// without data, and dim so it never competes with the prompt.
+func unreachable(p palette) string { return p.dim("⛁ —") }
 
 // render builds the line. Split out from runStatusline so it can be tested
 // without a daemon: this is the part with the judgement in it.

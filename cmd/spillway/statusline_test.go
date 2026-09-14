@@ -614,12 +614,21 @@ func TestStatuslinePrintsNothingForUnproxiedSessionEvenWithStaleCA(t *testing.T)
 	}
 }
 
-// TestStatuslinePrintsNothingWhenDaemonUnreachable: the session IS attached
-// to spillway (HTTPS_PROXY matches the configured proxy address), but the
-// admin listener it would ask about staleCA is down. This must degrade the
-// same as every other signal already does — silently, not with a stale or
-// half-rendered line.
-func TestStatuslinePrintsNothingWhenDaemonUnreachable(t *testing.T) {
+// TestStatuslineMarksAnUnreachableDaemonRatherThanVanishing: the session IS
+// attached to spillway (HTTPS_PROXY matches the configured proxy address),
+// but the admin listener is down.
+//
+// This used to assert that the line printed nothing at all, and issue #165
+// is what that cost: when /api/accounts slowed past the 350ms budget the
+// line silently disappeared, which is byte-for-byte what a session that is
+// not on spillway prints — so a latency regression was indistinguishable
+// from the feature being removed, and got reported as the latter.
+//
+// The contract now is one dim glyph and nothing else: enough to tell "your
+// proxy is not answering" from "you are not proxied", and still quiet
+// enough for something that redraws on every keystroke. No error text, no
+// colour, no half-rendered bars.
+func TestStatuslineMarksAnUnreachableDaemonRatherThanVanishing(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "spillway.yaml")
 	// admin.addr deliberately names nothing listening; proxy.port is the
@@ -632,13 +641,25 @@ func TestStatuslinePrintsNothingWhenDaemonUnreachable(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:61987")
 	t.Setenv("https_proxy", "")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("NO_COLOR", "1")
 
 	got := captureStdout(t, func() {
 		if err := runStatusline(nil); err != nil {
 			t.Errorf("runStatusline: %v", err)
 		}
 	})
-	if got != "" {
-		t.Errorf("unreachable daemon printed %q, want nothing", got)
+	if got == "" {
+		t.Fatal("unreachable daemon printed nothing — indistinguishable from a session " +
+			"that is not on spillway at all (issue #165)")
+	}
+	if got != "⛁ —" {
+		t.Errorf("unreachable daemon printed %q, want exactly the minimal marker %q", got, "⛁ —")
+	}
+	// Nothing that reads as a healthy pool, and no error text.
+	for _, forbidden := range []string{"%", "█", "░", "refused", "error", "timeout"} {
+		if strings.Contains(strings.ToLower(got), forbidden) {
+			t.Errorf("the degraded line %q contains %q — it must say only that there is no data",
+				got, forbidden)
+		}
 	}
 }
