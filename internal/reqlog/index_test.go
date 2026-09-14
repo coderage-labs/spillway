@@ -268,6 +268,11 @@ func TestExistingUnindexedDatabaseGainsIndexesOnOpen(t *testing.T) {
 // so the `rowid DESC` tie-break is actually exercised. Written in one
 // transaction with a prepared statement: 584k individual commits would
 // dominate the runtime of the test that uses it.
+//
+// Because it bypasses Record it also bypasses the running lifetime total
+// (issue #165), so it re-runs seedTotals at the end, exactly as Open does
+// after a bulk change to the table. TestCacheStatsMatchesTheSQLAggregate is
+// the guard that this fixture path and the production path agree.
 func seedRequests(t *testing.T, l *Log, n int, span time.Duration, end time.Time) {
 	t.Helper()
 	accts := []string{"work", "personal", "team-a", "team-b", "kimi-1", "kimi-2", "spare", "backup"}
@@ -303,6 +308,9 @@ func seedRequests(t *testing.T, l *Log, n int, span time.Duration, end time.Time
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.seedTotals(); err != nil {
 		t.Fatal(err)
 	}
 }

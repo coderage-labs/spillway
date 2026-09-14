@@ -1,6 +1,8 @@
 package reqlog
 
-import "sort"
+import (
+	"sort"
+)
 
 // CacheStat is one account's aggregated token volume, for the dashboard's
 // cache hit rate and cache-create/cache-read columns (issue #110) — a burn
@@ -12,14 +14,18 @@ import "sort"
 // to be lifetime only because nothing ever deleted a row; it is lifetime
 // now because PruneRequests folds each account's four counters into
 // request_totals in the same transaction that deletes the rows, and
-// CacheStats adds that rollup back in below. The window over which the
+// seedTotals adds that rollup back in below. The window over which the
 // numbers were collected is therefore unbounded, while the rows scanned to
-// produce them are bounded by RequestRetention.
+// produce them are bounded by RequestRetention — and since issue #165 they
+// are scanned once per process rather than once per request.
 //
 // If a ROLLING window is ever wanted instead, it cannot be had by simply
 // filtering on ts — that would count the rollup twice over, or read as a
 // window while silently including everything before it. Drop the rollup
-// from this query in the same change.
+// from that query in the same change, and note that a rolling window is no
+// longer maintainable incrementally at all (rows leaving the window would
+// have to be subtracted), so it would mean going back to a per-call scan or
+// to a different data structure — see the running-total note below.
 type CacheStat struct {
 	Account                  string
 	InputTokens              int64
@@ -42,69 +48,151 @@ func (c CacheStat) HitRate() *float64 {
 }
 
 // cacheStatsQuery is a package-level const so a test can run EXPLAIN QUERY
-// PLAN against the exact text CacheStats executes rather than a copy that
+// PLAN against the exact text seedTotals executes rather than a copy that
 // could drift from it (#104's shape, reused by #162).
 //
 // Naming the four SUM columns after the group key in requests_account_tokens
 // (see requestIndexes) makes this a COVERING index scan: the plan reads
 // `SCAN requests USING COVERING INDEX requests_account_tokens`, answering
 // the aggregate from the index without visiting the 23-column rows.
+//
+// Since issue #165 this runs ONCE per process, in seedTotals at Open, rather
+// than on every /api/accounts request — but it still runs over the whole
+// table, so the covering plan is still what keeps that one scan bounded.
 const cacheStatsQuery = `SELECT account,
 		SUM(input_tokens), SUM(output_tokens),
 		SUM(cache_creation_input_tokens), SUM(cache_read_input_tokens)
 		FROM requests GROUP BY account`
 
-// CacheStats aggregates token usage per account across every logged
-// request — including requests whose rows retention has since deleted,
-// whose counters live on in request_totals (see PruneRequests). Accounts
-// with no requests yet are simply absent — the caller (admin.accounts)
-// already iterates the pool's account list and treats a missing entry as
-// "no data", the same way it already treats a missing quota-history series.
+// ── the running total (issue #165) ───────────────────────────────────────
 //
-// The rollup is added in Go rather than folded into the SQL as a UNION ALL
-// subquery on purpose: a subquery costs the covering-index plan above,
-// while this way the hot half of the work keeps a plan a test can assert,
-// and the other half is a handful of rows.
-func (l *Log) CacheStats() ([]CacheStat, error) {
-	pruned, err := l.requestTotals()
+// CacheStats used to execute cacheStatsQuery on every call. Even on #163's
+// covering index that is O(rows): 695,969 rows measured 0.068 s in C SQLite
+// and 0.747 s under modernc.org/sqlite (issue #104's pure-Go amplification
+// again). /api/accounts is polled every 5 s by the dashboard AND on every
+// render by the status line, whose whole HTTP budget is 350 ms — so the
+// status line stopped rendering at all.
+//
+// These are display totals that move only when a request is logged, so they
+// are maintained incrementally instead: one scan at Open seeds them, Record
+// adds to them, and CacheStats reads them. That is EXACT, not an
+// approximation, because of a property the schema already had:
+//
+//	lifetime total = SUM(requests) + SUM(request_totals)
+//
+// and PruneRequests is sum-preserving over that pair by construction — the
+// same transaction that deletes rows adds their counters to request_totals
+// (see retention.go). So the only event that can move the combined number
+// is a Record. Nothing else needs to invalidate anything, and there is no
+// refresh interval and therefore no staleness: a memoised copy refreshed on
+// the 30 s quota sampler would have been up to 30 s behind a dashboard that
+// polls every 5 s, which is a worse number to put on screen than a slow one.
+//
+// The correctness of this rests on Record being the only writer of
+// `requests` rows on a given Log, which it is: one process opens the
+// database (cmd/spillway/main.go), and every other surface — `spillway
+// status`, the status line, the dashboard — reads it through the admin API.
+// Test fixtures that bulk-insert rows behind Record's back call seedTotals
+// afterwards, exactly as Open does, and TestCacheStatsMatchesTheSQLAggregate
+// pins the in-memory figure against the SQL truth so any drift fails loudly
+// rather than being displayed.
+
+// seedTotals computes the lifetime per-account totals once and installs them
+// as the live figure. Called from Open AFTER retention has pruned — prune
+// moves counters between the two tables without changing their sum, so the
+// order is immaterial to the answer, but scanning the smaller table is
+// cheaper and the dependency is easier to reason about this way.
+func (l *Log) seedTotals() error {
+	// The rollup of already-pruned rows first, then everything still in the
+	// table added on top. Added in Go rather than folded into the SQL as a
+	// UNION ALL subquery on purpose: a subquery costs the covering-index
+	// plan above, while this way the expensive half keeps a plan a test can
+	// assert, and the other half is a handful of rows.
+	totals, err := l.requestTotals()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	rows, err := l.db.Query(cacheStatsQuery)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
-	var out []CacheStat
 	for rows.Next() {
 		var c CacheStat
 		if err := rows.Scan(&c.Account, &c.InputTokens, &c.OutputTokens,
 			&c.CacheCreationInputTokens, &c.CacheReadInputTokens); err != nil {
-			return nil, err
+			return err
 		}
-		if p, ok := pruned[c.Account]; ok {
-			c.InputTokens += p.InputTokens
-			c.OutputTokens += p.OutputTokens
-			c.CacheCreationInputTokens += p.CacheCreationInputTokens
-			c.CacheReadInputTokens += p.CacheReadInputTokens
-			delete(pruned, c.Account)
-		}
-		out = append(out, c)
+		// An account whose every row has been pruned is already in the map
+		// from the rollup and must keep those counters: dropping it would
+		// make the displayed number fall to zero after a quiet fortnight
+		// rather than hold at what was spent.
+		p := totals[c.Account]
+		c.InputTokens += p.InputTokens
+		c.OutputTokens += p.OutputTokens
+		c.CacheCreationInputTokens += p.CacheCreationInputTokens
+		c.CacheReadInputTokens += p.CacheReadInputTokens
+		totals[c.Account] = c
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	// An account whose every row has been pruned still has a lifetime
-	// total, and dropping it here would make the displayed number fall to
-	// zero after a quiet fortnight rather than hold at what was spent.
-	// Sorted so the returned order stays deterministic; map order is not.
-	rest := make([]string, 0, len(pruned))
-	for name := range pruned {
-		rest = append(rest, name)
+	l.totalsMu.Lock()
+	l.totals = totals
+	l.totalsMu.Unlock()
+	return nil
+}
+
+// addTotals folds one recorded request into the running figure. Called by
+// Record after the row is safely written, so a failed INSERT cannot inflate
+// a total that no row backs.
+//
+// The account is registered even when all four counters are zero, matching
+// what the SQL aggregate did: `GROUP BY account` produced a row for every
+// account with any request at all, and admin.accounts distinguishes "present
+// with nothing cached" from "absent" when it decides whether to emit the
+// cache columns.
+func (l *Log) addTotals(e Entry) {
+	l.totalsMu.Lock()
+	defer l.totalsMu.Unlock()
+	if l.totals == nil {
+		l.totals = map[string]CacheStat{}
 	}
-	sort.Strings(rest)
-	for _, name := range rest {
-		out = append(out, pruned[name])
+	c := l.totals[e.Account]
+	c.Account = e.Account
+	c.InputTokens += e.InputTokens
+	c.OutputTokens += e.OutputTokens
+	c.CacheCreationInputTokens += e.CacheCreationInputTokens
+	c.CacheReadInputTokens += e.CacheReadInputTokens
+	l.totals[e.Account] = c
+}
+
+// CacheStats returns token usage per account across every logged request —
+// including requests whose rows retention has since deleted, whose counters
+// live on in request_totals (see PruneRequests). Accounts with no requests
+// yet are simply absent — the caller (admin.accounts) already iterates the
+// pool's account list and treats a missing entry as "no data", the same way
+// it already treats a missing quota-history series.
+//
+// Reads the running total described above: no query, no row scan, and a
+// cost that depends on the number of ACCOUNTS rather than the number of
+// requests. The figure is current as of the last Record, never stale.
+//
+// The error return is kept although this can no longer fail: every caller
+// already handles it, and the signature should not have to change again if
+// a future total needs a read that can.
+func (l *Log) CacheStats() ([]CacheStat, error) {
+	l.totalsMu.Lock()
+	out := make([]CacheStat, 0, len(l.totals))
+	for _, c := range l.totals {
+		out = append(out, c)
+	}
+	l.totalsMu.Unlock()
+	// Map order is not deterministic and the dashboard renders these in the
+	// order they arrive, so sort before handing them out.
+	sort.Slice(out, func(i, j int) bool { return out[i].Account < out[j].Account })
+	if len(out) == 0 {
+		return nil, nil
 	}
 	return out, nil
 }

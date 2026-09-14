@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -140,7 +141,20 @@ type Entry struct {
 // Log is an open request-log database.
 type Log struct {
 	db *sql.DB
+
+	// totals is the lifetime per-account token aggregate CacheStats serves
+	// (issue #165): seeded by one scan in Open, added to by Record, never
+	// recomputed. See cachestats.go for why that is exact rather than a
+	// cache with a staleness window.
+	totalsMu sync.Mutex
+	totals   map[string]CacheStat
 }
+
+// sqlDriver is the database/sql driver name Open uses. A var rather than the
+// literal "sqlite" so a test can point Open at a wrapper that counts the
+// statements the Log executes — which is how issue #165's fix is asserted
+// without a wall-clock assertion (those are flakes; see #98, #134).
+var sqlDriver = "sqlite"
 
 // migrationColumn is one column added to `requests` after the first
 // release. Type is spelled out per-column (rather than assuming TEXT, as
@@ -213,7 +227,7 @@ func Open(path string) (*Log, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open(sqlDriver, "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open request log: %w", err)
 	}
@@ -259,6 +273,21 @@ func Open(path string) (*Log, error) {
 		db.Close()
 		return nil, fmt.Errorf("create request retention schema: %w", err)
 	}
+	// Issue #165: the one full aggregate this process runs. Everything
+	// after this point reads the running total instead, so /api/accounts —
+	// polled every 5s by the dashboard and on every status-line render,
+	// inside a 350ms budget — costs no rows at all. Deliberately on the
+	// startup path rather than lazily on the first call: a lazy seed would
+	// put the 0.7s back into whichever /api/accounts request happened to
+	// come first after a restart, which is precisely the call that was
+	// blanking the status line. It is bounded by RequestRetention (the
+	// prune above has already run), it lands before either listener binds,
+	// and it is small beside the index build and the prune Open already
+	// does there.
+	if err := l.seedTotals(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("seed request totals: %w", err)
+	}
 	if err := l.initQuota(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create quota schema: %w", err)
@@ -291,7 +320,15 @@ func (l *Log) Record(e Entry) error {
 		e.SessionHash, e.InputTokens, e.OutputTokens, e.CacheCreationInputTokens, e.CacheReadInputTokens,
 		e.ToolCount, e.ToolsOrderHash, e.ToolsSortedHash, e.ToolsRawHash, e.SystemHash,
 		e.FirstMsgShapeHash, e.FirstMsgBlocks, e.PrefixBytes)
-	return err
+	if err != nil {
+		return err
+	}
+	// Issue #165: fold this row into the running lifetime total, so
+	// CacheStats never has to re-derive it from the table. After the INSERT
+	// has succeeded, never before — a total no row backs is worse than a
+	// slow one.
+	l.addTotals(e)
+	return nil
 }
 
 // recentQuery is a package-level const (rather than inlined) so a test can
