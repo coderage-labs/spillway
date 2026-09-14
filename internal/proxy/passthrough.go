@@ -15,22 +15,60 @@ import (
 	"time"
 )
 
+// identityTrees are the identity-bound path TREES: each base matches both
+// the collection itself and everything under it (see underPath). They are
+// listed as bases without a trailing slash precisely so the two cannot drift
+// apart again — issue #166.
+var identityTrees = []string{
+	"/v1/code",
+	"/api/oauth/files",
+	"/v1/environments",
+	"/v1/sessions",
+}
+
+// underPath reports whether path is the base itself or something beneath it
+// — base, or base + "/" + anything — and nothing else.
+//
+// The "or the base itself" half is the whole point (issue #166). A bare
+// strings.HasPrefix(path, base+"/") silently excludes the collection
+// endpoint, which is where the item is CREATED: /v1/sessions/<id> was
+// passed through on the client's own credential while the POST /v1/sessions
+// that made that <id> was pool-routed to whichever account the pool happened
+// to pick, so the two halves of one session disagreed about whose it was.
+//
+// The "and nothing else" half is why this is not HasPrefix(path, base):
+// that would swallow /v1/sessionsfoo, and any future base that happens to be
+// a prefix of an unrelated path. Matching on the segment boundary keeps the
+// widening of this rule from reaching paths it was never meant to cover.
+func underPath(path, base string) bool {
+	return path == base || strings.HasPrefix(path, base+"/")
+}
+
 // isIdentityPath reports whether a path is identity-bound: it must reach the
 // upstream with the client's own Authorization/x-api-key untouched. This is
 // what keeps Remote Control and the CLI's own token refresh working through
 // the proxy. The list is EMPIRICAL — RC server-mode paths observed live
 // 2026-08-21 (e.g. /v1/environments/<id>/work/poll, /v1/sessions/<id>/archive)
 // — extend it as new identity paths surface. Inference paths
-// (/v1/messages) must never be added: those are pool-routed.
+// (/v1/messages) must never be added: those are pool-routed, and no entry in
+// identityTrees may be a prefix of one at a segment boundary.
+//
+// 2026-09-14 (issue #166): the tree bases used to be written as "X/"
+// prefixes, so the collection endpoints — /v1/sessions above all — fell
+// through to pool routing. Measured on live traffic, the exact path
+// /v1/sessions was served by 8 different pooled accounts while every
+// /v1/sessions/<id> call went out as a passthrough.
 func isIdentityPath(path string) bool {
 	switch path {
 	case "/v1/oauth/token", "/api/oauth/file_upload":
 		return true
 	}
-	return strings.HasPrefix(path, "/v1/code/") ||
-		strings.HasPrefix(path, "/api/oauth/files/") ||
-		strings.HasPrefix(path, "/v1/environments/") ||
-		strings.HasPrefix(path, "/v1/sessions/")
+	for _, base := range identityTrees {
+		if underPath(path, base) {
+			return true
+		}
+	}
+	return false
 }
 
 // isNonQuotaPath reports whether a path is CONFIRMED non-inference: it
@@ -56,6 +94,12 @@ func isIdentityPath(path string) bool {
 // allowed to hold on exhaustion, so an unclassified path here still fails
 // fast instead of queueing, without having to guess whether it needs an
 // account's credential to be forwarded correctly.
+//
+// Audited for issue #166's off-by-one-slash: this list is exact-match only
+// and deliberately stays that way. These are three specific leaf endpoints,
+// not trees — /api/claude_code/<anything else> is unclassified, and the
+// paragraph above is exactly why it must stay that way — so there is no
+// collection/item pair here to get wrong, and underPath must not be used.
 func isNonQuotaPath(path string) bool {
 	switch path {
 	case "/api/event_logging/v2/batch",

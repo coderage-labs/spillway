@@ -360,7 +360,16 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) {
 	lw := &loggingWriter{ResponseWriter: w, status: http.StatusOK}
 	oc := h.route(lw, r)
 	dur := time.Since(start)
-	h.logger.Info("request",
+	// Debug, not Info (issue #171). This line was 99.5% of a 236 MB log
+	// file, and every one of those requests is already in
+	// spillway-requests.db — the Record call immediately below writes it
+	// there, with more structure than the line carries and with retention
+	// (#163) the log never had. At the default level the log is now what
+	// happened TO the daemon: rotations, refused accounts, token refreshes,
+	// quota probes. Set `log.level: debug` to get the per-request tail
+	// back; it applies live, so watching traffic costs a config edit rather
+	// than a restart.
+	h.logger.Debug("request",
 		"method", r.Method,
 		"path", r.URL.Path,
 		"status", lw.status,
