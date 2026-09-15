@@ -36,6 +36,22 @@
     --series-2:#eb6834;
     --series-3:#1baf7a;
     --series-4:#eda100;
+    --series-5:#7b4fc9;
+    --series-6:#d43f8d;
+    --series-7:#159bb5;
+    --series-8:#82a832;
+    --series-9:#c83f4f;
+    --series-10:#5369c5;
+    --series-11:#b86b20;
+    --series-12:#168f8a;
+    --series-13:#a34bb8;
+    --series-14:#477fae;
+    --series-15:#d15f72;
+    --series-16:#668f29;
+    --series-17:#ad5140;
+    --series-18:#3d7294;
+    --series-19:#8159a8;
+    --series-20:#478d5b;
     --warning: #fab219;
     --critical:#d03b3b;
     --shadow:  0 1px 2px rgba(8,32,42,.05), 0 10px 30px -22px rgba(8,32,42,.5);
@@ -56,6 +72,22 @@
       --series-2:#d95926;
       --series-3:#199e70;
       --series-4:#c98500;
+      --series-5:#966be5;
+      --series-6:#e35a9d;
+      --series-7:#28b5cf;
+      --series-8:#a5c94a;
+      --series-9:#e0525f;
+      --series-10:#7188e5;
+      --series-11:#d9943b;
+      --series-12:#25b5aa;
+      --series-13:#c06bd2;
+      --series-14:#6da4d4;
+      --series-15:#e77991;
+      --series-16:#8fbf3d;
+      --series-17:#d9785e;
+      --series-18:#62a0c2;
+      --series-19:#a77aca;
+      --series-20:#65b879;
       --shadow:  none;
     }
   }
@@ -530,7 +562,7 @@ const HOURS = 6;
 let CREST = 0.02;
 // Categorical slots in fixed order. Colour follows the account, never its rank
 // in a filtered list, so the map is keyed by name and never reassigned.
-const SLOTS = ["--series-1", "--series-2", "--series-3", "--series-4"];
+const SLOTS = Array.from({ length: 20 }, (_, i) => `--series-${i + 1}`);
 const seriesColour = new Map();
 function colourFor(name) {
   if (!seriesColour.has(name)) {
