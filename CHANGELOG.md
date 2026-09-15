@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/coderage-labs/spillway/compare/v0.19.7...v0.20.0) (2026-09-15)
+
+
+### Features
+
+* pool only recognised inference, pass everything else through ([#176](https://github.com/coderage-labs/spillway/issues/176)) ([#181](https://github.com/coderage-labs/spillway/issues/181)) ([07b2f51](https://github.com/coderage-labs/spillway/commit/07b2f51268d16af4e382602dbfa29666186bc886))
+
 ## [0.19.7](https://github.com/coderage-labs/spillway/compare/v0.19.6...v0.19.7) (2026-09-15)
 
 
