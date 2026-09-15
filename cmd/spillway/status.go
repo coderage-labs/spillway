@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -136,7 +137,46 @@ func statusTable(api *adminAPI, out io.Writer) error {
 		}
 		fmt.Fprintln(out, line)
 	}
+
+	printUnpooled(api, out)
 	return nil
+}
+
+// printUnpooled reports traffic spillway passed through without a pooled
+// credential because it did not recognise the path (issue #176).
+//
+// This is the CLI half of making the inverted routing default safe. spillway
+// now pools only what it recognises as inference, which means a new
+// inference endpoint would be forwarded on the user's own credential with
+// the pool sitting idle — and the only thing standing between that and a
+// silent regression is the user being able to see it. The daemon warns in
+// the log; this is the same fact for someone who runs `spillway status`
+// rather than tailing a log file.
+//
+// A missing or failing /api/state is not fatal and prints nothing: an older
+// daemon has no such section, and the accounts table above is still the
+// answer to what was asked. statusline.go takes the same line.
+func printUnpooled(api *adminAPI, out io.Writer) {
+	var st struct {
+		Unpooled *struct {
+			Requests        int      `json:"requests"`
+			Paths           int      `json:"paths"`
+			InferenceShaped []string `json:"inferenceShaped"`
+		} `json:"unpooled"`
+	}
+	if err := api.get("/api/state", &st); err != nil || st.Unpooled == nil {
+		return
+	}
+	fmt.Fprintf(out, "unpooled: %d requests on %d paths spillway does not recognise, passed through on the client's own credential\n",
+		st.Unpooled.Requests, st.Unpooled.Paths)
+	if len(st.Unpooled.InferenceShaped) == 0 {
+		return
+	}
+	// The line that matters: these took a POST with a body, which is what
+	// an inference request looks like. If one of them IS inference, the
+	// pool is not being used for it.
+	fmt.Fprintf(out, "  inference-shaped, not pooled: %s — add to proxy.inferencePaths to pool it\n",
+		strings.Join(st.Unpooled.InferenceShaped, ", "))
 }
 
 // statusJSON prints state, accounts and recent requests as one object. It

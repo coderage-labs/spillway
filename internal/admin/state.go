@@ -72,6 +72,37 @@ type stateJSON struct {
 	// exercise MITM), and it decays back to false on its own once the
 	// symptom stops recurring — it is not meant to latch forever.
 	StaleCA bool `json:"staleCA,omitempty"`
+	// Unpooled reports traffic spillway passed through WITHOUT a pooled
+	// credential because it did not recognise the path as inference (issue
+	// #176). Present only once something has actually been passed through
+	// unpooled, like Holding above.
+	//
+	// This is the visible half of inverting the routing default. spillway
+	// now pools only what it recognises, which means a new inference
+	// endpoint would be forwarded on the user's own credential and the pool
+	// would quietly go unused for it. The daemon warns about that in the
+	// log; this is the same fact somewhere a reader looks without tailing a
+	// log file. Silence is what let both of the bugs that motivated the
+	// inversion run for thousands of requests.
+	Unpooled *unpooledJSON `json:"unpooled,omitempty"`
+}
+
+// unpooledJSON is the /api/state view of issue #176's unrecognised-path
+// counter. Declared here rather than reusing internal/proxy's type because
+// admin does not import proxy — main wires the two together, exactly as it
+// does for the stale-CA warning.
+type unpooledJSON struct {
+	// Requests is every request passed through on the client's own
+	// credential because spillway did not recognise the path. Identity and
+	// confirmed-non-quota paths are excluded: those are recognised.
+	Requests int `json:"requests"`
+	// Paths is how many distinct path templates those fell on. Templates,
+	// not paths: identifiers are redacted before anything is recorded.
+	Paths int `json:"paths"`
+	// InferenceShaped names the templates that took a POST with a body and
+	// therefore raised the warning — the list to check against
+	// proxy.inferencePaths.
+	InferenceShaped []string `json:"inferenceShaped,omitempty"`
 }
 
 func (s *Server) state() stateJSON {
@@ -106,6 +137,13 @@ func (s *Server) state() stateJSON {
 	}
 	if s.caWarning != nil {
 		st.StaleCA = s.caWarning()
+	}
+	// Read fresh on every request, never cached, for the same reason
+	// caWarning is: the whole value of this figure is that it is current.
+	if s.unpooled != nil {
+		if u := s.unpooled(); u.Requests > 0 {
+			st.Unpooled = &u
+		}
 	}
 	if st.Usable == 0 && st.Reserve == 0 && st.Overage == 0 {
 		if reset, ok := s.pool.EarliestReset(); ok {

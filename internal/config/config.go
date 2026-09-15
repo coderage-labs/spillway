@@ -77,6 +77,23 @@ type Config struct {
 		// who can reach it, along with every prompt in flight. Validate
 		// refuses that bind without this flag; see the guard there.
 		AllowRemote bool `yaml:"allowRemote,omitempty"`
+		// InferencePaths adds exact request paths to the POOLED set, on top
+		// of the built-in POST /v1/messages (issue #176).
+		//
+		// spillway pools only what it recognises as inference and passes
+		// everything else through on the client's own credential. The cost
+		// of that default is that a NEW inference endpoint — say Anthropic
+		// ships /v1/responses — would be forwarded unpooled: no rotation,
+		// no quota tracking, no holds, and the pool quietly unused for it.
+		// The daemon warns the first time it sees an unrecognised path
+		// take a POST with a body, and this is what the user does about it
+		// without waiting for a release: add the path here. It is picked up
+		// by the config watcher, so it applies without a restart.
+		//
+		// Entries are matched exactly and pooled for POST, like
+		// /v1/messages. An entry here wins over every other classification,
+		// including the identity-bound list.
+		InferencePaths []string `yaml:"inferencePaths,omitempty"`
 	} `yaml:"proxy"`
 	Upstream string          `yaml:"upstream"`
 	Accounts []AccountConfig `yaml:"accounts,omitempty"`

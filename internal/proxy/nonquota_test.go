@@ -159,11 +159,19 @@ func TestNonQuotaPathForwardsClientCredentialUnrewritten(t *testing.T) {
 	}
 }
 
-// TestUnclassifiedPathStaysPooled: a path NOT confirmed either way (e.g. an
-// mcp-registry lookup) must still get a pooled account's credential when
-// one is available — issue #91 explicitly asks to err toward leaving an
-// unsure path in the pool rather than guessing it can be bypassed.
-func TestUnclassifiedPathStaysPooled(t *testing.T) {
+// TestUnclassifiedPathIsNoLongerPooled: ISSUE #176 REVERSED THIS TEST, and
+// deliberately.
+//
+// It used to assert the opposite — that a path not confirmed either way
+// (an mcp-registry lookup) still got a pooled account's credential, which
+// is what issue #91 asked for when the alternative was guessing a path
+// could be bypassed. Measured on live traffic that bet lost: ~7,500
+// requests across eleven non-inference families were pool-routed to real
+// accounts for no reason, /api/oauth/validate among them. So the default
+// inverted, and an unclassified path now passes through on the CLIENT's own
+// credential. What replaced the old safeguard is not a better guess but a
+// louder silence: see unpooled.go's warning and counter.
+func TestUnclassifiedPathIsNoLongerPooled(t *testing.T) {
 	got := make(chan http.Header, 1)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got <- r.Header.Clone()
@@ -190,18 +198,26 @@ func TestUnclassifiedPathStaysPooled(t *testing.T) {
 	resp.Body.Close()
 
 	hdr := <-got
-	if a := hdr.Get("Authorization"); a != "Bearer pool-tok" {
-		t.Errorf("Authorization = %q, want pool injection (unclassified paths stay pooled)", a)
+	if a := hdr.Get("Authorization"); a == "Bearer pool-tok" {
+		t.Error("an unclassified path still received a POOLED account's credential — this is issue #176")
+	} else if a != "Bearer client-token" {
+		t.Errorf("Authorization = %q, want the client's own %q", a, "Bearer client-token")
 	}
 }
 
-// TestUnclassifiedPathFailsFastNeverHolds: the conservative fallback issue
-// #91 asks for when classification is uncertain — an unclassified path
-// still participates in pool selection (see above) but must never hold on
-// exhaustion, only POST /v1/messages may.
-func TestUnclassifiedPathFailsFastNeverHolds(t *testing.T) {
+// TestUnclassifiedPathNeverHoldsOnExhaustion: issue #91's conservative
+// fallback asked that an unclassified path never queue behind a reset it
+// does not need — the 51-request, 53-minute pile-up it reports. Since issue
+// #176 that is true by construction rather than by a guard: such a path
+// never reaches pool selection at all, so there is nothing to hold for.
+// The property is still worth pinning, because it is the one issue #91 was
+// filed about and it must not come back by a different route.
+func TestUnclassifiedPathNeverHoldsOnExhaustion(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("upstream must not be hit — the only account is already exhausted")
+		if a := r.Header.Get("Authorization"); a == "Bearer tok" {
+			t.Errorf("Authorization = %q — an unclassified path must not carry the pooled account's credential", a)
+		}
+		fmt.Fprint(w, `{"ok":true}`)
 	}))
 	defer up.Close()
 
@@ -227,10 +243,13 @@ func TestUnclassifiedPathFailsFastNeverHolds(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Errorf("took %v — an unclassified path held instead of failing fast", elapsed)
+		t.Errorf("took %v — an unclassified path held instead of passing straight through", elapsed)
 	}
-	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("status = %d, want 429", resp.StatusCode)
+	// 200 from the upstream, not the 429 this used to expect: the request
+	// no longer fails fast against an exhausted pool, it simply never
+	// consults the pool.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 from the bypassed upstream", resp.StatusCode)
 	}
 }
 

@@ -430,6 +430,15 @@ func runServer(args []string) error {
 	// function values, not called until a live add actually happens, by
 	// which point SetMITM has already run either way.
 	adminHandler.EnableLiveMITM(handler.MITMCovers, handler.RefreshAllowedHosts)
+	// Issue #176: surface how much traffic spillway passed through without
+	// a pooled credential because it did not recognise the path. The
+	// inverted routing default is only safe if this is visible without
+	// reading the log, so it rides on /api/state and from there into
+	// `spillway status`.
+	adminHandler.SetUnpooled(func() (int, int, []string) {
+		u := handler.UnpooledStats()
+		return u.Requests, u.Paths, u.InferenceShaped
+	})
 	if !loopback {
 		adminHandler.RequireToken()
 		if err := admin.WriteTokenFile(tokenPath, token); err != nil {
@@ -446,6 +455,11 @@ func runServer(args []string) error {
 	// same applier, so what is live cannot depend on which of them asked.
 	applier := newLiveApplier(cfg, p, store, notifier, logLevel, logger)
 	applier.enableLiveMITM(handler.MITMCovers, handler.RefreshAllowedHosts)
+	// Issue #176: proxy.inferencePaths is the user's answer to "a new
+	// inference endpoint appeared and spillway is not pooling it". Making
+	// it live is most of the point — a restart to pool an endpoint is a
+	// restart of every proxied CLI's connection to the daemon.
+	applier.enableInferencePaths(handler.SetInferencePaths)
 	// Live-apply the settings a dashboard write changes, so an edit does not
 	// need a restart (which would drop the SSE stream and re-probe).
 	adminHandler.EnableSettings(cfgPath, func(nc *config.Config) {

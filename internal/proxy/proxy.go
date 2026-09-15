@@ -90,6 +90,17 @@ type Handler struct {
 	// #64): a client stuck retrying a MITM'd host forever must not be able
 	// to flood the log with one line per attempt.
 	mitmFails *mitmFailLogger
+	// unpooled counts traffic passed through because spillway did not
+	// recognise the path, and warns once per inference-shaped path
+	// template. This is what makes issue #176's inverted routing default
+	// safe — see unpooled.go.
+	unpooled *unpooledTracker
+	// inferenceExtra is the config-supplied addition to the pooled set
+	// (proxy.inferencePaths), guarded by inferenceMu because the reload
+	// watcher replaces it while requests are being routed — the same
+	// arrangement as allowedHosts above, and for the same reason.
+	inferenceMu    sync.RWMutex
+	inferenceExtra map[string]bool
 }
 
 // Hooks are optional observability sinks wired by the daemon.
@@ -238,7 +249,13 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, p *pool.Pool) (*Handler
 		holdMax:       cfg.PoolHoldMax(),
 		claims:        newRepresentativeClaimObserver(),
 		mitmFails:     newMitmFailLogger(logger),
+		unpooled:      newUnpooledTracker(logger),
 	}
+	// Issue #176: the pooled set is /v1/messages plus whatever the config
+	// adds, so a user can pool a new inference endpoint the day it appears
+	// rather than waiting for a release. Set here and replaced live by the
+	// reload watcher.
+	h.SetInferencePaths(cfg.Proxy.InferencePaths)
 	h.SetMITM(nil)
 	return h, nil
 }
@@ -502,39 +519,27 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		h.relayUpgrade(w, r)
 		return outcome{account: "(upgrade)", event: reqlog.EventPassthrough}
 	}
-	// Identity-bound paths relay with the client's own credential — no
-	// injection, no pool, no rewrite. This keeps Remote Control and the
-	// CLI's own token refresh working through us (§3 request path step 1).
-	if isIdentityPath(r.URL.Path) {
-		h.passThrough(w, r)
-		return outcome{account: "(passthrough)", event: reqlog.EventPassthrough}
-	}
-	// Confirmed non-inference paths (issue #91): same treatment as an
-	// identity path — forward with the client's own credential, never touch
-	// pool selection or the hold path — but logged with a distinct account
-	// label so "identity login" and "non-quota lookup" bypasses stay tellable
-	// apart in the request log.
-	if isNonQuotaPath(r.URL.Path) {
-		h.passThrough(w, r)
-		return outcome{account: "(non-quota)", event: reqlog.EventPassthrough}
+	// THE ROUTING DEFAULT (issue #176): pool only what is recognised as
+	// inference, pass everything else through on the client's own
+	// credential. This used to be the other way round — pooled by default,
+	// passed through by exception — and the exception list never converged:
+	// ~7,500 measured requests across eleven non-inference path families
+	// each got a pooled account's credential injected for no reason, one of
+	// them a token-validation call answered with a pooled account's token.
+	// See inference.go for the pooled set and unpooled.go for what makes
+	// the inverted default safe.
+	if !h.isPooled(r) {
+		return h.routeUnpooled(w, r)
 	}
 
-	// isInferencePath: only POST /v1/messages is confirmed to need a pooled
-	// account, both for buffered failover (§6.10) and for the hold path
-	// below (issue #91). Anything else that still reaches pool selection —
-	// an unclassified path seen in real traffic but not confirmed either
-	// way, e.g. /mcp-registry/v0/servers or /latest/api/token — gets a
-	// pooled account's credential (so it isn't wrongly sent out
-	// unauthenticated) but is never allowed to hold on exhaustion: the
-	// conservative fallback issue #91 describes, applied to everything
-	// that isn't confirmed to need it, rather than betting the
-	// thundering-herd risk on a guess about which unclassified paths matter.
-	isInferencePath := r.Method == http.MethodPost && r.URL.Path == "/v1/messages"
+	// Everything below is inference. Nothing unclassified reaches it, so
+	// the body buffering (§6.10) and the hold path (§6.11) no longer need
+	// their own guards — the gate above is the guard.
 
-	// Buffer only POST /v1/messages bodies within the cap (§6.10).
+	// Buffer the request body within the cap (§6.10).
 	var body []byte
 	buffered := false
-	if isInferencePath && r.Body != nil {
+	if r.Body != nil {
 		b, overflow, err := readCapped(r.Body, h.bodyCap)
 		if err != nil {
 			r.Body.Close()
@@ -640,25 +645,27 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			acct = h.pool.SelectExcept(session, body, tried)
 			if acct == nil {
 				// §6.11: park until the soonest reset rather than failing,
-				// bounded by holdMax per request — but only for the one path
-				// confirmed to need it (issue #91). Everything else that
-				// reaches this branch falls straight through to the
-				// fail-fast response below.
-				if isInferencePath {
-					if holdDeadline.IsZero() {
-						holdDeadline = time.Now().Add(h.holdMax)
-					}
-					if h.waitForReset(r, body, holdDeadline) {
-						// The hold waited out a reset, so the accounts that
-						// failed before this point may now succeed. `tried`
-						// means "failed in this round" — the wait starts a new
-						// one, and not clearing it leaves the pool permanently
-						// empty after the very first rotation.
-						clear(tried)
-						held = true
-						h.publish(events.Event{Type: reqlog.EventHeld, Detail: "pool exhausted, holding until reset"})
-						continue
-					}
+				// bounded by holdMax per request. Unconditional since issue
+				// #176 inverted the routing default — only inference reaches
+				// here now, so the isInferencePath guard that used to wrap
+				// this (issue #91, keeping unclassified traffic from piling
+				// into a 53-minute queue for quota it never needed) is the
+				// gate at the top of route() instead. The thundering-herd
+				// risk it guarded against is gone by construction, not by
+				// being checked twice.
+				if holdDeadline.IsZero() {
+					holdDeadline = time.Now().Add(h.holdMax)
+				}
+				if h.waitForReset(r, body, holdDeadline) {
+					// The hold waited out a reset, so the accounts that
+					// failed before this point may now succeed. `tried`
+					// means "failed in this round" — the wait starts a new
+					// one, and not clearing it leaves the pool permanently
+					// empty after the very first rotation.
+					clear(tried)
+					held = true
+					h.publish(events.Event{Type: reqlog.EventHeld, Detail: "pool exhausted, holding until reset"})
+					continue
 				}
 				if r.Context().Err() != nil {
 					return finish("(cancelled)") // client gone — nothing to write to

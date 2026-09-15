@@ -75,7 +75,11 @@ type liveApplier struct {
 	// which admin.UpstreamRestartRequired treats as not covered.
 	hostCovered  func(host string) bool
 	refreshHosts func()
-	logger       *slog.Logger
+	// setInferencePaths replaces the config-supplied additions to the
+	// pooled set — (*proxy.Handler).SetInferencePaths (issue #176). nil in
+	// tests that exercise only the pool side.
+	setInferencePaths func([]string)
+	logger            *slog.Logger
 
 	// mu serialises applies: the admin HTTP goroutine and the watcher
 	// goroutine both call apply, and prev is read-modify-written by it.
@@ -104,6 +108,34 @@ func (a *liveApplier) enableLiveMITM(covers func(host string) bool, refresh func
 	a.refreshHosts = refresh
 }
 
+// enableInferencePaths wires the proxy handler's pooled-set extension point
+// (issue #176). Separate from the constructor for the same reason
+// enableLiveMITM is: tests exercising the pool side need no proxy handler.
+func (a *liveApplier) enableInferencePaths(set func([]string)) {
+	a.setInferencePaths = set
+}
+
+// syncInferencePaths applies proxy.inferencePaths to the running handler.
+//
+// Unconditional, like pool.Apply above: the set is replaced wholesale on
+// every apply whether or not the diff spotted a change, so a gap in the
+// diff can only ever cost a log line. The diff below decides what to SAY.
+func (a *liveApplier) syncInferencePaths(prev, nc *config.Config, res *applyResult) {
+	if a.setInferencePaths == nil {
+		return
+	}
+	a.setInferencePaths(nc.Proxy.InferencePaths)
+	if prev == nil || strings.Join(prev.Proxy.InferencePaths, ",") == strings.Join(nc.Proxy.InferencePaths, ",") {
+		return
+	}
+	if len(nc.Proxy.InferencePaths) == 0 {
+		res.applied = append(res.applied, "pooled paths back to POST /v1/messages only")
+		return
+	}
+	res.applied = append(res.applied,
+		"pooled paths now include "+strings.Join(nc.Proxy.InferencePaths, ", "))
+}
+
 // apply makes nc the running configuration, as far as a running process
 // can. source names who asked ("config file", "dashboard") and appears in
 // the log line.
@@ -126,6 +158,7 @@ func (a *liveApplier) apply(nc *config.Config, source string) {
 	a.pool.Apply(poolSettings(nc))
 	a.syncNotify(nc, res)
 	a.syncLogLevel(prev, nc, res)
+	a.syncInferencePaths(prev, nc, res)
 
 	a.warnInlineSecrets(nc, res)
 
