@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.6](https://github.com/coderage-labs/spillway/compare/v0.19.5...v0.19.6) (2026-09-15)
+
+
+### Fixes
+
+* forward plain HTTP to the host the client asked for; bind /api/frame to identity ([#178](https://github.com/coderage-labs/spillway/issues/178)) ([3622961](https://github.com/coderage-labs/spillway/commit/3622961b4b881a8906a8d4eef069bea69914bc8a)), closes [#177](https://github.com/coderage-labs/spillway/issues/177) [#175](https://github.com/coderage-labs/spillway/issues/175)
+
 ## [0.19.5](https://github.com/coderage-labs/spillway/compare/v0.19.4...v0.19.5) (2026-09-14)
 
 
