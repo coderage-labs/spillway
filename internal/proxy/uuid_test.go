@@ -125,6 +125,12 @@ func TestNonMessagesPathNeverRewritten(t *testing.T) {
 	acct.AccountUUID = uuidB
 	p := pool.New([]*pool.Account{acct}, time.Now())
 	cfg := config.Defaults()
+	// The GLOBAL upstream matters here, not only the account's override.
+	// Since issue #176 a non-inference path never reaches buildRequest — and
+	// so never sees the account's upstream — it goes through passThrough,
+	// which always relays to the configured default. Left at
+	// api.anthropic.com this test would talk to the real internet.
+	cfg.Upstream = upstream.URL
 	h, err := NewHandler(&cfg, testLogger(), p)
 	if err != nil {
 		t.Fatal(err)

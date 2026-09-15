@@ -95,6 +95,12 @@ func (rig *mitmRig) proxyClient(t *testing.T) *http.Client {
 // (handshake would fail otherwise), we validate the upstream's real cert
 // (handshake would fail otherwise), and the request flows through the pool
 // path with injection.
+//
+// POST /v1/messages, not the GET /v1/models this used to send: since issue
+// #176 inverted the routing default only a recognised inference request
+// reaches the pooled path, so asserting injection on a path that is no
+// longer pooled would be asserting the wrong thing. What is under test here
+// is the MITM termination; the pooled path is how it is made visible.
 func TestConnectMITMEndToEnd(t *testing.T) {
 	rig := newMITMRig(t, func(w http.ResponseWriter, r *http.Request) {
 		if a := r.Header.Get("Authorization"); a != "Bearer pool-tok" {
@@ -105,7 +111,8 @@ func TestConnectMITMEndToEnd(t *testing.T) {
 	})
 
 	client := rig.proxyClient(t)
-	resp, err := client.Get(rig.upstream.URL + "/v1/models")
+	resp, err := client.Post(rig.upstream.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"claude-opus-5","messages":[]}`))
 	if err != nil {
 		t.Fatalf("request through MITM: %v", err)
 	}

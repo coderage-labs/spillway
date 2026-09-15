@@ -123,11 +123,19 @@ func TestFramePathsReachUpstreamOnClientCredential(t *testing.T) {
 	}
 }
 
-// TestFrameworksStaysPooledEndToEnd is the negative end to end: the
-// near-miss must still go through pool selection, which with the only
-// account exhausted shows up as a 429 and an untouched upstream.
-func TestFrameworksStaysPooledEndToEnd(t *testing.T) {
-	front, seen, _ := identityRig(t)
+// TestFrameworksIsNotIdentityBoundEndToEnd is the negative end to end: the
+// near-miss must not be swept in by the /api/frame entry.
+//
+// Since issue #176 inverted the routing default, "not identity-bound" no
+// longer shows up as a 429 from an exhausted pool — everything spillway
+// does not pool now passes through, so both halves of this near-miss reach
+// the upstream and the question is which CLAIM spillway made about them.
+// The request-log label is where that claim lives, so that is what is
+// asserted: "(passthrough)" means "this is the client's own artifact" and
+// would be the over-match; "(unpooled)" means "spillway has no opinion
+// about this path", which is the correct answer for /api/frameworks.
+func TestFrameworksIsNotIdentityBoundEndToEnd(t *testing.T) {
+	front, _, rl := identityRig(t)
 
 	req, err := http.NewRequest(http.MethodPost, front.URL+"/api/frameworks", strings.NewReader(testBody))
 	if err != nil {
@@ -141,12 +149,11 @@ func TestFrameworksStaysPooledEndToEnd(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("status = %d, want 429 — /api/frameworks must stay pool-routed", resp.StatusCode)
+	e := waitForEntry(t, rl)
+	if e.Account == "(passthrough)" {
+		t.Error("/api/frameworks was classified identity-bound — the /api/frame entry over-matched")
 	}
-	select {
-	case hdr := <-seen:
-		t.Errorf("/api/frameworks reached the upstream (Authorization %q) — the /api/frame entry over-matched", hdr.Get("Authorization"))
-	default:
+	if e.Account != "(unpooled)" {
+		t.Errorf("request log account = %q, want %q", e.Account, "(unpooled)")
 	}
 }

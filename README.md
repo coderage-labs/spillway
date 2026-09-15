@@ -413,13 +413,43 @@ log) and, once the pool went dry, held for up to 53 minutes waiting on
 quota they never needed, turning a two-account exhaustion into a 51-request
 queue all due to fire at once on the next reset. They now relay with the
 client's own credential exactly like an identity-bound path: no injection,
-no pool, no hold. Only `POST /v1/messages` is confirmed to need a pooled
-account at all — every other path (an unclassified one seen in the same
-traffic but not confirmed either way, e.g. `/mcp-registry/v0/servers` or
-`/latest/api/token`) still gets pool selection and a pooled credential, on
-the theory that wrongly bypassing a path that does need one is worse than a
-pointless wait, but can never hold on exhaustion: it fails fast with the
-same 429 a hold would eventually reach, just without the wait.
+no pool, no hold.
+
+**Only recognised inference is pooled (issue #176).** `POST /v1/messages` is
+the pooled set; everything else relays on the client's own credential.
+
+That is an inversion of the original default, and the reason is that the
+original default did not converge. Pooling by default and listing exceptions
+meant every endpoint nobody had thought of yet got a pooled account's
+credential injected into it, and the list only grew when someone noticed a
+symptom. Real traffic showed roughly 7,500 such requests across ten path
+families and up to 8 accounts: EC2 metadata probes from an AWS SDK
+(`/latest/*`, 3,974), telemetry (`/api/claude_code/metrics`, 3,057),
+artifacts (`/api/frame/*`, 79), session creation (`/v1/sessions`, 66), and —
+most pointedly — `/api/oauth/validate`, a token-validation call answered
+with a pooled account's token. Two of those were fixed one path at a time
+(issues #166 and #175) before it was clear that the default itself was the
+bug.
+
+The cost of inverting is real and is the whole reason the old default
+existed: **a new inference endpoint would silently not be pooled.** If
+Anthropic ships `/v1/responses`, an inverted spillway forwards it on the
+client's own credential — no rotation, no quota tracking, no holds — and the
+product quietly stops doing its job until a release catches up. That is
+strictly worse than the bug being fixed, because it is invisible. So three
+things ship with the inversion rather than after it:
+
+- **A warning, once per endpoint shape**, the first time an unrecognised path
+  takes a POST with a body — the shape of an inference request. The
+  bookkeeping key is the redacted path template, not the raw path, which
+  matters twice: without it "once per path" would be "once per request" for
+  any `/collection/<id>` endpoint, and a session or artifact id is exactly
+  the sort of value §5 keeps out of a log.
+- **A count on `/api/state` and in `spillway status`**, because silence is
+  what let both of the earlier bugs run for weeks.
+- **`proxy.inferencePaths` in the config**, so a user who sees the warning
+  can pool the new endpoint the same day — applied live by the config
+  watcher, no restart, no waiting for a release.
 
 **If the CA is regenerated, restart every proxied CLI.** Because
 `NODE_EXTRA_CA_CERTS` is read once at process start, a client launched before
@@ -550,6 +580,7 @@ proxy:
   port: 7654
   host: 127.0.0.1
   allowRemote: false        # required to bind anywhere but loopback — see below
+  inferencePaths: []        # extra POST paths to pool, beside /v1/messages — see above
 upstream: https://api.anthropic.com
 egress:
   mode: direct              # direct | http-connect | environment

@@ -59,6 +59,12 @@ type Server struct {
 	// Not a constructor parameter, for the same reason EnableSettings isn't:
 	// tests exercising the read-only API do not need MITM wired up at all.
 	caWarning func() bool
+	// unpooled, when set, reports issue #176's unrecognised-path counter
+	// for /api/state — typically an adapter over
+	// (*proxy.Handler).UnpooledStats. nil in tests and in any build that
+	// never wires a proxy handler up, which reports no unpooled section at
+	// all rather than a misleading zero.
+	unpooled func() unpooledJSON
 	// hostCovered and refreshHosts wire issue #87's live account-add to the
 	// proxy handler's MITM host-set bookkeeping — see EnableLiveMITM. Both
 	// nil in tests that only exercise the pool side of account-add (no MITM
@@ -99,6 +105,23 @@ func (s *Server) EnableSettings(configPath string, apply func(*config.Config)) {
 // changes.
 func (s *Server) SetCAWarning(f func() bool) {
 	s.caWarning = f
+}
+
+// SetUnpooled wires the source for issue #176's unrecognised-path counter
+// into /api/state. requests/paths/inferenceShaped are the three figures the
+// proxy handler tracks; taking them as a plain closure over ints and
+// strings keeps admin from importing internal/proxy, the same arrangement
+// SetCAWarning uses. Read fresh on every /api/state request — never cached
+// — so the count a reader sees is the one the daemon holds right now.
+func (s *Server) SetUnpooled(f func() (requests, paths int, inferenceShaped []string)) {
+	if f == nil {
+		s.unpooled = nil
+		return
+	}
+	s.unpooled = func() unpooledJSON {
+		req, paths, shaped := f()
+		return unpooledJSON{Requests: req, Paths: paths, InferenceShaped: shaped}
+	}
 }
 
 // New builds the admin handler. An empty token means the listener is

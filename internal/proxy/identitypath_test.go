@@ -182,16 +182,35 @@ func TestIdentityCollectionReachesUpstreamOnClientCredential(t *testing.T) {
 	}
 }
 
-// TestNonIdentityPathsStayPooledEndToEnd is the negative, also end to end:
-// /v1/messages and the near-miss /v1/sessionsfoo must still go through pool
-// selection. With the only account exhausted in fail mode that shows up as a
-// 429 and an untouched upstream — the opposite of the test above.
-func TestNonIdentityPathsStayPooledEndToEnd(t *testing.T) {
-	for _, path := range []string{"/v1/messages", "/v1/sessionsfoo"} {
-		t.Run(path, func(t *testing.T) {
-			front, seen, _ := identityRig(t)
+// TestNonIdentityPathsEndToEnd is the negative, also end to end: neither
+// POST /v1/messages nor the near-miss /v1/sessionsfoo may be classified
+// identity-bound.
+//
+// Issue #176 split what this test used to assert in one go. Before the
+// inversion "not identity-bound" and "pool-routed" were the same thing, so
+// a 429 from an exhausted pool proved both. They are now different
+// questions with different answers for these two paths: /v1/messages is
+// still pooled and still 429s, while /v1/sessionsfoo is not pooled and
+// passes through under its own label. Both are checked, because the
+// original point — the identity rule must not widen one character further
+// (issue #166) — applies to both and is the reason /v1/sessionsfoo is here.
+func TestNonIdentityPathsEndToEnd(t *testing.T) {
+	for _, tc := range []struct {
+		path       string
+		wantStatus int
+		wantLabel  string
+	}{
+		// Inference: still pooled, so an exhausted pool still 429s it.
+		{"/v1/messages", http.StatusTooManyRequests, "(none available)"},
+		// A near-miss on /v1/sessions: not identity-bound, and since the
+		// inversion not pooled either — passed through, labelled as the
+		// path spillway has no opinion about.
+		{"/v1/sessionsfoo", http.StatusOK, "(unpooled)"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			front, _, rl := identityRig(t)
 
-			req, err := http.NewRequest(http.MethodPost, front.URL+path, strings.NewReader(testBody))
+			req, err := http.NewRequest(http.MethodPost, front.URL+tc.path, strings.NewReader(testBody))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -203,13 +222,15 @@ func TestNonIdentityPathsStayPooledEndToEnd(t *testing.T) {
 			}
 			resp.Body.Close()
 
-			if resp.StatusCode != http.StatusTooManyRequests {
-				t.Errorf("status = %d, want 429 — %q must go through pool selection, not pass through on the client's credential", resp.StatusCode, path)
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
 			}
-			select {
-			case hdr := <-seen:
-				t.Errorf("%q reached the upstream (Authorization %q) — it was passed through instead of pool-routed", path, hdr.Get("Authorization"))
-			default:
+			e := waitForEntry(t, rl)
+			if e.Account == "(passthrough)" {
+				t.Errorf("%q was classified identity-bound — the identity rule over-matched", tc.path)
+			}
+			if e.Account != tc.wantLabel {
+				t.Errorf("request log account = %q, want %q", e.Account, tc.wantLabel)
 			}
 		})
 	}
