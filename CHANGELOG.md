@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.7](https://github.com/coderage-labs/spillway/compare/v0.19.6...v0.19.7) (2026-09-15)
+
+
+### Fixes
+
+* added more chart colours ([a6f338d](https://github.com/coderage-labs/spillway/commit/a6f338db585b4055b33dd4597aeac78acf131b1b))
+
 ## [0.19.6](https://github.com/coderage-labs/spillway/compare/v0.19.5...v0.19.6) (2026-09-15)
 
 
