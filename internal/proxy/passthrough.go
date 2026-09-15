@@ -24,6 +24,15 @@ var identityTrees = []string{
 	"/api/oauth/files",
 	"/v1/environments",
 	"/v1/sessions",
+	// /api/frame is the artifact endpoint (issue #175): publish
+	// (/api/frame/deploy/*), read-back (/api/frame/read/<id>) and fetch
+	// (/api/frame/<id>). An artifact belongs to the account that published
+	// it, so pool-routing it scattered 79 artifacts across 5 accounts —
+	// none of them the account the user works from, so none of them visible
+	// to the user. The WebSocket form was already identity-bound by
+	// accident, via route()'s isUpgrade branch; the plain HTTP calls were
+	// not.
+	"/api/frame",
 }
 
 // underPath reports whether path is the base itself or something beneath it
@@ -94,6 +103,18 @@ func isIdentityPath(path string) bool {
 // allowed to hold on exhaustion, so an unclassified path here still fails
 // fast instead of queueing, without having to guess whether it needs an
 // account's credential to be forwarded correctly.
+//
+// Issue #175 asked whether /api/frame belongs here as well as in
+// identityTrees. It does not, and adding it would be dead code that reads
+// as policy. route() checks isIdentityPath FIRST and both branches call the
+// same passThrough — so an identity path ALREADY never reaches pool
+// selection or the hold path, which is the entire behaviour non-quota
+// status buys. A second entry could therefore never fire, and the only
+// thing it could change is the request log's account label, which would
+// then say "(non-quota)" for something better described as the client's own
+// artifact. The two lists answer different questions — "whose login is
+// this?" and "does this need a pooled account at all?" — and an artifact
+// publish has an unambiguous answer to the first.
 //
 // Audited for issue #166's off-by-one-slash: this list is exact-match only
 // and deliberately stays that way. These are three specific leaf endpoints,

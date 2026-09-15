@@ -296,6 +296,27 @@ terminated with a leaf minted for that exact host, and fed into the same pool
 pipeline; every other host is a blind TCP relay, so only configured vendor
 hosts are ever decrypted. Upstream TLS is always fully verified.
 
+**Plain HTTP obeys the same rule (issue #177).** A request the client
+addresses to a host spillway does not own — an absolute URI in the request
+line, which is what any client sends to an `HTTP_PROXY` — is forwarded to
+that host untouched: no pool selection, no credential injection, no
+rewriting. Until #177 it was not: *every* non-CONNECT request had its scheme
+and host overwritten with the configured upstream, on both the pooled and
+the passthrough path, so anything plain-HTTP on the machine was delivered to
+`api.anthropic.com` instead of where it was going. Found in the wild as AWS
+SDKs probing the instance metadata service (`http://169.254.169.254/latest/
+api/token`) — 3,991 of them answered 404 by Anthropic, with a pooled
+account's credential attached.
+
+Forwarding, rather than refusing, is deliberate. `HTTP_PROXY` and
+`HTTPS_PROXY` are exported as a pair and inherited by every subprocess, so
+refusing plain HTTP would leave a machine where `https://anything` works
+(CONNECT already blind-tunnels it) and `http://anything` does not — a new
+policy contradicting the one above, and a breakage for tooling that has
+nothing to do with spillway. These requests appear in the request log under
+the account `(forward)`, so traffic spillway carried but did not serve stays
+tellable apart from traffic it routed.
+
 **There is no CA private key at rest, anywhere — not in the OS keychain, not
 on disk (issue #69).** Earlier designs kept the key around so leaves could be
 minted on demand as new hosts appeared: first only in the keychain, then
@@ -349,20 +370,32 @@ just one release later. That old keychain entry is left in place, never read
 again.
 
 Identity-bound paths — `/v1/oauth/token`, `/api/oauth/file_upload`, the whole
-of `/v1/code`, `/v1/environments`, `/v1/sessions` and `/api/oauth/files`
-(**the collection endpoint itself as well as everything under it**), and
-WebSocket upgrades (`/v1/session_ingress/ws*`) — relay with the client's own
-credential verbatim: no injection, no pool, no rewrite. That is what keeps
-Remote Control and the CLI's own token refresh working through the proxy.
+of `/v1/code`, `/v1/environments`, `/v1/sessions`, `/api/oauth/files` and
+`/api/frame` (**the collection endpoint itself as well as everything under
+it**), and WebSocket upgrades (`/v1/session_ingress/ws*`) — relay with the
+client's own credential verbatim: no injection, no pool, no rewrite. That is
+what keeps Remote Control and the CLI's own token refresh working through the
+proxy.
 
-Those four are matched as trees, base-or-base-slash, rather than as `X/`
+`/api/frame` is the artifact endpoint — publish (`/api/frame/deploy/*`),
+read-back (`/api/frame/read/<id>`) and fetch (`/api/frame/<id>`) — and was
+missing from that list until issue #175. An artifact belongs to the account
+that published it, so pool-routing it scattered 79 artifacts across 5
+accounts, none of them the account the user works from, and therefore none
+of them visible to the user who made them. It is classified identity-bound
+and deliberately **not** also non-quota: identity-bound paths already bypass
+pool selection and the hold path entirely, so a second entry could never
+fire and would only mislabel the user's own artifacts in the request log.
+
+Those five are matched as trees, base-or-base-slash, rather than as `X/`
 prefixes (issue #166). Written as prefixes they silently excluded the
 collection endpoint, which is where the item is created: live traffic showed
 the exact path `/v1/sessions` served by 8 different pooled accounts while
 every `/v1/sessions/<id>` call on those same sessions went out as a
 passthrough, so the two halves of one session disagreed about whose it was.
-The match stops at a segment boundary, so `/v1/sessionsfoo` is not identity
-bound — and inference paths (`POST /v1/messages`) never are.
+The match stops at a segment boundary, so `/v1/sessionsfoo` and
+`/api/frameworks` are not identity bound — and inference paths
+(`POST /v1/messages`) never are.
 
 **Confirmed non-quota paths get the same treatment (issue #91).**
 `/api/event_logging/v2/batch`, `/api/claude_code/settings`, and

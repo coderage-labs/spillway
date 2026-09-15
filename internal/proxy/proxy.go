@@ -484,6 +484,18 @@ func clientGone(r *http.Request, err error) bool {
 // exactly one upstream response (or a synthesized error) to w. Returns the
 // outcome for logging.
 func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
+	// Hosts spillway does not own are forwarded to the host the CLIENT
+	// named, untouched (issue #177). This gate comes FIRST, in front of
+	// every branch below, because all three of them — relayUpgrade,
+	// passThrough via rawRequest, and the pooled path via buildRequest —
+	// rewrite scheme and host to the configured upstream unconditionally.
+	// Guarding only the pooled builder would leave identity-bound and
+	// unclassified traffic still redirected to Anthropic; see forward.go
+	// for why forwarding beats refusing.
+	if h.foreignHost(r) != "" {
+		h.forwardDirect(w, r)
+		return outcome{account: "(forward)", event: reqlog.EventPassthrough}
+	}
 	// Upgrade requests (Remote Control's realtime channel) relay raw — the
 	// pool path can't speak WebSocket.
 	if isUpgrade(r) {
