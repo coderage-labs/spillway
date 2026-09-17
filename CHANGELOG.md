@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/coderage-labs/spillway/compare/v0.20.0...v0.21.0) (2026-09-17)
+
+
+### Features
+
+* **statusline:** restore the session context the line lost ([#184](https://github.com/coderage-labs/spillway/issues/184)) ([5e8b013](https://github.com/coderage-labs/spillway/commit/5e8b013024655205dfcf60945afc23b92732c22a))
+
 ## [0.20.0](https://github.com/coderage-labs/spillway/compare/v0.19.7...v0.20.0) (2026-09-15)
 
 
