@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/coderage-labs/spillway/compare/v0.21.0...v0.21.1) (2026-09-17)
+
+
+### Fixes
+
+* subscribe to the capacity signal before selecting, not after parking ([#188](https://github.com/coderage-labs/spillway/issues/188)) ([35b4104](https://github.com/coderage-labs/spillway/commit/35b41042ac796b7ed1398b74835c0dc72eca2fad)), closes [#187](https://github.com/coderage-labs/spillway/issues/187)
+
 ## [0.21.0](https://github.com/coderage-labs/spillway/compare/v0.20.0...v0.21.0) (2026-09-17)
 
 
