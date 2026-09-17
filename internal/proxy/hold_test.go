@@ -48,6 +48,41 @@ func quota429WithReset(reset time.Time) http.HandlerFunc {
 	}
 }
 
+// holdPostBudget is the backstop every hold test's HTTP request carries. It
+// is far longer than any hold these tests set up and far shorter than the
+// package's own timeout: a bound that turns a stuck request into a named
+// failure, never a number an assertion is written against (#98, #134).
+const holdPostBudget = 30 * time.Second
+
+// holdPost sends a hold test's request, bounded twice.
+//
+// This is the difference between the two failure reports issue #187 was
+// filed from and the ones they should have been. A request the pool never
+// releases either blocks the test goroutine outright, or — when it is on
+// its own goroutine — is still in flight when the test reports its own
+// named failure, at which point httptest.Server.Close blocks on it in
+// cleanup and that failure is never printed at all. Both end as a ten
+// minute package timeout that names the test and nothing else.
+//
+// The client Timeout bounds a request the test goroutine is waiting on;
+// binding to t.Context() — cancelled just before cleanup functions run —
+// bounds one it is not, so Server.Close can always finish and whatever the
+// test already decided actually reaches the log.
+func holdPost(t *testing.T, front *httptest.Server, body string) (*http.Response, error) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		front.URL+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// A client of our own rather than front.Client(): that one is shared by
+	// every caller, and these tests fire twenty requests at once, so setting
+	// a field on it is a data race. The Transport is safe to share.
+	client := &http.Client{Transport: front.Client().Transport, Timeout: holdPostBudget}
+	return client.Do(req)
+}
+
 // quota429RetryAfter signals quota rejection with a precise retry-after (the
 // reset header truncates to wall seconds — too coarse for short test holds).
 func quota429RetryAfter(sec int) http.HandlerFunc {
@@ -74,7 +109,7 @@ func TestHoldThenSuccess(t *testing.T) {
 	})
 
 	start := time.Now()
-	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+	resp, err := holdPost(t, front, testBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +137,7 @@ func TestHoldCapFallsThrough(t *testing.T) {
 	_ = p
 
 	start := time.Now()
-	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+	resp, err := holdPost(t, front, testBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +165,7 @@ func TestHoldUnknownResetHoldsToBudget(t *testing.T) {
 	p.Accounts()[0].Disable()
 
 	start := time.Now()
-	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+	resp, err := holdPost(t, front, testBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +203,7 @@ func TestFailFastNeverLogsHeld(t *testing.T) {
 	front := httptest.NewServer(h)
 	t.Cleanup(front.Close)
 
-	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+	resp, err := holdPost(t, front, testBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +239,7 @@ func TestFailModeReturns429Immediately(t *testing.T) {
 		quota429WithReset(time.Now().Add(5*time.Second))(w, r)
 	})
 	start := time.Now()
-	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+	resp, err := holdPost(t, front, testBody)
 	if err != nil {
 		t.Fatal(err)
 	}

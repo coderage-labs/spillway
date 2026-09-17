@@ -36,20 +36,27 @@ func TestRequestAndAccountEndpointsOverARealLog(t *testing.T) {
 	// spread over 20 days so a 14-day prune has something to remove.
 	const rows = 30000
 	span := 20 * 24 * time.Hour
+	fixture := make([]reqlog.Entry, 0, rows)
 	for i := 0; i < rows; i++ {
 		account := "work"
 		if i%2 == 0 {
 			account = "labs"
 		}
-		if err := rl.Record(reqlog.Entry{
+		fixture = append(fixture, reqlog.Entry{
 			Ts:      now.Add(-span + time.Duration(i)*(span/rows)),
 			Account: account, Path: "/v1/messages", Status: 200,
 			Event: reqlog.EventServed, DurationMs: 100, Bytes: 2048,
 			InputTokens: 1, OutputTokens: 2,
 			CacheCreationInputTokens: 3, CacheReadInputTokens: 7,
-		}); err != nil {
-			t.Fatal(err)
-		}
+		})
+	}
+	// One transaction, not 30,000 (issue #187): calling Record per row makes
+	// the fixture 30,000 commits, each with its own fsync, which on the
+	// Windows runner consumed the whole ten-minute package budget before
+	// this test reached an assertion. SeedForTest writes the identical rows
+	// and keeps the running total identical to what Record would have left.
+	if err := rl.SeedForTest(fixture); err != nil {
+		t.Fatal(err)
 	}
 
 	work := pool.NewAccount("work", pool.SourceYAML, "tok", "", 0, "")

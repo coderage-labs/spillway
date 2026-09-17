@@ -93,7 +93,7 @@ func TestHoldWakesOnWindowRejectionDeadlineNotHoldMax(t *testing.T) {
 
 	deadline := time.Now().Add(6 * time.Second)
 	start := time.Now()
-	got := h.waitForReset(req, body, deadline)
+	got := h.waitForReset(req, body, deadline, p.CapacitySignal())
 	elapsed := time.Since(start)
 
 	if !got {
@@ -127,7 +127,7 @@ func TestHoldMixedPoolWakesOnSoonestWindowRejection(t *testing.T) {
 	}
 
 	start := time.Now()
-	got := h.waitForReset(req, body, time.Now().Add(10*time.Second))
+	got := h.waitForReset(req, body, time.Now().Add(10*time.Second), p.CapacitySignal())
 	elapsed := time.Since(start)
 
 	if !got {
@@ -158,7 +158,7 @@ func TestHoldMixedPoolWakesOnSoonestExhaustion(t *testing.T) {
 	}
 
 	start := time.Now()
-	got := h.waitForReset(req, body, time.Now().Add(10*time.Second))
+	got := h.waitForReset(req, body, time.Now().Add(10*time.Second), p.CapacitySignal())
 	elapsed := time.Since(start)
 
 	if !got {
@@ -188,7 +188,8 @@ func TestHoldMaxStillCapsAWindowRejection(t *testing.T) {
 	// package's own test timeout rather than reporting a failure.
 	done := make(chan bool, 1)
 	start := time.Now()
-	go func() { done <- h.waitForReset(req, body, time.Now().Add(100*time.Millisecond)) }()
+	wake := p.CapacitySignal()
+	go func() { done <- h.waitForReset(req, body, time.Now().Add(100*time.Millisecond), wake) }()
 
 	select {
 	case got := <-done:
@@ -229,7 +230,7 @@ func TestHoldIgnoresExpiredWindowRejectionRatherThanSpinning(t *testing.T) {
 	}
 
 	start := time.Now()
-	got := h.waitForReset(req, body, time.Now().Add(10*time.Second))
+	got := h.waitForReset(req, body, time.Now().Add(10*time.Second), p.CapacitySignal())
 	elapsed := time.Since(start)
 
 	if !got {
@@ -289,7 +290,8 @@ func TestWindowRejectionHoldCancelledByClient(t *testing.T) {
 	body := []byte(fableReqBody)
 
 	done := make(chan bool, 1)
-	go func() { done <- h.waitForReset(req, body, time.Now().Add(2*time.Hour)) }()
+	wake := p.CapacitySignal()
+	go func() { done <- h.waitForReset(req, body, time.Now().Add(2*time.Hour), wake) }()
 
 	// Synchronise on the hold registry rather than a sleep: the request is
 	// parked exactly when it appears there.
@@ -332,7 +334,7 @@ func TestWindowRejectionHoldReportsTheRejectionDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
-	go h.waitForReset(req, []byte(fableReqBody), time.Now().Add(2*time.Hour))
+	go h.waitForReset(req, []byte(fableReqBody), time.Now().Add(2*time.Hour), p.CapacitySignal())
 
 	var reported time.Time
 	deadline := time.Now().Add(3 * time.Second)
