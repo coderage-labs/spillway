@@ -270,31 +270,72 @@ func TestGitBranchFailsQuiet(t *testing.T) {
 	if got := gitBranch(ctx, t.TempDir()); got != "" {
 		t.Errorf("gitBranch outside a repository = %q, want empty", got)
 	}
-	// An already-expired deadline must not even start the process.
+	// An already-expired deadline must not even start the process — asserted
+	// against a repository that genuinely HAS a branch to find, or the
+	// deadline would not be what made the answer empty.
+	repo := newGitRepo(t, "deadline-test-branch")
+	if got := gitBranch(ctx, repo); got != "deadline-test-branch" {
+		t.Fatalf("gitBranch(%q) = %q — the fixture has no branch, so the deadline "+
+			"case below would pass for the wrong reason", repo, got)
+	}
 	dead, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	if got := gitBranch(dead, "."); got != "" {
+	if got := gitBranch(dead, repo); got != "" {
 		t.Errorf("gitBranch past its deadline = %q, want empty", got)
 	}
 }
 
-// And the success path, against the repository the tests are running in.
+// And the success path, against a repository built for it.
+//
+// NOT against the repository the tests run from: actions/checkout leaves a
+// PR build on a detached HEAD, so that version of this test asserted "some
+// branch exists" and failed in CI while passing on every developer machine.
+// The branch name is chosen here, so the assertion is on the value rather
+// than on its mere presence.
 func TestGitBranchNamesTheBranch(t *testing.T) {
+	dir := newGitRepo(t, "spillway-test-branch")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if got := gitBranch(ctx, dir); got != "spillway-test-branch" {
+		t.Errorf("gitBranch(%q) = %q, want spillway-test-branch", dir, got)
+	}
+
+	// A detached HEAD has no branch to name — which is exactly what a PR
+	// build looks like, and it must render nothing rather than "HEAD".
+	git(t, dir, "checkout", "--detach")
+	if got := gitBranch(ctx, dir); got != "" {
+		t.Errorf("gitBranch on a detached HEAD = %q, want empty", got)
+	}
+}
+
+// newGitRepo makes a throwaway repository on branch name, with one commit so
+// HEAD resolves, and with the ambient git configuration shut out.
+func newGitRepo(t *testing.T, name string) string {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git is not installed, so the shellout cannot be exercised: %v", err)
 	}
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	got := gitBranch(ctx, wd)
-	if got == "" {
-		t.Fatalf("gitBranch(%q) found no branch in the repository the tests run from", wd)
-	}
-	if strings.ContainsAny(got, "\n\r\x1b") || got != strings.TrimSpace(got) {
-		t.Errorf("branch %q is not fit to put on a single-line prompt", got)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q")
+	git(t, dir, "commit", "-q", "--allow-empty", "-m", "root")
+	git(t, dir, "branch", "-M", name)
+	return dir
+}
+
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		// A developer's global hooks, templates or commit signing must not
+		// decide whether this test passes.
+		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_SYSTEM="+filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_AUTHOR_NAME=spillway", "GIT_AUTHOR_EMAIL=spillway@example.invalid",
+		"GIT_COMMITTER_NAME=spillway", "GIT_COMMITTER_EMAIL=spillway@example.invalid",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
 
