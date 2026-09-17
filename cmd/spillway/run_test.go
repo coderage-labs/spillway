@@ -54,6 +54,19 @@ func TestRunEnvSetsCABundleVarsWhenBundlePresent(t *testing.T) {
 // bundle missing the system roots, which would break verification of every
 // ordinary site for anything reading those variables.
 func TestRunEnvOmitsCABundleVarsWhenBundleAbsent(t *testing.T) {
+	// runEnv builds on os.Environ(), so an ambient SSL_CERT_FILE — which
+	// spillway itself exports into any CLI it launches — lands in the result
+	// and is indistinguishable from one runEnv added. Without this the test
+	// asserts the developer's shell rather than the function: it passes in
+	// CI, fails inside a `spillway run` session, and names neither reason.
+	for _, k := range []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"} {
+		if old, ok := os.LookupEnv(k); ok {
+			if err := os.Unsetenv(k); err != nil {
+				t.Fatalf("unset %s: %v", k, err)
+			}
+			t.Cleanup(func() { _ = os.Setenv(k, old) })
+		}
+	}
 	cfg := config.Defaults()
 	env := runEnv(&cfg, "/tmp/ca.pem", "")
 	joined := strings.Join(env, "\n")
