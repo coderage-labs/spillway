@@ -642,6 +642,17 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 		// buildRequest failure on the next account).
 		modelServed = modelAsked
 		if acct == nil {
+			// Subscribe to the pool's capacity-changed generation BEFORE
+			// asking it for an account (issue #187). Everything this
+			// request might end up waiting for — an account added,
+			// un-parked, re-probed, re-authenticated — is a change to the
+			// same state SelectExcept is about to read, so a generation
+			// taken after that read (which is where park used to take it)
+			// can be one the broadcast has already passed by, leaving the
+			// request asleep on a channel nothing will ever close. Taken
+			// here, a signal racing the selection simply finds this
+			// request already subscribed.
+			wake := h.pool.CapacitySignal()
 			acct = h.pool.SelectExcept(session, body, tried)
 			if acct == nil {
 				// §6.11: park until the soonest reset rather than failing,
@@ -656,7 +667,7 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 				if holdDeadline.IsZero() {
 					holdDeadline = time.Now().Add(h.holdMax)
 				}
-				if h.waitForReset(r, body, holdDeadline) {
+				if h.waitForReset(r, body, holdDeadline, wake) {
 					// The hold waited out a reset, so the accounts that
 					// failed before this point may now succeed. `tried`
 					// means "failed in this round" — the wait starts a new

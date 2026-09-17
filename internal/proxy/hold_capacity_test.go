@@ -4,12 +4,12 @@ package proxy
 // pool's capacity-changed signal, not only on its own timer.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -41,7 +41,7 @@ func TestHoldServedByAccountAddedWhileWaiting(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+		resp, err := holdPost(t, front, testBody)
 		if err != nil {
 			done <- result{err: err}
 			return
@@ -100,7 +100,7 @@ func TestHoldServedByEarlyReprobeRecovery(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(testBody))
+		resp, err := holdPost(t, front, testBody)
 		if err != nil {
 			done <- result{err: err}
 			return
@@ -183,11 +183,14 @@ func TestHoldWakeResumesAgainstOriginalDeadline(t *testing.T) {
 	start := time.Now()
 	var got *pool.Account
 	for time.Now().Before(deadline.Add(2 * time.Second)) { // generous outer safety bound only
+		// Subscribed before the selection it is about to wait on the
+		// failure of, exactly as route() does (issue #187).
+		wake := p.CapacitySignal()
 		got = p.SelectExcept("sess", nil, tried)
 		if got != nil {
 			break
 		}
-		if !h.waitForReset(req, nil, deadline) {
+		if !h.waitForReset(req, nil, deadline, wake) {
 			break // expected: the 2s-out reset now exceeds `deadline`
 		}
 		clear(tried)
@@ -240,7 +243,7 @@ func TestHeldRequestsDoNotThunderOnSingleNewAccount(t *testing.T) {
 		go func(i int) {
 			body := fmt.Sprintf(`{"model":"claude-sonnet-4-6","max_tokens":16,`+
 				`"metadata":{"user_id":"session-%d"},"messages":[]}`, i)
-			resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(body))
+			resp, err := holdPost(t, front, body)
 			if err != nil {
 				results <- result{err: err}
 				return
@@ -292,6 +295,65 @@ func TestHeldRequestsDoNotThunderOnSingleNewAccount(t *testing.T) {
 	// reintroduce a meaningful wait of its own.
 	if completed[len(completed)-1] > 3*time.Second {
 		t.Errorf("slowest completion took %v — anti-thunder stagger grew too large", completed[len(completed)-1])
+	}
+}
+
+// TestHoldWakesOnCapacitySignalledBeforeItParked is issue #187's hang,
+// reproduced without a race.
+//
+// The capacity change is made to land in the exact gap the bug lived in:
+// after the selection that failed, before the request is waiting on
+// anything. In production that gap is a handful of instructions wide and
+// CI hit it once in twenty parked requests; here it is simply where the
+// Add is written, so the test is deterministic and needs no sleep, no
+// loaded machine and no repetition.
+//
+// The fix is that route() subscribes to the capacity generation BEFORE it
+// selects and hands that generation down, so a signal in the gap closes a
+// channel this request is already holding. Restore the old behaviour —
+// park taking h.pool.CapacitySignal() itself — and the generation it gets
+// is the fresh one Add installed, which nothing will ever close: the
+// request sleeps out the hour-long reset with a usable account idle, and
+// the bounded wait below reports that by name.
+func TestHoldWakesOnCapacitySignalledBeforeItParked(t *testing.T) {
+	h, p := windowHoldRig(t, 1, "2h") // budget covers the reset, so it really parks
+	acct := p.Accounts()[0]
+	p.MarkExhausted(acct, time.Now().Add(time.Hour))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // so a request left parked by a regression cannot outlive the test
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	body := []byte(testBody)
+
+	// Exactly route()'s order: subscribe, then select.
+	wake := p.CapacitySignal()
+	if got := p.SelectExcept("s", body, nil); got != nil {
+		t.Fatalf("SelectExcept = %q, want nil — the request must actually have nothing to run on", got.Name)
+	}
+
+	// The gap. Capacity appears after selection failed and before the park.
+	healthy := pool.NewAccount("b", pool.SourceYAML, "tok2", "", 0, "")
+	healthy.Type = "claude-oauth"
+	if !p.Add(healthy) {
+		t.Fatal("Add reported the account was not actually added")
+	}
+
+	done := make(chan bool, 1)
+	go func() { done <- h.waitForReset(req, body, time.Now().Add(2*time.Hour), wake) }()
+
+	select {
+	case got := <-done:
+		if !got {
+			t.Error("waitForReset = false, want true — capacity arrived, so the caller must be sent back to re-select")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForReset never returned: the capacity change that landed between selection and park " +
+			"was signalled to a generation this request never held, so it is parked on the hour-out " +
+			"reset with a usable account sitting idle (#187)")
+	}
+
+	if got := p.SelectExcept("s", body, nil); got == nil {
+		t.Error("selection still fails after the wake — the premise broke, not the hold")
 	}
 }
 

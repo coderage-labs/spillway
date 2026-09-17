@@ -302,24 +302,39 @@ func Open(path string) (*Log, error) {
 // Close closes the database.
 func (l *Log) Close() error { return l.db.Close() }
 
-// Record writes one request row. Inputs are metadata only — the schema has
-// no header/body columns by design (§5 redaction), and the four usage
-// counters are the only body-derived values it accepts at all (§110).
-func (l *Log) Record(e Entry) error {
-	if e.Ts.IsZero() {
-		e.Ts = time.Now()
-	}
-	_, err := l.db.Exec(`INSERT INTO requests
+// recordInsert is the INSERT both write paths use — Record a row at a time,
+// SeedForTest a fixture at a time. One copy, because a column list that
+// exists twice is a column list that will eventually disagree with itself.
+const recordInsert = `INSERT INTO requests
 		(ts, account, path, status, duration_ms, bytes, event, model_asked, model_served, user_agent,
 		 session_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
 		 tool_count, tools_order_hash, tools_sorted_hash, tools_raw_hash, system_hash,
 		 first_msg_shape_hash, first_msg_blocks, prefix_bytes)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+// recordArgs is recordInsert's bind list, in its column order.
+func recordArgs(e Entry) []any {
+	return []any{
 		e.Ts.UnixMilli(), e.Account, e.Path, e.Status, e.DurationMs, e.Bytes, e.Event,
 		e.ModelAsked, e.ModelServed, e.UserAgent,
 		e.SessionHash, e.InputTokens, e.OutputTokens, e.CacheCreationInputTokens, e.CacheReadInputTokens,
 		e.ToolCount, e.ToolsOrderHash, e.ToolsSortedHash, e.ToolsRawHash, e.SystemHash,
-		e.FirstMsgShapeHash, e.FirstMsgBlocks, e.PrefixBytes)
+		e.FirstMsgShapeHash, e.FirstMsgBlocks, e.PrefixBytes,
+	}
+}
+
+// Record writes one request row. Inputs are metadata only — the schema has
+// no header/body columns by design (§5 redaction), and the four usage
+// counters are the only body-derived values it accepts at all (§110).
+//
+// One row, one implicit transaction, one commit — which is what a request
+// log wants when rows arrive one request at a time, and is emphatically not
+// how to write a test fixture of thousands. See SeedForTest.
+func (l *Log) Record(e Entry) error {
+	if e.Ts.IsZero() {
+		e.Ts = time.Now()
+	}
+	_, err := l.db.Exec(recordInsert, recordArgs(e)...)
 	if err != nil {
 		return err
 	}
@@ -328,6 +343,60 @@ func (l *Log) Record(e Entry) error {
 	// has succeeded, never before — a total no row backs is worse than a
 	// slow one.
 	l.addTotals(e)
+	return nil
+}
+
+// SeedForTest writes entries as ONE transaction, for tests in other packages
+// that need a fixture of thousands of rows.
+//
+// Issue #187: internal/admin's end-to-end test built its 30,000-row fixture
+// by calling Record 30,000 times. Each of those is its own transaction and
+// so its own WAL fsync, which on macOS is cheap enough to hide the problem
+// (2.7s) and on the Windows runner is not: that test spent the package's
+// entire ten-minute budget inside FlushFileBuffers and was killed before it
+// reached a single assertion, reported only as a timeout naming the test.
+// Record is right for what it does — a request log that loses rows on a
+// crash is worse than a slow one — so the fixture is what changes.
+//
+// reqlog's own large fixtures have always been written this way (see
+// seedRequests in index_test.go, and the comment there that predicted
+// exactly this). This is that shape, exported.
+//
+// The running lifetime total (issue #165) is folded in the same way Record
+// folds it, and only after the commit: a total no row backs is worse than a
+// slow one.
+func (l *Log) SeedForTest(entries []Entry) error {
+	tx, err := l.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(recordInsert)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	now := time.Now()
+	for i, e := range entries {
+		if e.Ts.IsZero() {
+			e.Ts = now
+			entries[i].Ts = now // so the totals pass below sees the same row
+		}
+		if _, err := stmt.Exec(recordArgs(e)...); err != nil {
+			stmt.Close()
+			tx.Rollback()
+			return err
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, e := range entries {
+		l.addTotals(e)
+	}
 	return nil
 }
 

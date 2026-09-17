@@ -22,11 +22,25 @@ package proxy
 // (waitForReset via proxy.go's loop) re-selects and, if that still fails,
 // comes back through waitForReset against the SAME original deadline —
 // never a fresh budget.
+//
+// Issue #187: WHICH GENERATION of that signal a request waits on is the
+// whole correctness of #105, and park used to pick it up itself — after
+// selection had already failed and after the hold was registered. A
+// capacity change landing in that gap closed the generation nobody was
+// holding yet, and the request then blocked on the fresh one, which nothing
+// was going to close: it slept out the entire reset (or holdMax) with a
+// usable account sitting idle — the exact bug #105 exists to prevent,
+// narrowed to a race. The generation is now taken by the caller BEFORE the
+// selection attempt whose failure it is waiting on, and handed down:
+// subscribe, then check. A signal arriving between the two now finds the
+// caller already subscribed, so the channel is already closed and park
+// returns at once.
 import (
 	"net/http"
 	"time"
 
 	"github.com/coderage-labs/spillway/internal/notify"
+	"github.com/coderage-labs/spillway/internal/pool"
 )
 
 // wakeStagger bounds how long park delays after a capacity wake before
@@ -71,7 +85,12 @@ const resetSlack = 250 * time.Millisecond
 // handed. It is what makes the wait request-specific (issue #140): the
 // model in it decides which quota windows govern this request, and so which
 // per-window rejection deadlines are the ones it is actually waiting on.
-func (h *Handler) waitForReset(r *http.Request, body []byte, deadline time.Time) bool {
+//
+// wake is the pool's capacity-changed generation as it stood BEFORE the
+// selection attempt that failed (issue #187). Reading it here — or, as the
+// bug was, in park — leaves a window in which a capacity change is
+// broadcast to nobody and then waited for forever, so the caller owns it.
+func (h *Handler) waitForReset(r *http.Request, body []byte, deadline time.Time, wake *pool.CapacityWake) bool {
 	if h.holdMax <= 0 || h.exhaustedMode == "fail" {
 		return false
 	}
@@ -101,7 +120,7 @@ func (h *Handler) waitForReset(r *http.Request, body []byte, deadline time.Time)
 		if remaining <= 0 {
 			return false
 		}
-		return h.park(r, remaining, deadline)
+		return h.park(r, remaining, deadline, wake)
 	}
 
 	wait := reset.Sub(now)
@@ -142,7 +161,7 @@ func (h *Handler) waitForReset(r *http.Request, body []byte, deadline time.Time)
 		"reset", reset.UTC().Format(time.RFC3339),
 		"wait", wait.Round(time.Second),
 	)
-	return h.park(r, wait, reset)
+	return h.park(r, wait, reset, wake)
 }
 
 // park blocks for wait (or until the pool signals new capacity — issue
@@ -152,14 +171,19 @@ func (h *Handler) waitForReset(r *http.Request, body []byte, deadline time.Time)
 // potentially-usable capacity, false immediately if the client disconnects
 // first. A true return is a hint to re-try selection, not a promise it will
 // succeed — the caller's loop already treats every true return this way.
-func (h *Handler) park(r *http.Request, wait time.Duration, until time.Time) bool {
+//
+// wake is the caller's capacity generation (issue #187), and is already
+// closed if capacity changed between that caller's selection attempt and
+// this call — in which case the select below returns immediately and the
+// caller re-selects, which is the correct answer to "something changed
+// while you were on your way here".
+func (h *Handler) park(r *http.Request, wait time.Duration, until time.Time, wake *pool.CapacityWake) bool {
 	release := h.pool.BeginHold(until)
 	defer release()
 
 	timer := time.NewTimer(wait + resetSlack) // slack past the reset
 	defer timer.Stop()
 
-	wake := h.pool.CapacitySignal()
 	select {
 	case <-timer.C:
 		return true
