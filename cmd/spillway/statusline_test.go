@@ -210,14 +210,18 @@ func TestRenderNamesAccountsNeedingAttention(t *testing.T) {
 	st := slState{Total: 4, Usable: 1, Exhausted: 1, Parked: 1, Disabled: 1}
 	got := render(noColour, []slAccount{okAccount()}, st, time.Now())
 
-	for _, want := range []string{"1 spent", "1 paused", "needs login"} {
+	// "spent" is 💀 since #183 — the glyph REPLACES the word rather than
+	// decorating it, which is the only reason emoji are a net saving on a
+	// line that was already overflowing. "paused" and "needs login" are
+	// states a human has to clear and stay spelled out.
+	for _, want := range []string{"💀 1", "1 paused", "needs login"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("%q does not mention %q", got, want)
 		}
 	}
 	// A healthy pool must stay quiet — this is a status line, not a report.
 	clean := render(noColour, []slAccount{okAccount()}, slState{Total: 1, Usable: 1}, time.Now())
-	for _, unwanted := range []string{"spent", "paused", "needs login"} {
+	for _, unwanted := range []string{"💀", "paused", "needs login"} {
 		if strings.Contains(clean, unwanted) {
 			t.Errorf("healthy pool line %q mentions %q", clean, unwanted)
 		}
@@ -401,7 +405,7 @@ func TestStatuslineDecodesStaleCAFromTheRealAdminServer(t *testing.T) {
 func TestRenderCountsAReserveAccountAsSpent(t *testing.T) {
 	st := slState{Total: 2, Usable: 1, Reserve: 1}
 	got := render(noColour, []slAccount{okAccount()}, st, time.Now())
-	if !strings.Contains(got, "1 spent") {
+	if !strings.Contains(got, "💀 1") {
 		t.Errorf("%q does not report the over-threshold account as spent", got)
 	}
 	if strings.Contains(got, "pool dry") {
@@ -419,7 +423,7 @@ func TestRenderReserveOnlyPoolIsNotDry(t *testing.T) {
 	if strings.Contains(got, "pool dry") {
 		t.Errorf("%q calls the pool dry with a reserve account still serving", got)
 	}
-	if !strings.Contains(got, "1 spent") {
+	if !strings.Contains(got, "💀 1") {
 		t.Errorf("%q does not warn that the last account is on its reserve", got)
 	}
 }
