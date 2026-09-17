@@ -1,13 +1,20 @@
 package main
 
-// `spillway statusline` prints one line for Claude Code's statusLine hook:
-// which account is serving, the model actually going upstream, and a headroom
-// bar per quota window.
+// `spillway statusline` prints Claude Code's statusLine hook: the session it
+// is attached to on the top row, and the pool underneath — which account is
+// serving, the model actually going upstream, and a headroom bar per quota
+// window.
 //
-// Three rules shape it, all learned the hard way:
-//   - It must NOT read stdin. Claude Code pipes JSON to the status line, but
-//     this may be composed inside another script that already consumed it;
-//     blocking on a closed pipe freezes the status line.
+// Four rules shape it, all learned the hard way:
+//   - Reading stdin must never block. Claude Code pipes JSON to the status
+//     line, but this may be composed inside another script that already
+//     consumed it, or run by hand from a terminal; blocking on a pipe nobody
+//     closes freezes the status line. The read is bounded and off the
+//     critical path — see statusline_session.go — and its absence degrades
+//     to the pool-only line rather than failing.
+//   - It must fit the terminal. A wrapped status line costs a row on every
+//     render, so the line is measured in COLUMNS (not runes: emoji are two
+//     columns) and trimmed lowest-value-first — see statusline_width.go.
 //   - It must be fast and quiet on failure. It re-runs on every render, so a
 //     stopped daemon has to cost nothing and say almost nothing — never an
 //     error message. "Almost" rather than "nothing" since issue #165: a
@@ -19,6 +26,7 @@ package main
 //     environment rather than assumed.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -331,8 +339,17 @@ func runStatusline(args []string) error {
 		}
 	}
 
-	// Both endpoints, concurrently: the whole line has one 350ms budget, and
-	// fetching them in series would double the worst case.
+	// Everything that can be done at once is. The whole line has one 350ms
+	// budget measured from here, and the three sources of it — the two admin
+	// endpoints and Claude Code's stdin payload — are independent.
+	//
+	// The git branch is the exception: it cannot start until the payload has
+	// named a directory, so it is the one thing that is additive. It is
+	// bounded twice over, by its own budget and by this deadline, and it
+	// overlaps whatever is left of the admin fetches.
+	deadline := time.Now().Add(statusTimeout)
+	sessCh := readSessionAsync(statuslineStdin)
+
 	var (
 		list []slAccount
 		st   slState
@@ -341,12 +358,30 @@ func runStatusline(args []string) error {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// A missing /api/state is not fatal — an older daemon still has
-		// accounts to show, so the line degrades rather than disappearing.
-		_ = getJSON(addr, token, "/api/state", &st)
+		inner := make(chan struct{})
+		go func() {
+			defer close(inner)
+			// A missing /api/state is not fatal — an older daemon still has
+			// accounts to show, so the line degrades rather than disappearing.
+			_ = getJSON(addr, token, "/api/state", &st)
+		}()
+		list, aErr = fetchAccounts(addr, token)
+		<-inner
 	}()
-	list, aErr = fetchAccounts(addr, token)
+
+	sess := waitSession(sessCh, min(stdinBudget, time.Until(deadline)))
+	if sess != nil {
+		gitDeadline := time.Now().Add(gitBudget)
+		if deadline.Before(gitDeadline) {
+			gitDeadline = deadline
+		}
+		ctx, cancel := context.WithDeadline(context.Background(), gitDeadline)
+		sess.Branch = gitBranch(ctx, sess.Dir)
+		cancel()
+	}
 	<-done
+
+	cols := terminalColumns()
 
 	if aErr != nil {
 		// The daemon did not answer within statusTimeout. Say SOMETHING
@@ -368,7 +403,16 @@ func runStatusline(args []string) error {
 		// One dim glyph is the whole budget. No colour, no error text, no
 		// "connection refused" — those belong in `spillway status`, not in
 		// a prompt that redraws on every keystroke.
-		fmt.Print(unreachable(detectPalette()))
+		//
+		// The session row still renders above it when there is one: it
+		// comes from stdin, so it knows nothing about whether the daemon
+		// answered, and dropping it would hide working information because
+		// something unrelated broke. The marker itself is unchanged.
+		p := detectPalette()
+		if top := fitSession(p, sess, cols); top != "" {
+			fmt.Print(top + "\n")
+		}
+		fmt.Print(unreachable(p))
 		return nil
 	}
 	if len(list) == 0 {
@@ -377,7 +421,7 @@ func runStatusline(args []string) error {
 		// explain properly; the prompt stays out of it.
 		return nil
 	}
-	fmt.Print(render(detectPalette(), list, st, time.Now()))
+	fmt.Print(renderLine(detectPalette(), list, st, sess, time.Now(), cols))
 	return nil
 }
 
@@ -387,9 +431,78 @@ func runStatusline(args []string) error {
 // without data, and dim so it never competes with the prompt.
 func unreachable(p palette) string { return p.dim("⛁ —") }
 
-// render builds the line. Split out from runStatusline so it can be tested
-// without a daemon: this is the part with the judgement in it.
+// poolTrim enumerates the reductions the pool row may apply, lowest value
+// first. The order is the one agreed in #183: the spent count, then the
+// in-flight count, then the fable window. The countdown after them is the
+// "still does not fit" tail.
+type poolTrim int
+
+const (
+	poolFull poolTrim = iota
+	poolNoSpent
+	poolNoInFlight
+	poolNoFable
+	poolNoCountdown
+	poolTrimMax = poolNoCountdown
+)
+
+// windowGlyph replaces a quota window's label position with a glyph (#183).
+// An unrecognised window keeps today's rendering: a wrong glyph is worse
+// than none, and the name is still printed either way.
+func windowGlyph(name string) string {
+	switch {
+	case strings.HasPrefix(name, "5h"):
+		return "⏳ "
+	case strings.HasPrefix(name, "7d"):
+		return "📆 "
+	}
+	return ""
+}
+
+// renderLine is the whole status line: the session row above the pool row,
+// each trimmed independently to cols. cols <= 0 means the width is unknown
+// and nothing is trimmed (see terminalColumns).
+func renderLine(p palette, list []slAccount, st slState, sess *slSession, now time.Time, cols int) string {
+	pool := fitPool(p, list, st, sess, now, cols)
+	top := fitSession(p, sess, cols)
+	if top == "" {
+		return pool
+	}
+	if pool == "" {
+		return top
+	}
+	return top + "\n" + pool
+}
+
+// fitPool renders the pool row inside cols columns, applying the agreed
+// reductions in order and truncating only if every one of them was not
+// enough.
+func fitPool(p palette, list []slAccount, st slState, sess *slSession, now time.Time, cols int) string {
+	var out string
+	for lvl := poolFull; lvl <= poolTrimMax; lvl++ {
+		out = renderPool(p, list, st, sess, now, lvl)
+		if cols <= 0 || displayWidth(out) <= cols {
+			return out
+		}
+	}
+	return truncateToWidth(out, cols)
+}
+
+// render builds the pool line at full detail, with no session context. The
+// entry point for everything that only cares about the pool.
 func render(p palette, list []slAccount, st slState, now time.Time) string {
+	return renderPool(p, list, st, nil, now, poolFull)
+}
+
+// renderPool builds the pool line. Split out from runStatusline so it can be
+// tested without a daemon: this is the part with the judgement in it.
+//
+// sess is passed in for one reason only: when the model the CLI selected and
+// the model the pool last served are the same, printing both reads as a
+// repetition, so the served one is dropped here and the top row carries it.
+// When they differ — a mapped model, a re-routed family — both are shown,
+// which is the divergence #183 exists to surface.
+func renderPool(p palette, list []slAccount, st slState, sess *slSession, now time.Time, lvl poolTrim) string {
 	// A parked request outranks everything else. From the client's side a
 	// hold is indistinguishable from a hang, so when one is active it IS the
 	// status: what is happening, and when it ends.
@@ -400,7 +513,7 @@ func render(p palette, list []slAccount, st slState, now time.Time) string {
 			b.WriteString(p.dim(fmt.Sprintf(" ×%d", st.Holding.Count)))
 		}
 		b.WriteString(p.dim(" → " + st.Holding.Until.Local().Format("15:04")))
-		b.WriteString(degraded(p, st))
+		b.WriteString(degraded(p, st, lvl))
 		return b.String()
 	}
 
@@ -413,15 +526,17 @@ func render(p palette, list []slAccount, st slState, now time.Time) string {
 			out += p.dim(" → " + st.NextReset.Local().Format("15:04") +
 				" (" + compactDur(st.NextReset.Sub(now)) + ")")
 		}
-		return out + degraded(p, st)
+		return out + degraded(p, st, lvl)
 	}
 
 	var b strings.Builder
 	b.WriteString(p.dim("⛁ "))
 	b.WriteString(a.display())
 
-	if a.LastModel != "" {
-		b.WriteString(p.dim(" · "))
+	// 🎯 is what spillway SERVED, as against the top row's 🤖 — what the CLI
+	// selected. Suppressed only when they are the same model.
+	if a.LastModel != "" && !sameModel(sess, a.LastModel) {
+		b.WriteString(p.dim("  🎯 "))
 		b.WriteString(p.dim(shortModel(a.LastModel)))
 	}
 
@@ -430,23 +545,27 @@ func render(p palette, list []slAccount, st slState, now time.Time) string {
 		if h < 0 {
 			continue
 		}
+		if lvl >= poolNoFable && strings.Contains(w.Name, "fable") {
+			continue
+		}
 		b.WriteString("  ")
+		b.WriteString(p.dim(windowGlyph(w.Name)))
 		b.WriteString(bar(p, h))
 		b.WriteString(fmt.Sprintf(" %d%%", int(h*100+0.5)))
 		b.WriteString(p.dim(" " + w.Name))
 		// Once a window is nearly spent, "when does it come back" is the
 		// question the percentage stops answering.
-		if h <= 0.20 && !w.ResetAt.IsZero() {
+		if h <= 0.20 && !w.ResetAt.IsZero() && lvl < poolNoCountdown {
 			b.WriteString(p.dim(" ↻" + compactDur(w.ResetAt.Sub(now))))
 		}
 	}
 	if len(a.Windows) == 0 {
 		b.WriteString(p.dim("  no quota signal"))
 	}
-	if a.InFlight > 0 {
-		b.WriteString(p.dim(fmt.Sprintf("  %d in flight", a.InFlight)))
+	if a.InFlight > 0 && lvl < poolNoInFlight {
+		b.WriteString(p.dim(fmt.Sprintf("  ✈ %d", a.InFlight)))
 	}
-	b.WriteString(degraded(p, st))
+	b.WriteString(degraded(p, st, lvl))
 	return b.String()
 }
 
@@ -459,15 +578,19 @@ func render(p palette, list []slAccount, st slState, now time.Time) string {
 // as spent: it will only be reached for if nothing better exists, and saying
 // otherwise is what made an avoided account look healthy. "paused" and "needs
 // login" are states a human put there or has to clear, and are coloured.
-func degraded(p palette, st slState) string {
+func degraded(p palette, st slState, lvl poolTrim) string {
 	var b strings.Builder
 	// Exhausted and Reserve differ only in how spillway found out — a 429
 	// versus the account's own quota headers. From the prompt they are the
 	// same fact: that account has nothing left.
 	// Overage accounts are exhausted too, but they are reported separately
 	// below — counting them here as well would double them.
-	if n := st.Exhausted - st.Overage + st.Reserve; n > 0 {
-		b.WriteString(p.dim(fmt.Sprintf("  %d spent", n)))
+	//
+	// "spent" became 💀 in #183: the glyph replaces the word rather than
+	// decorating it, which is what makes the emoji pay for themselves on a
+	// line that was already overflowing 80 columns.
+	if n := st.Exhausted - st.Overage + st.Reserve; n > 0 && lvl < poolNoSpent {
+		b.WriteString(p.dim(fmt.Sprintf("  💀 %d", n)))
 	}
 	if st.Parked > 0 {
 		b.WriteString("  " + p.paint(gradeFor(0.10), fmt.Sprintf("%d paused", st.Parked)))

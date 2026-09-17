@@ -252,12 +252,38 @@ spillway statusline install
 ```
 
 ```
-⛁ work · haiku-4-5  ████████ 94% 5h  ███████░ 88% 7d
+📁 ~/Repos/spillway  🌿 main  🤖 Opus 5 · high  🧠 34% ctx  📊 128k (2.1k tpm)
+⛁ csno  🎯 fable-5-1  ⏳ ███████░ 91% 5h  📆 █░░░░░░░ 11% 7d ↻5d1h  ✈ 2  💀 6
 ```
 
-Serving account, the model **actually** going upstream, and a headroom bar per
-quota window. Install refuses to replace a status line another tool owns unless
-you pass `--force`, and uninstall leaves a foreign one alone.
+The bottom row is the pool: serving account, the model **actually** going
+upstream, a headroom bar per quota window, `✈` requests in flight and `💀`
+accounts with nothing left. The top row is the session Claude Code is running,
+read from the JSON payload it pipes to the status line on every render:
+working directory, git branch, the model the **CLI** selected with its effort
+level, how full the context window is, and the session's cumulative tokens
+with a rate.
+
+**`🤖` and `🎯` are different facts.** `🤖` is what this session asked for;
+`🎯` is what spillway last served, after model mapping and any per-family
+routing. When they are the same model only `🤖` is shown; when they diverge —
+which is what a silent rewrite looks like — both are. That divergence used to
+be invisible.
+
+**The line never wraps.** It is measured in terminal columns (emoji are two
+columns wide, colour escapes are none) and trimmed to fit, lowest value first:
+on the top row the rate, then the branch, then the path is abbreviated
+(`~/Repos/spillway` → `~/spillway`); on the bottom row `💀`, then `✈`, then
+the fable window. Width comes from `COLUMNS`, or from
+`SPILLWAY_STATUSLINE_COLUMNS` if you need to set it explicitly; with neither,
+nothing is trimmed.
+
+Nothing identifying leaves the payload. The session id, the transcript path
+and the cost figure are never decoded, so they cannot reach a log or the
+request database — only derived numbers are rendered.
+
+Install refuses to replace a status line another tool owns unless you pass
+`--force`, and uninstall leaves a foreign one alone.
 
 **It prints nothing in a session that is not going through spillway.** The
 line is installed once and then runs for every Claude Code session on the
@@ -267,8 +293,16 @@ part of. Attachment is read from `HTTPS_PROXY` (or `ANTHROPIC_BASE_URL`)
 pointing at the configured listener. Pass `--always` in the command if you
 want it regardless.
 
+Stdin is read on a bounded budget and never blocks: absent, empty, malformed
+or slow-to-arrive payloads all degrade to the pool row on its own. The git
+branch is the one shellout, bounded by its own budget and by the overall
+350 ms deadline, and a slow repository costs you the branch rather than the
+status line.
+
 A session that **is** attached but whose daemon does not answer within the
-line's 350 ms budget shows `⛁ —` and nothing else. That one glyph exists
+line's 350 ms budget shows `⛁ —` and nothing else — with the session row
+above it, since that comes from stdin and does not depend on the daemon.
+That one glyph exists
 because the two silences used to be identical: when `/api/accounts` slowed
 past the budget the line vanished, which looks exactly like a session that
 is not on spillway, so a latency regression read as a deleted feature. An
