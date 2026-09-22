@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.21.2](https://github.com/coderage-labs/spillway/compare/v0.21.1...v0.21.2) (2026-09-22)
+
+
+### Fixes
+
+* bound a free re-probe's backoff so a bought reset is not hidden ([#190](https://github.com/coderage-labs/spillway/issues/190)) ([#191](https://github.com/coderage-labs/spillway/issues/191)) ([e12046d](https://github.com/coderage-labs/spillway/commit/e12046d093f0a5c17e45613c7c6bb83b9a6201d5))
+* cap the window-rejection horizon and give it a way back ([#194](https://github.com/coderage-labs/spillway/issues/194)) ([#195](https://github.com/coderage-labs/spillway/issues/195)) ([ed4c230](https://github.com/coderage-labs/spillway/commit/ed4c23006de18f145ca89f97bd0674c0cbec7011))
+
 ## [0.21.1](https://github.com/coderage-labs/spillway/compare/v0.21.0...v0.21.1) (2026-09-17)
 
 
