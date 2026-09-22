@@ -971,6 +971,18 @@ checked less often over time instead of every tick. This never bills
 uninvited: the same guard that stops an ordinary idle probe from paying
 to re-learn a spent window (see below) applies identically here.
 
+That growth is bounded where the re-probe costs nothing. With extra usage
+off — the default — the provider answers a probe on a spent account with a
+free 429, so spacing the next one out by most of a day buys nothing and
+hides the state change users most want noticed: a bought reset. Two
+accounts sat up to 21 hours behind a backoff earned entirely by free
+refusals, and only a daemon restart (the backoff is in memory) found the
+resets. A free re-probe is now held off by at most **4 × `probeInterval`**
+— two hours at the default, still three doublings' worth of backoff and
+75% less probe traffic than checking every tick. Where the probe *would*
+be charged nothing changes: the backoff doubles to its 24-hour ceiling as
+before, because there each attempt is a purchase.
+
 ### Hiding credit signals (Claude Code's silent model swap)
 
 Claude Code carries a usage-credit gate for its top model family: when a
