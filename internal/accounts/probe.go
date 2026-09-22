@@ -50,6 +50,13 @@ package accounts
 // ticker, no new config setting — the same probeOnStart/probeInterval
 // schedule now also re-verifies exhausted accounts while they are
 // exhausted, not just idle ones.
+//
+// That backoff then grew the same way whether or not the probe cost
+// anything, which issue #190 splits apart: where a probe can be charged it
+// still doubles to a day, and where the provider can only refuse it for free
+// it is capped at a small multiple of probeInterval (freeReprobeCap). A user
+// who buys a reset should not wait out a backoff earned by refusals that cost
+// nothing to collect.
 
 import (
 	"bytes"
@@ -254,6 +261,62 @@ func billedProbeAge(staleAfter time.Duration) time.Duration {
 	return d
 }
 
+// freeReprobeCap is how far a rejected re-probe's backoff (issue #90) may
+// hold off the NEXT re-probe when that probe cannot be charged — issue #190.
+//
+// The backoff doubles on every rejection up to maxProbeBackoff (24h), which
+// is right where each attempt is a purchase: there the cost of asking again
+// is real and grows with the asking. Where the probe is free it is wrong. A
+// free probe's worst case is a 429, the same thing an idle account's ordinary
+// cadence probe risks, so spacing it out past a small multiple of that
+// cadence buys almost nothing and hides exactly the state change the user
+// most wants noticed: a user bought a free reset on two accounts and spillway
+// did not look for up to 21 hours, because both had been rejected into
+// most of a day of backoff.
+//
+// A multiple of probeInterval rather than a bare constant, because the whole
+// question is "how much longer than the ordinary cadence". Four of them:
+//
+//   - The backoff's job is to break a tight loop, and it has done that job
+//     by its third rejection — 1x, 2x, 4x the interval (30m, 1h, 2h at the
+//     default), already 75% less probe traffic on a long-spent account than
+//     probing every tick, which is the reduction #90 actually asked for.
+//   - Everything past that trades discovery latency for very little. Going
+//     on to the 24h cap saves ~11 free 429s a day per account and costs up
+//     to 22 hours of a bought reset sitting unnoticed. That is a bad trade
+//     in the one direction nothing else corrects: no traffic is routed to an
+//     exhausted account, so the probe is the only thing that can find out.
+//   - It cannot probe more often than the ordinary cadence anyway. This only
+//     lifts the extra gate; needsProbe's own staleness check still applies
+//     below it, so the floor stays staleAfter however small this cap gets.
+//
+// staleAfter <= 0 is startup-only probing, which has no cadence to scale
+// from, so nothing is capped and the stored backoff stands — the same choice
+// billedProbeAge makes for the same reason.
+func freeReprobeCap(staleAfter time.Duration) time.Duration {
+	const factor = 4
+	if staleAfter <= 0 {
+		return 0
+	}
+	return factor * staleAfter
+}
+
+// boundedNextProbe is the earliest a re-probe may run given the deadline a
+// rejected re-probe recorded and the backoff that produced it, with issue
+// #190's cap applied. next minus backoff is when that backoff started, so the
+// bounded deadline is that start plus the cap.
+//
+// Never later than next: where the stored backoff is already inside the cap
+// (or there is no cap to apply) the recorded deadline stands untouched, so
+// this can only ever bring a re-probe forward, never postpone one.
+func boundedNextProbe(next time.Time, backoff, staleAfter time.Duration) time.Time {
+	limit := freeReprobeCap(staleAfter)
+	if limit <= 0 || backoff <= limit {
+		return next
+	}
+	return next.Add(limit - backoff)
+}
+
 // needsProbe is true when we have no quota reading, or the one we have is
 // worth re-measuring: aged past staleAfter, or claiming the account is spent
 // when finding out otherwise costs nothing.
@@ -269,18 +332,26 @@ func billedProbeAge(staleAfter time.Duration) time.Duration {
 // runs, so len(wins) == 0 here means the account genuinely has never had a
 // reading, not "we just restarted".
 func needsProbe(a *pool.Account, poolAllows bool, staleAfter time.Duration) bool {
+	return needsProbeAt(a, poolAllows, staleAfter, time.Now())
+}
+
+// needsProbeAt is needsProbe with the clock injected, so the gates that
+// compare stored times against now — the age cap and issue #190's bound on a
+// backoff built up hours ago — are testable without asserting a wall-clock
+// duration (issues #98 and #134).
+func needsProbeAt(a *pool.Account, poolAllows bool, staleAfter time.Duration, now time.Time) bool {
 	wins := a.QuotaWindows()
 	if len(wins) == 0 {
 		return true
 	}
-	now := time.Now()
 	newest := time.Time{}
 	for _, w := range wins {
 		if w.FetchedAt.After(newest) {
 			newest = w.FetchedAt
 		}
 	}
-	if wouldBill(a, poolAllows, now) {
+	billable := wouldBill(a, poolAllows, now)
+	if billable {
 		// This probe is a purchase. Hold off until the reading is old
 		// enough that one bought request beats going on believing it.
 		//
@@ -300,8 +371,23 @@ func needsProbe(a *pool.Account, poolAllows bool, staleAfter time.Duration) bool
 	// staleAfter; check it before the staleness comparison below so a
 	// repeatedly-rejected exhausted account is spaced out rather than
 	// re-probed every tick at the base interval.
-	if next := a.NextProbeAt(); !next.IsZero() && now.Before(next) {
-		return false
+	//
+	// Bounded where this probe is free (issue #190). `billable` is the same
+	// question #152 made wouldBill ask — can this account be charged at all,
+	// and is its own quota gone — and the answer decides which backoff
+	// applies: unbounded growth for a probe that costs money, freeReprobeCap
+	// for one the provider can only refuse. Asked here, on the current state,
+	// rather than baked into the stored deadline when the rejection happened:
+	// the money switch can be flipped in between, and a backoff recorded
+	// while extra usage was on must not go on being treated as expensive
+	// after it is off — that is this same bug's whole shape.
+	if next, backoff := a.ReprobeSchedule(); !next.IsZero() && now.Before(next) {
+		if !billable {
+			next = boundedNextProbe(next, backoff, staleAfter)
+		}
+		if now.Before(next) {
+			return false
+		}
 	}
 	// Not the same question as wouldBill above: this is what the reading
 	// claims regardless of who would pay, and below it is a reason to

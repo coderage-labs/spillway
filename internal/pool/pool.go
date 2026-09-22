@@ -703,6 +703,13 @@ func (p *Pool) MarkExhausted(a *Account, until time.Time) {
 // every tick forever. The backoff is never reset to zero here; only
 // ClearExhausted (a re-probe that actually recovers) does that.
 func (p *Pool) MarkReprobeRejected(a *Account, until time.Time, baseInterval time.Duration) {
+	p.markReprobeRejectedAt(a, until, baseInterval, time.Now())
+}
+
+// markReprobeRejectedAt is MarkReprobeRejected with the clock injected, so a
+// backoff that took a day of rejections to build up is testable without a day
+// of waiting or a wall-clock assertion (issues #98 and #134).
+func (p *Pool) markReprobeRejectedAt(a *Account, until time.Time, baseInterval time.Duration, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.state = StateExhausted
@@ -715,7 +722,7 @@ func (p *Pool) MarkReprobeRejected(a *Account, until time.Time, baseInterval tim
 	if a.probeBackoff > maxProbeBackoff {
 		a.probeBackoff = maxProbeBackoff
 	}
-	a.nextProbeAt = time.Now().Add(a.probeBackoff)
+	a.nextProbeAt = now.Add(a.probeBackoff)
 }
 
 // ClearExhausted un-benches an account a re-probe found healthy again
@@ -1307,6 +1314,22 @@ func (a *Account) NextProbeAt() time.Time {
 	return a.nextProbeAt
 }
 
+// ReprobeSchedule reports both halves of a rejected re-probe's backoff (issue
+// #90) together: the earliest time the next re-probe should run, and the
+// spacing that produced it. Zero, zero means no restriction.
+//
+// Both, under one lock, because a caller that wants to BOUND that wait has to
+// know when it started, and the only record of that is next minus backoff.
+// Read through two separate accessors the pair could straddle a
+// MarkReprobeRejected and combine a fresh deadline with the previous
+// spacing — which places the start of the backoff EARLIER than it really was
+// and so lets a probe through sooner than the bound intends.
+func (a *Account) ReprobeSchedule() (time.Time, time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.nextProbeAt, a.probeBackoff
+}
+
 func (a *Account) stateLocked() State {
 	if a.state == StateExhausted && time.Now().After(a.exhaustedUntil) {
 		a.state = StateOK
@@ -1491,6 +1514,14 @@ func (a *Account) SetOverageAtForTest(ov provider.Overage, at time.Time) { a.set
 // what the selector would decide at a given moment.
 func (a *Account) CanOverageAtForTest(poolAllows bool, now time.Time) bool {
 	return a.canOverageAt(poolAllows, now)
+}
+
+// MarkReprobeRejectedAtForTest exposes MarkReprobeRejected's injected clock,
+// so a test can build the state a run of rejections spread over hours would
+// have left — which is the only way to exercise issue #190's bound on a
+// backoff that started in the past without sleeping through it.
+func (p *Pool) MarkReprobeRejectedAtForTest(a *Account, until time.Time, baseInterval time.Duration, now time.Time) {
+	p.markReprobeRejectedAt(a, until, baseInterval, now)
 }
 
 // AccountSettings is the subset of one account's config that the dashboard

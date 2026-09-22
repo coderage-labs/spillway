@@ -138,3 +138,43 @@ func TestMarkReprobeRejectedBackoffIsCapped(t *testing.T) {
 		t.Fatalf("NextProbeAt = %v, want capped at ~now+%v", next, maxProbeBackoff)
 	}
 }
+
+// Issue #190 reads the deadline and the spacing that produced it together, to
+// recover WHEN the backoff started (next minus backoff) and bound how far past
+// that a free re-probe may be held off. That only works if the pair is
+// consistent, so this pins both halves against the same injected clock —
+// including after a doubling, where a stale spacing paired with a fresh
+// deadline would place the start of the backoff in the wrong place.
+func TestReprobeScheduleReportsTheDeadlineWithTheSpacingThatSetIt(t *testing.T) {
+	a := NewAccount("a", SourceYAML, "t", "", 0, "")
+	p := New([]*Account{a}, time.Now())
+	base := 30 * time.Minute
+	at := time.Now().Add(-6 * time.Hour)
+
+	if next, backoff := a.ReprobeSchedule(); !next.IsZero() || backoff != 0 {
+		t.Fatalf("ReprobeSchedule = (%v, %v) before any rejection, want zero, zero", next, backoff)
+	}
+
+	p.markReprobeRejectedAt(a, time.Now().Add(time.Hour), base, at)
+	next, backoff := a.ReprobeSchedule()
+	if backoff != base {
+		t.Errorf("backoff = %v after one rejection, want the base interval %v", backoff, base)
+	}
+	if want := at.Add(base); !next.Equal(want) {
+		t.Errorf("next = %v, want %v (the rejection's own clock plus its spacing)", next, want)
+	}
+
+	p.markReprobeRejectedAt(a, time.Now().Add(time.Hour), base, at)
+	next, backoff = a.ReprobeSchedule()
+	if backoff != 2*base {
+		t.Errorf("backoff = %v after two rejections, want %v", backoff, 2*base)
+	}
+	if got := next.Add(-backoff); !got.Equal(at) {
+		t.Errorf("next minus backoff = %v, want %v: the pair must re-derive when the backoff started", got, at)
+	}
+
+	p.ClearExhausted(a)
+	if next, backoff := a.ReprobeSchedule(); !next.IsZero() || backoff != 0 {
+		t.Errorf("ReprobeSchedule = (%v, %v) after a recovery, want zero, zero", next, backoff)
+	}
+}
