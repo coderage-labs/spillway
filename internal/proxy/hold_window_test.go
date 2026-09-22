@@ -326,9 +326,14 @@ func TestWindowRejectionHoldCancelledByClient(t *testing.T) {
 // must be the window-rejection deadline, not an hours-out budget end. A
 // parked user reading "until 18:30" when the quota returns at 14:10 is the
 // same bug wearing a different hat.
+//
+// Ten minutes, deliberately inside pool.windowRejectionTTL (issue #194):
+// this test's subject is the hold preferring the rejection deadline over
+// holdMax, and a fixture beyond the TTL would be asserting the clamp
+// instead. TestWindowRejectionHoldReportsTheClampedDeadline covers that.
 func TestWindowRejectionHoldReportsTheRejectionDeadline(t *testing.T) {
 	h, p := windowHoldRig(t, 1, "2h")
-	until := time.Now().Add(time.Hour)
+	until := time.Now().Add(10 * time.Minute)
 	p.MarkWindowRejected(p.Accounts()[0], "7d-fable", until)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -350,5 +355,51 @@ func TestWindowRejectionHoldReportsTheRejectionDeadline(t *testing.T) {
 	}
 	if d := reported.Sub(until); d > time.Second || d < -time.Second {
 		t.Errorf("hold reports until %v, want the rejection deadline %v", reported, until)
+	}
+}
+
+// Issue #194, end to end through the hold: a rejection whose claimed `until`
+// is absurd must park the request until the CLAMPED deadline, not the
+// claimed one. The hold's wake time comes from
+// Account.earliestWindowRejectionFor and the exclusion from
+// WindowRejectedFor; both read the same stored deadline, so a clamp applied
+// to one and not the other would show up here as a request sleeping for a
+// year while selection had already re-admitted the account.
+//
+// Asserted as a computed time against the claim, never as an elapsed
+// duration (issues #98, #134): nothing here waits.
+func TestWindowRejectionHoldReportsTheClampedDeadline(t *testing.T) {
+	h, p := windowHoldRig(t, 1, "2h")
+	claimed := time.Now().Add(365 * 24 * time.Hour) // a bad epoch parse
+	p.MarkWindowRejected(p.Accounts()[0], "7d-fable", claimed)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	go h.waitForReset(req, []byte(fableReqBody), time.Now().Add(2*time.Hour), p.CapacitySignal())
+
+	var reported time.Time
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if n, u := p.Holds(); n == 1 {
+			reported = u
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if reported.IsZero() {
+		t.Fatalf("the request never parked: with the claim %v taken at face value the soonest "+
+			"wake time is beyond holdMax, so waitForReset fails fast (hold.go's resetSlack branch) "+
+			"instead of waiting out the clamped deadline it should have had", claimed)
+	}
+	// windowRejectionTTL is 30m and unexported; one hour is the loosest
+	// bound that still fails every unclamped value.
+	if ceiling := time.Now().Add(time.Hour); reported.After(ceiling) {
+		t.Errorf("hold parks until %v, past %v — the year-out claim %v was taken at face value, "+
+			"so the request sleeps out its whole budget on a deadline nothing will ever re-measure",
+			reported, ceiling, claimed)
+	}
+	if !reported.After(time.Now()) {
+		t.Errorf("hold parks until %v, already past — a non-future wake time makes the caller spin", reported)
 	}
 }

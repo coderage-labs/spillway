@@ -890,6 +890,35 @@ failing toward the side that costs nothing; the cost just sits on opposite
 sides. Where the probe is free the question does not arise, because the probe
 simply asks again.
 
+**A window rejection is believed for at most half an hour.** A fable-only
+429 excludes the account for that family outright — a confirmed refusal, not
+a preference — and that exclusion is the one reading nothing can correct:
+selection routes no fable there, and the idle probe cannot reach it either,
+because the probe asks for a fixed non-fable model and skips families it
+never engages. So the deadline is clamped twice (issue #194). The forged
+`7d-fable` row the rejection writes is capped at the same 9 days
+`exhaustedUntil` is, so a bad epoch parse or a far-future org-level reset
+cannot leave a synthetic "100% used" figure sitting there for as long as a
+header claimed. The *exclusion* is clamped harder, to thirty minutes — the
+same figure a cached overage refusal gets, and for the same reason: where a
+reading suppresses the only request that could replace it, it has to expire
+on age. Past that the account is no longer excluded for the family, but it
+is still deprioritised by the forged row, so the re-test arrives on the
+last-resort tier where a refusal costs nothing and a free 429 carries the
+fresh headers back. If it is refused again the thirty minutes start over, so
+a genuinely spent family is re-tested at most once per account per half
+hour — never hammered, and never stuck until the daemon restarts.
+
+**The forged row says it was not measured.** Every quota window reports
+where its number came from: `headers` for a provider response, `poll` for a
+polled usage endpoint, and `rejected` for the row a window rejection writes
+itself. That row is spillway restating its own exclusion, not something a
+provider reported, and stamping it `headers` made the two indistinguishable
+on `/api/accounts` and in the dashboard's figures table — the surface
+someone checks to decide whether the exclusion is right. It still reads
+spent, and still drives `fableSpent`; it just no longer claims to be
+evidence. A real reading of the same window replaces it, marker and all.
+
 The provider's reset header can also lag the refill it announces. Measured
 live: an account's `7d` fell from 0.89 to 0.0 while its reported reset stayed
 put, thirty-one hours ahead — and its `7d-fable`, carrying the very same

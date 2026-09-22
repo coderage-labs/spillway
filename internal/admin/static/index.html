@@ -1218,7 +1218,12 @@ function renderTanks(list) {
           esc(short(a.name)) + '</td>' +
         '<td class="dim">' + esc(w.name) + '</td>' +
         '<td class="num">' + (f === null ? "&mdash;" : pct + "%") + '</td>' +
+        // "rejected" (issue #194): this row was not measured at all. A
+        // family-scoped 429 forges a 100%-used row so the exclusion is
+        // visible, and stamping it "measured" made the exclusion restating
+        // itself look like evidence for it.
         '<td class="dim">' + esc(w.expired ? "expired"
+          : w.source === "rejected" ? "rejected"
           : w.source === "headers" ? "measured"
           : w.source === "poll" ? "polled" : "unknown") + '</td>' +
         '<td class="num dim">' + (rate ? (rate * 100).toFixed(1) + "%" : "&mdash;") + '</td>' +

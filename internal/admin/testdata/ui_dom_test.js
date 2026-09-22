@@ -34,6 +34,14 @@ const ACCOUNTS = [{
     // (issue #135): must read as unknown, never as 0% with "refills 0s".
     { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now - 3600e3).toISOString(), source: 'headers', expired: true },
   ],
+}, {
+  // Issue #194: a family-scoped 429 forges a 100%-used row so the exclusion
+  // is visible. It was never measured, so the provenance column must say so
+  // rather than "measured".
+  name: 'you@example-three.com', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 0,
+  quotaWindows: [
+    { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now + 6 * 3600e3).toISOString(), source: 'rejected' },
+  ],
 }];
 const HISTORY = [{
   account: 'you@example-one.com', window: '5h',
@@ -231,6 +239,10 @@ eval(js);
     // §6.5: a polled reading is up to a minute stale and a measured one is
     // exact; showing both as a bare percentage implies equal confidence.
     'quota source shown per window': figures.includes('measured') && figures.includes('polled'),
+    // Issue #194: the forged row a window rejection writes must read
+    // "rejected", never "measured" — nothing measured it, and the dashboard
+    // is where a user decides whether the exclusion is right.
+    'forged rejection row not shown as measured': figures.includes('rejected'),
     // Issue #110: cache hit rate (30.4%) and create/read volume (4165/1816)
     // rendered beside burn/h and dry-in.
     'cache hit rate shown': figures.includes('30.4%'),
@@ -268,11 +280,14 @@ eval(js);
     .filter(r => String(r.className).includes('on'));
   const ringsOff = findAllIn(els.accounts, '.dryring')
     .filter(r => !String(r.className).includes('on'));
-  ok['countdown ring shown on the spent window'] = ringsOn.length === 1;
-  // Only the spent one: a ring over a tank that is 80% full says nothing.
+  // Two dry tanks in the fixture: account two's 7d, and (issue #194)
+  // account three's forged 7d-fable rejection row, which is dry by
+  // construction and must be drawn like any other empty tank.
+  ok['countdown ring shown on the spent window'] = ringsOn.length === 2;
+  // Only the spent ones: a ring over a tank that is 80% full says nothing.
   ok['countdown ring hidden on healthy windows'] = ringsOff.length >= 2;
-  ok['countdown ring states the time left'] = ringsOn.length === 1 &&
-    /^\dh(\d+m)?$|^\d+m$/.test(findIn(ringsOn[0], '.left')?.textContent || '');
+  ok['countdown ring states the time left'] = ringsOn.length === 2 &&
+    ringsOn.every(r => /^\dh(\d+m)?$|^\d+m$/.test(findIn(r, '.left')?.textContent || ''));
   // No arc any more, and its absence is the assertion: a progress arc needs
   // a start as well as an end, the API reports only the reset time, and the
   // length was guessed from the window's name. That is right for "5h" and
@@ -284,9 +299,9 @@ eval(js);
   // One number in the glass, not a boxed label duplicating the caption below
   // it. The line under the tank already reads "refills 12h58m"; a plaque
   // saying "REFILLS IN 13h" over it looked like the two disagreed.
-  ok['countdown is one bare figure'] = ringsOn.length === 1 &&
-    findAllIn(ringsOn[0], '.plaque').length === 0 &&
-    findAllIn(ringsOn[0], '.cap').length === 0;
+  ok['countdown is one bare figure'] = ringsOn.length === 2 &&
+    ringsOn.every(r => findAllIn(r, '.plaque').length === 0 &&
+      findAllIn(r, '.cap').length === 0);
 
   // Bubbles have to rise the height of the glass, and --climb is what says
   // how far. It used to be a percentage, and a percentage inside translate()
