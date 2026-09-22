@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/coderage-labs/spillway/compare/v0.21.2...v0.22.0) (2026-09-22)
+
+
+### Features
+
+* ask spillway to check one account now, instead of restarting it ([#192](https://github.com/coderage-labs/spillway/issues/192)) ([#196](https://github.com/coderage-labs/spillway/issues/196)) ([519a4df](https://github.com/coderage-labs/spillway/commit/519a4dfbb2b254bdd755c0accc279a159360c4ad))
+
 ## [0.21.2](https://github.com/coderage-labs/spillway/compare/v0.21.1...v0.21.2) (2026-09-22)
 
 
