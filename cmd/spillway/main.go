@@ -87,6 +87,8 @@ func main() {
 		err = runClaude(os.Args[2:])
 	case "switch":
 		err = runSwitch(os.Args[2:])
+	case "probe":
+		err = runProbe(os.Args[2:])
 	case "status":
 		err = runStatus(len(os.Args) > 2 && os.Args[2] == "--json")
 	case "login":
@@ -143,6 +145,7 @@ func usage() {
 		"                                                   service + status line + plugin, in one go",
 		"       spillway uninstall                          undo it",
 		"       spillway switch [<account>|--auto] [--force]  point the pool at one account; bare, reports what's pinned",
+		"       spillway probe <account> [--force]           re-measure one account's quota now, past the probe schedule",
 		"       spillway status [--json]",
 		"       spillway login claude <name>",
 		"       spillway login kimi <name>",
@@ -438,6 +441,24 @@ func runServer(args []string) error {
 	adminHandler.SetUnpooled(func() (int, int, []string) {
 		u := handler.UnpooledStats()
 		return u.Requests, u.Paths, u.InferenceShaped
+	})
+	// Issue #192: "check this account now". Wired unconditionally, including
+	// when probeOnStart is off and when probeInterval is 0 — those switch off
+	// the SCHEDULE, and this is the escape hatch from it. A user who has
+	// turned automatic probing down to nothing is the user most likely to
+	// want to ask by hand.
+	//
+	// Its own client, not the sweep goroutine's: that one is created inside
+	// a conditional goroutine that may never run, and a forced probe must
+	// not depend on whether the scheduled one exists. Same 30s timeout.
+	probeClient := &http.Client{Timeout: 30 * time.Second}
+	adminHandler.EnableProbe(func(ctx context.Context, name string, force bool) (bool, error) {
+		// cfg.PoolProbeInterval() is passed only as probeOne's re-probe
+		// backoff base, so a forced probe that is rejected again spaces the
+		// NEXT scheduled one exactly as a swept probe would have. It is not
+		// a gate here: ProbeNow never consults needsProbe.
+		return accounts.ProbeNow(ctx, p, probeClient, cfg.Upstream,
+			cfg.PoolProbeInterval(), name, force, logger)
 	})
 	if !loopback {
 		adminHandler.RequireToken()

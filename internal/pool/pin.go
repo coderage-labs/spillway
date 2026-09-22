@@ -27,6 +27,31 @@ var (
 	ErrPinCrossProvider = errors.New("pinning there changes provider mid-session")
 )
 
+// ErrProbeWouldBill is the forced-probe path's counterpart to
+// ErrPinWouldBill (issue #192): an explicit "check this account now" on an
+// account whose quota is gone and whose extra usage is permitted is answered
+// with a 200 and a charge, so it is refused unless the caller forces it.
+//
+// Declared here, beside the pin refusals, rather than in internal/accounts
+// where the probe lives, for two reasons. It is the same vocabulary — "this
+// action would spend money, say so again if you mean it" — and #139 settled
+// that vocabulary on the pin path; a second spelling of the same idea in a
+// second package is how two surfaces end up disagreeing about what a refusal
+// looks like. And internal/admin, which has to map it to a 409 exactly as it
+// already maps ErrPinWouldBill, imports pool already and must not grow an
+// import of internal/accounts to learn one error value.
+//
+// The question it answers is NOT providerWouldBill's. A pin hands the
+// provider a real request whose billing is the provider's decision, so the
+// pin path has to ask both "would spillway choose to spend?" and "would the
+// provider charge anyway?". A probe is spillway's own synthetic request, and
+// the one thing that makes it billable is the probe guard's own wouldBill
+// (internal/accounts): extra usage permitted for this account AND its own
+// quota gone. Where permission is absent the provider refuses the probe for
+// free — that is #152's whole finding — so there is no second question to
+// ask.
+var ErrProbeWouldBill = errors.New("probing there would spend money")
+
 // Pin directs selection at one account by name until Unpin.
 //
 // Refused in two cases, each of which force overrides:

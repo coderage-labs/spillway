@@ -4,6 +4,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -72,6 +73,11 @@ type Server struct {
 	// which the handler already treats as "flag it, don't strand it".
 	hostCovered  func(host string) bool
 	refreshHosts func()
+	// probe sends issue #192's forced quota probe — typically a closure
+	// over accounts.ProbeNow. nil in tests that only exercise the read-only
+	// API, and in any build with no probe client wired, which answers the
+	// endpoint 404 rather than pretending to have probed. See EnableProbe.
+	probe func(ctx context.Context, name string, force bool) (billed bool, err error)
 }
 
 // EnableLiveMITM wires issue #87's live account-add to the proxy handler's
@@ -275,8 +281,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// name out of the running pool immediately.
 	// /api/accounts/add is issue #87's mirror: the CLI's `login` has already
 	// written the config and the secret store by the time it calls this.
+	// /api/accounts/probe is issue #192's "check this account now". It writes
+	// nothing to disk either — it makes the daemon ACT: one quota probe,
+	// immediately, past the schedules that would have suppressed it.
 	if r.URL.Path != "/api/settings" && r.URL.Path != "/api/pin" && r.URL.Path != "/api/accounts/remove" &&
-		r.URL.Path != "/api/accounts/add" &&
+		r.URL.Path != "/api/accounts/add" && r.URL.Path != "/api/accounts/probe" &&
 		r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -294,6 +303,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAccountRemove(w, r)
 	case r.URL.Path == "/api/accounts/add":
 		s.handleAccountAdd(w, r)
+	case r.URL.Path == "/api/accounts/probe":
+		s.handleAccountProbe(w, r)
 	case r.URL.Path == "/logo.svg":
 		w.Header().Set("Content-Type", "image/svg+xml")
 		// Immutable for a day: it is the favicon, refetched on every tab.

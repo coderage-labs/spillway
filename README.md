@@ -221,6 +221,7 @@ that works over SSH.
 | `spillway notify list` | Configured channels, their events, and whether a credential is present |
 | `spillway notify remove <channel>` | Delete a channel's config entry and its stored credential |
 | `spillway switch [<account>\|--auto] [--force]` | Point the pool at one account — resolved by name, label or a unique prefix/substring — until told otherwise; with no argument, reports what's pinned and what you could switch to |
+| `spillway probe <account> [--force]` | Re-measure one account's quota immediately — resolved by name, label or a unique prefix/substring. Bypasses both probe schedules: the re-probe backoff an exhausted account builds up, and the once-a-day rationing of a probe that costs money. Refused with `409` on an account whose quota is spent *and* whose extra usage is permitted, because that probe is a charged request; `--force` buys it. Everywhere else the probe is free and the flag does nothing. This is the answer to "I bought a reset and spillway hasn't noticed" — previously, restarting the daemon |
 | `spillway login claude <account>` | Add a Claude account (OAuth PKCE), or re-authenticate an existing one — `<account>` resolves against existing accounts by name, label or a unique prefix/substring first, and only becomes a new account's name if nothing matches. Reaches a running daemon immediately: a new account is selectable before the command returns, and re-authenticating an existing one hot-swaps its credential in the running pool rather than leaving the daemon holding the stale one until restarted |
 | `spillway login kimi <account>` | Add a Kimi account (OAuth device flow), or re-authenticate an existing one — same resolution and live-apply behaviour as `login claude` |
 | `spillway statusline` | Print the Claude Code status line |
@@ -1573,6 +1574,19 @@ not supply one, and fails closed if it is required but missing.
   selection to one account, or release it. `409` is a refusal `force` can
   override (would bill, or crosses provider); `400` is not. `GET /api/state`
   reports the current pin.
+- `POST /api/accounts/probe` `{"name":"…","force":false}` — force one quota
+  probe of that account right now, past both probe schedules (the re-probe
+  backoff an exhausted account builds up, and the once-a-day rationing of a
+  billed probe). `409` is the one refusal `force` can override — the
+  account's quota is spent and its extra usage is permitted, so the probe is
+  a charged request. `400` is one it cannot (parked, disabled, no name);
+  `404` is an unknown name; `502` is a probe that was attempted and did not
+  complete. The response reports the
+  windows it just measured and whether it was `billed`. A probe deliberately
+  does NOT clear a confirmed window rejection: it asks for a fixed non-fable
+  model, so it never engages the rejected family and learns nothing about
+  it — that exclusion expires on its own 30-minute TTL and is re-tested by
+  ordinary traffic on the last-resort tier.
 - `GET /api/state`'s `staleCA` is issue #66's stale-CA warning (see "MITM
   mode" above) — true while a genuine CA regeneration looks like it has
   stranded at least one client; the statusline is what actually shows it.

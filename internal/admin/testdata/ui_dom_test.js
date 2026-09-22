@@ -65,6 +65,10 @@ const SETTINGS = {
   accounts: { 'you@example-one.com': { label: 'work', disabled: false } },
 };
 const fetchCount = { accounts: 0, requests: 0, history: 0, activity: 0, settings: 0, state: 0 };
+// probeCalls records what the "check now" control (#192) sent to
+// POST /api/accounts/probe, so a test can assert both that a refusal was NOT
+// silently forced and that a confirmed retry actually carried force:true.
+const probeCalls = [];
 // pinState is /api/state's view of the pin (#11) -- the ONLY thing the pin
 // tests below mutate directly to simulate another client (the CLI
 // `spillway switch`) changing it out from under the dashboard. pinCalls
@@ -74,6 +78,31 @@ const pinCalls = [];
 global.fetch = async (u, opts) => {
   const url = String(u);
   const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+  // Before the /api/accounts branch: that one matches by substring, so a
+  // probe POST would otherwise be answered with the account list and the
+  // control would look like it worked.
+  if (url.includes('/api/accounts/probe')) {
+    const req = JSON.parse(opts.body);
+    // The Authorization header is recorded, not just the body: the pin
+    // control shipped once with auth() applied to the URL instead of the
+    // init, which left the request unauthenticated and was invisible on a
+    // loopback dashboard because it has no token at all.
+    probeCalls.push({ name: req.name, force: req.force,
+                      auth: (opts.headers || {}).Authorization || '' });
+    // Fixture behaviour keyed by account, mirroring the pin fixture:
+    //   example-one -> 502 (probe attempted, did not complete: no retry)
+    //   example-two -> 409 unless forced (would be charged: retry offered)
+    if (req.name === 'you@example-one.com') {
+      return { ok: false, status: 502, text: async () => 'spillway: probe of "you@example-one.com" failed: upstream timeout' };
+    }
+    if (req.name === 'you@example-two.com' && !req.force) {
+      return { ok: false, status: 409, text: async () =>
+        'spillway: probing there would spend money: "you@example-two.com" is out of quota and has extra usage permitted, so this probe is a charged request' };
+    }
+    const body = { account: req.name, billed: !!req.force,
+                   quotaWindows: [{ name: '5h', limit: 1, used: 0.07 }, { name: '7d', limit: 1, used: 0 }] };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+  }
   if (url.includes('/api/accounts'))       { fetchCount.accounts++; return ok(ACCOUNTS); }
   if (url.includes('/api/quota-history'))  { fetchCount.history++;  return ok(HISTORY); }
   if (url.includes('/api/activity'))       { fetchCount.activity++; return ok(ACTIVITY); }
@@ -146,7 +175,9 @@ function findIn(root, sel) { return findAllIn(root, sel)[0] || null; }
 function findCardByBtnTitle(accounts, re) {
   for (const card of accounts.children) {
     const btn = findIn(card, '.pin-btn');
-    if (btn && re.test(btn.title)) return { card, btn, msg: findIn(card, '.pin-msg') };
+    if (btn && re.test(btn.title)) {
+      return { card, btn, msg: findIn(card, '.pin-msg'), probe: findIn(card, '.probe-btn') };
+    }
   }
   return null;
 }
@@ -419,6 +450,83 @@ eval(js);
     String(oneBtn.btn.className).includes('active') &&
     String(oneBtn.card.className).includes('pinned');
   ok['the account that lost the pin updates too'] =
+    !String(twoBtn.btn.className).includes('active') &&
+    !String(twoBtn.card.className).includes('pinned');
+
+  // ── check now (#192) ─────────────────────────────────────────────────
+  // The gap this closes: a user buys a reset, spillway is deep in #90's
+  // re-probe backoff, and the only way to make it look was to restart the
+  // daemon. So the control has to exist per account, must not spend money
+  // without being told twice, and must say when it did.
+  const threeBtn = findCardByBtnTitle(els.accounts, /example-three/);
+  ok['check-now control rendered per account'] =
+    !!oneBtn.probe && !!twoBtn.probe && !!(threeBtn && threeBtn.probe);
+
+  // 502 (fixture: example-one's probe always fails): report it, offer no
+  // retry. Forcing cannot fix an upstream that did not answer.
+  // Guarded rather than assumed present, the same way the pin block guards
+  // its forced-retry click: a defect that drops the control entirely must
+  // show up as 'check-now control rendered per account' going red, not as a
+  // TypeError that kills the run before any assertion prints.
+  const clickProbe = (e) => { if (e && e.probe && e.probe._on) e.probe._on.click(); };
+  const probesBefore = probeCalls.length;
+  clickProbe(oneBtn);
+  await new Promise(r => setTimeout(r, 150));
+  ok['probe sends the account name and does not force by default'] =
+    probeCalls.length === probesBefore + 1 &&
+    probeCalls[probesBefore].name === 'you@example-one.com' &&
+    probeCalls[probesBefore].force === false;
+  ok['probe carries the bearer token'] =
+    probeCalls.length > probesBefore &&
+    probeCalls[probesBefore].auth === 'Bearer T';
+  ok['502 shows the server message'] =
+    String(oneBtn.msg.className).includes('show') &&
+    String(oneBtn.msg.className).includes('bad') &&
+    oneBtn.msg.innerHTML.includes('upstream timeout');
+  ok['502 offers no retry'] = findAllIn(oneBtn.msg, 'button').length === 0;
+  ok['check-now button returns to idle after a failed probe'] =
+    !!oneBtn.probe && !String(oneBtn.probe.className).includes('busy');
+
+  // A free probe (fixture: example-three succeeds unforced) must just work,
+  // with no talk of charges — that is the common case and the whole reason
+  // the refusal below is narrow.
+  clickProbe(threeBtn);
+  await new Promise(r => setTimeout(r, 150));
+  ok['a free probe succeeds with no ceremony'] =
+    String(threeBtn.msg.className).includes('ok') &&
+    threeBtn.msg.innerHTML.includes('5h');
+  ok['a free probe does not claim it was charged'] =
+    !threeBtn.msg.innerHTML.toLowerCase().includes('charged');
+
+  // 409 (fixture: example-two would be billed): surface the reason, offer a
+  // forced retry, and do NOT force silently.
+  const beforeConflict = probeCalls.length;
+  clickProbe(twoBtn);
+  await new Promise(r => setTimeout(r, 150));
+  ok['409 surfaces the charge refusal'] =
+    String(twoBtn.msg.className).includes('conflict') &&
+    twoBtn.msg.innerHTML.includes('spend money') &&
+    !twoBtn.msg.innerHTML.includes('spillway:');
+  ok['probe 409 offers a retry, not a silent force'] = findAllIn(twoBtn.msg, 'button').length === 2;
+  ok['409 did not force the probe'] =
+    probeCalls.length === beforeConflict + 1 && probeCalls[beforeConflict].force === false;
+  // The retry button has to say what it costs. "Yes" on a message the reader
+  // skimmed is not consent to a charge.
+  const forceProbe = findAllIn(twoBtn.msg, 'button').find(b => !String(b.className).includes('ghost'));
+  ok['the forced retry names the cost'] =
+    !!forceProbe && /charg/i.test(String(forceProbe.textContent || forceProbe._text || ''));
+
+  const beforeForce = probeCalls.length;
+  if (forceProbe) forceProbe._on.click();
+  await new Promise(r => setTimeout(r, 150));
+  ok['the forced retry carries force'] =
+    probeCalls.length === beforeForce + 1 && probeCalls[beforeForce].force === true;
+  ok['a charged probe says so'] =
+    String(twoBtn.msg.className).includes('ok') &&
+    twoBtn.msg.innerHTML.toLowerCase().includes('charged');
+  // Probing is not pinning. The two controls share a card and a message box;
+  // they must not share an effect.
+  ok['probing does not pin the account'] =
     !String(twoBtn.btn.className).includes('active') &&
     !String(twoBtn.card.className).includes('pinned');
 
