@@ -119,6 +119,14 @@ func (a *Account) overThresholdForWindowAt(name string, frac float64, now time.T
 // takes the existing hold-then-429 path, the same as when every account is
 // StateExhausted.
 //
+// The deadline it applies is MarkWindowRejected's clamped one, not the
+// provider's claim (issue #194): a hard exclusion suppresses the only
+// traffic that could ever correct it, so it is believed for at most
+// windowRejectionTTL. Past that the account is still DEPRIORITISED for the
+// family by the forged QuotaWindow — OverThresholdFor, which reads the
+// row's own longer (capped) reset — so the re-test lands on the last-resort
+// tier rather than the account springing back to tier 1.
+//
 // nil GoverningWindows (Kimi: no family-scoped provider) has nothing to
 // check — that provider's rejections go through pool.MarkExhausted's
 // account-wide StateExhausted instead, which eligible() already covers.

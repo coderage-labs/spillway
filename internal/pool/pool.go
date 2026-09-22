@@ -105,6 +105,14 @@ type Account struct {
 	// certain, so it must EXCLUDE selection for the family that window
 	// governs — including when the account is the only one in the pool —
 	// rather than merely deprioritise it.
+	//
+	// The deadline stored here is NOT the one the provider claimed. It is
+	// clamped by maxExhaustedHorizon and then by windowRejectionTTL
+	// (issue #194), because an exclusion is the one reading nothing can
+	// re-measure: selection sends no traffic for that family, and the probe
+	// cannot reach it. Past the TTL the account is merely deprioritised for
+	// the family — by the forged QuotaWindow, which keeps its own, longer
+	// (capped) reset — so an ordinary request can go and find out.
 	windowRejected map[string]time.Time
 	// probeBackoff is the current spacing enforced between exhausted-account
 	// re-probes (issue #90): zero until the first re-probe is rejected
@@ -677,11 +685,71 @@ const maxExhaustedHorizon = 9 * 24 * time.Hour
 const maxProbeBackoff = 24 * time.Hour
 
 func capExhaustion(until time.Time) time.Time {
-	if ceiling := time.Now().Add(maxExhaustedHorizon); until.After(ceiling) {
+	return capExhaustionAt(until, time.Now())
+}
+
+// capExhaustionAt is capExhaustion with the clock injected, so a cap can be
+// asserted as an exact computed time rather than by waiting (issues #98,
+// #134). The suffix marks the injected clock, nothing else.
+func capExhaustionAt(until, now time.Time) time.Time {
+	if ceiling := now.Add(maxExhaustedHorizon); until.After(ceiling) {
 		return ceiling
 	}
 	return until
 }
+
+// windowRejectionTTL bounds how long a confirmed per-window rejection keeps
+// EXCLUDING a family before ordinary traffic is allowed to re-test it
+// (issue #194).
+//
+// The exclusion needs an expiry for the same reason issue #151's overage
+// refusal does, and the argument is the same one line for line: the reading
+// suppresses the only request that could ever replace it. A rejected window
+// is dropped by SelectExcept's usable(), so no traffic for that family
+// reaches the account; the probe cannot reach it either, because probeModel
+// is a fixed non-fable model and accounts.readsSpent skips families the
+// probe never engages. So "do not send fable here" is a statement only
+// sending fable there can correct, and until this it was believed for
+// exactly as long as a parsed header claimed — with a daemon restart, which
+// drops the memory-only map, the only way out.
+//
+// The assumption it drops is the one #135 and #152 already demolished
+// twice: that a window can only refill at the moment its own header
+// predicted. #135 measured a 7d falling to 0.0 with its reported reset
+// still thirty-one hours ahead, and Anthropic ran an ad-hoc reset for every
+// user on 2026-09-04. A confirmed 429 is stronger evidence than a stored
+// utilization reading, which is why this expires the EXCLUSION only and
+// leaves the forged row (below) saying "spent" until its real reset: after
+// the TTL the account is demoted, not healthy.
+//
+// Thirty minutes, matching overageRefusalTTL deliberately rather than
+// #152's 6-24h ration, because the two re-tests cost different things and
+// this one is the cheap kind:
+//
+//   - #152 BUYS a request to re-measure a spent window, so it is rationed
+//     to about one a day.
+//   - Re-testing a window rejection is free in the case that matters. The
+//     forged row keeps the account over threshold for that family, so tier 1
+//     skips it and tier 2 admits it only when p.wouldBill says the request
+//     cannot be charged — CanOverage false, the default. The provider then
+//     answers the re-test with a 429 that costs nothing and carries fresh
+//     quota headers, and MarkWindowRejected records it again, restarting
+//     this TTL. So a genuinely spent family is re-tested at most once per
+//     account per TTL, not hammered.
+//   - Where extra usage IS permitted the account reaches only tier 3, the
+//     money tier, which is the tier the operator explicitly opted into and
+//     which is reached only when every free option is spent. That is the
+//     same bounded risk #151 documented and accepted, not a new one: the
+//     identical request would have been served there the moment the real
+//     `until` arrived.
+//
+// Thirty minutes also matches the default probe cadence — the pool's own
+// rhythm for "go and look again" — and bounds a wrong exclusion at half an
+// hour against the days one could previously last. A constant rather than a
+// setting for the same reason overageRefusalTTL is one: nothing about the
+// number decides whether money is spent, only how quickly a stale refusal
+// is noticed.
+const windowRejectionTTL = 30 * time.Minute
 
 // MarkExhausted marks an account out of quota until the given time (§6.1:
 // quota-429 rotates; the account is skipped until its window resets),
@@ -769,31 +837,74 @@ func (p *Pool) ClearExhausted(a *Account) {
 // happened to arrive on the header — which issue #54 explicitly does not
 // trust to already be at/above the switch threshold.
 //
-// The forged row carries until as its ResetAt, so it expires together with
-// the windowRejected entry (issue #135) rather than outliving it: before
-// windows expired at all, the map half of this cleared on the deadline and
-// the row half kept the account fableSpent forever.
+// That row is FORGED, not measured, so it is stamped Source
+// windowSourceRejected rather than "headers" (issue #194). Every other
+// window carries where its number came from; this one used to claim a
+// provider header had reported 100% when nothing had, which made the
+// exclusion restating itself indistinguishable from evidence for it on the
+// one surface a user checks to decide whether the exclusion is right.
+//
+// `until` is clamped twice, and the two clamps bound different things:
+//
+//   - capExhaustionAt bounds the ROW. maxExhaustedHorizon is #90's cap on a
+//     claimed reset, and this path never got it: a bad epoch parse or an
+//     org-level cap reported far past when it lifts would otherwise leave a
+//     synthetic "100% used, refills in eleven months" row deprioritising the
+//     family and refusing pins (providerWouldBill) for as long as the header
+//     claimed.
+//   - windowRejectionTTL bounds the EXCLUSION, which is the half with no
+//     escape: nothing re-measures a family selection refuses to route to.
+//
+// So the row can outlive the map entry, by design and by a bounded amount.
+// That is not #135's bug returning — there the row outlived it *forever*,
+// because windows did not expire at all, and QuotaWindow.currentAt now
+// retires this one on its own ResetAt. It is the #24/#54 distinction doing
+// its job: once the TTL lapses the account stops being EXCLUDED for the
+// family and goes back to being merely DEPRIORITISED for it, so a re-test
+// happens on the last-resort tier where a refusal costs nothing, instead of
+// the account springing back to tier 1 and looking healthy on a number
+// nobody re-measured.
 func (p *Pool) MarkWindowRejected(a *Account, name string, until time.Time) {
+	p.markWindowRejectedAt(a, name, until, time.Now())
+}
+
+// windowSourceRejected marks a QuotaWindow spillway wrote from a confirmed
+// upstream rejection rather than from a measurement (issue #194).
+// Deliberately a third value beside "headers" and "poll" rather than a new
+// field: Source already answers "where did this number come from", every
+// surface that shows provenance reads it, and a forged row is neither of
+// the two things it could previously say.
+const windowSourceRejected = "rejected"
+
+// markWindowRejectedAt is MarkWindowRejected with the clock injected, so
+// both clamps can be asserted as exact computed times rather than by
+// waiting (issues #98, #134).
+func (p *Pool) markWindowRejectedAt(a *Account, name string, until, now time.Time) {
+	until = capExhaustionAt(until, now)
+	deadline := until
+	if ttl := now.Add(windowRejectionTTL); deadline.After(ttl) {
+		deadline = ttl
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.windowRejected == nil {
 		a.windowRejected = map[string]time.Time{}
 	}
-	a.windowRejected[name] = until
+	a.windowRejected[name] = deadline
 
-	now := time.Now()
 	for i := range a.windows {
 		if a.windows[i].Name == name {
 			a.windows[i].Used = 1
 			a.windows[i].Limit = 1
 			a.windows[i].ResetAt = until
-			a.windows[i].Source = "headers"
+			a.windows[i].Source = windowSourceRejected
 			a.windows[i].FetchedAt = now
 			return
 		}
 	}
 	a.windows = append(a.windows, QuotaWindow{
-		Name: name, Limit: 1, Used: 1, ResetAt: until, Source: "headers", FetchedAt: now,
+		Name: name, Limit: 1, Used: 1, ResetAt: until, Source: windowSourceRejected, FetchedAt: now,
 	})
 }
 
