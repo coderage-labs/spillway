@@ -198,12 +198,20 @@
      decided, and the two can disagree -- a paid account can still be the
      one pinned. Unfilled until active so an unpinned card does not read as
      already carrying a decision. */
-  .pin-btn { font: inherit; font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+  /* "Check now" (#192) is the same class of control as pin -- an operator
+     instruction to the running daemon, on the same card -- so it takes the
+     same pill, not a second visual language beside it. */
+  .pin-btn, .probe-btn {
+             font: inherit; font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
              background: transparent; color: var(--ink-2); border: 1px solid var(--wall);
              border-radius: 999px; padding: .15rem .55rem; line-height: 1.4;
              cursor: pointer; white-space: nowrap; }
-  .pin-btn:hover { border-color: var(--water-a); color: var(--ink); }
+  .pin-btn:hover, .probe-btn:hover { border-color: var(--water-a); color: var(--ink); }
   .pin-btn.active { background: var(--water-b); color: #fff; border-color: var(--water-b); }
+  /* A probe is a real network request that can take seconds. Without a busy
+     state the button looks inert and gets clicked again, which is a second
+     request -- and on a forced probe, a second charge. */
+  .probe-btn.busy { opacity: .55; cursor: progress; }
   .tank.pinned { box-shadow: var(--shadow), inset 0 0 0 1px var(--water-a); }
   /* Absent, not empty, the rest of the time -- same reasoning as .hold: a
      result/conflict box that is almost never shown must not render as a
@@ -941,9 +949,22 @@ function ensureCard(a) {
   pinBtn.type = "button";
   pinBtn.className = "pin-btn";
   head.appendChild(pinBtn);
-  // Inline result/conflict box for the pin control. Sits right under the
-  // header so it appears next to the control that produced it, not in some
-  // shared banner far away that the reader has to connect back to a tank.
+  // "Check now" (#192): force one quota probe of this account, past the
+  // schedules that would otherwise suppress it. Next to pin because it is
+  // the same kind of thing -- an instruction to the running daemon about
+  // this one account -- and because the card is where a reader is standing
+  // when they notice the tank is stale.
+  const probeBtn = document.createElement("button");
+  probeBtn.type = "button";
+  probeBtn.className = "probe-btn";
+  probeBtn.textContent = "check now";
+  head.appendChild(probeBtn);
+  // Inline result/conflict box, shared by both controls. Sits right under
+  // the header so it appears next to the control that produced it, not in
+  // some shared banner far away that the reader has to connect back to a
+  // tank. Shared rather than one box per control: they are mutually
+  // exclusive in practice, and two boxes stacked under a 260px card is the
+  // overflow .tank-head already had to be taught to avoid.
   const pinMsg = div("pin-msg", card);
   // Always present, even when empty: an account whose name IS its display
   // name has nothing to show here, but dropping the line shortens the card
@@ -952,9 +973,10 @@ function ensureCard(a) {
   const sub = div("tank-sub", card);
   const cylWrap = div("cyls", card);
 
-  entry = { card, swatch, name, flag, pinBtn, pinMsg, addr, sub, cylWrap,
+  entry = { card, swatch, name, flag, pinBtn, probeBtn, pinMsg, addr, sub, cylWrap,
             cyls: new Map(), acctName: a.name };
   pinBtn.addEventListener("click", () => onPinClick(entry));
+  probeBtn.addEventListener("click", () => doProbe(entry, entry.acctName, false));
   tankCards.set(a.name, entry);
   document.getElementById("accounts").appendChild(card);
   return entry;
@@ -1111,6 +1133,92 @@ function onPinClick(entry) {
   else doPin(entry, entry.acctName, false);
 }
 
+// ── check now (#192) ─────────────────────────────────────────────────────
+// POST /api/accounts/probe. The status codes mirror the pin control's on
+// purpose: 409 is a refusal --force answers -- on this endpoint, "this probe
+// is a charged request" -- and gets offered as a choice rather than taken or
+// abandoned silently. 404/502 cannot be fixed by forcing, so they are
+// reported and stop there.
+async function probeRequest(name, force) {
+  const r = await fetch("/api/accounts/probe", auth({
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name, force: !!force }),
+  }));
+  const text = await r.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { /* error bodies are plain text */ }
+  return { status: r.status, text, json };
+}
+
+// The forced retry says what it will cost in the button itself. "Yes" on a
+// dialog whose text the reader skimmed is not consent to a charge; "probe
+// anyway (charges this account)" is.
+function showProbeConflict(entry, name, reasonText) {
+  entry.pinMsg.className = "pin-msg show conflict";
+  entry.pinMsg.innerHTML = "";
+  const p = document.createElement("p");
+  p.textContent = reasonText.replace(/^spillway:\s*/, "");
+  entry.pinMsg.appendChild(p);
+
+  const row = div("row", entry.pinMsg);
+  const force = document.createElement("button");
+  force.type = "button";
+  force.textContent = "probe anyway (charges this account)";
+  force.addEventListener("click", () => doProbe(entry, name, true));
+  row.appendChild(force);
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "ghost";
+  cancel.textContent = "cancel";
+  cancel.addEventListener("click", () => clearPinMsg(entry));
+  row.appendChild(cancel);
+}
+
+// probeWindowSummary renders the reading the probe just took, so the answer
+// lands on the control that asked rather than only after the next 5s poll
+// repaints the tanks. A window with no limit has no percentage to show, and
+// an expired one is a reading nobody has re-measured (#135), so neither is
+// printed as a bare number.
+function probeWindowSummary(wins) {
+  if (!wins || !wins.length) return "no quota windows reported";
+  return wins.map(w => {
+    if (w.expired) return w.name + " expired";
+    if (!(w.limit > 0)) return w.name + " no limit";
+    return w.name + " " + Math.round(100 * w.used / w.limit) + "%";
+  }).join(", ");
+}
+
+async function doProbe(entry, name, force) {
+  if (entry.probeBtn.className.indexOf("busy") >= 0) return; // one at a time
+  entry.probeBtn.className = "probe-btn busy";
+  entry.probeBtn.textContent = "checking…";
+  let res;
+  try {
+    res = await probeRequest(name, force);
+  } finally {
+    entry.probeBtn.className = "probe-btn";
+    entry.probeBtn.textContent = "check now";
+  }
+  if (res.status === 200) {
+    const billed = res.json && res.json.billed
+      ? "charged — this account was out of quota with extra usage permitted. " : "";
+    showPinNote(entry, "ok", billed + "checked " + short(name) + ": " +
+      probeWindowSummary(res.json && res.json.quotaWindows));
+    refresh();
+    return;
+  }
+  if (res.status === 409 && !force) {
+    showProbeConflict(entry, name, res.text);
+    return;
+  }
+  // 404, 502, or a forced retry refused again: say why and stop. No retry
+  // offer -- the caller already chose once, and nothing here is fixed by
+  // asking the same question a third time.
+  showPinNote(entry, "bad", res.text || ("probe failed (" + res.status + ")"));
+}
+
 function renderTanks(list) {
   const figures = document.getElementById("figures");
   figures.innerHTML = "";
@@ -1156,6 +1264,7 @@ function renderTanks(list) {
     entry.pinBtn.title = isPinned
       ? "Pinned to " + short(a.name) + " — click to return to automatic selection"
       : "Pin the pool to " + short(a.name);
+    entry.probeBtn.title = "Re-measure " + short(a.name) + "'s quota now, past the probe schedule";
     // Blank rather than a duplicate when the name is already the label.
     entry.addr.innerHTML = short(a.name) !== a.name ? esc(a.name) : "&nbsp;";
     // Extra usage refills on a billing period, not a quota window, so it can
