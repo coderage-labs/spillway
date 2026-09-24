@@ -4,10 +4,17 @@ import (
 	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
+
+// skipNodeEnv is the only way to not run the dashboard JS harness. It is an
+// env var rather than a silent t.Skip so that "this surface is untested right
+// now" is a thing somebody typed, greppable in CI config, instead of a state
+// a machine can drift into unnoticed.
+const skipNodeEnv = "SPILLWAY_SKIP_NODE_TESTS"
 
 // TestDashboardJS runs the embedded dashboard's JavaScript against a fake DOM
 // (testdata/ui_dom_test.js) and asserts it renders accounts, quota bars and
@@ -17,13 +24,28 @@ import (
 // successful requests deliberately emit no SSE events, so an SSE-only refresh
 // leaves quota bars and the request log static while the pool is being used.
 //
-// Node is a test-only convenience, never a build dependency — the repo stays
-// `go build`-only, so this skips where node is unavailable (e.g. CI images
-// without it).
+// Node stays a test-only dependency — the repo is still `go build`-only — but
+// a MISSING node is a hard failure, not a skip (#202). The dashboard is the
+// one surface with no compiler and no type checker behind it, so this harness
+// is the whole of its test coverage; a silent skip is how it stops being
+// tested without anyone noticing, which is the same class of quiet agreement
+// that let the harness itself invent elements and answer writes with reads.
+// CI installs node on all three runners, so a missing node here means a
+// developer machine, and the message says exactly what to do about it.
 func TestDashboardJS(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node not installed; skipping dashboard JS smoke test")
+		if os.Getenv(skipNodeEnv) != "" {
+			t.Skipf("%s is set: skipping the dashboard JS harness. The dashboard is NOT "+
+				"being tested in this run.", skipNodeEnv)
+		}
+		t.Fatalf("node is required for the dashboard JS harness "+
+			"(testdata/ui_dom_test.js) and was not found on PATH.\n"+
+			"The dashboard has no compiler behind it, so skipping this leaves the whole "+
+			"surface untested.\n"+
+			"Install node (macOS: brew install node; Debian/Ubuntu: apt install nodejs), "+
+			"or set %s=1 to skip it locally. CI installs node, so %s must never be set there.",
+			skipNodeEnv, skipNodeEnv)
 	}
 	out, err := exec.Command(node, "testdata/ui_dom_test.js", "static/index.html").CombinedOutput()
 	t.Logf("dashboard JS harness output:\n%s", out)
