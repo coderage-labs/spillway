@@ -82,16 +82,16 @@ func TestPickAccountPrefersServingThenHealthiest(t *testing.T) {
 	rich := slAccount{Name: "rich", State: "ok", Windows: []slWindow{win("5h", 0.1, 1)}}
 	poor := slAccount{Name: "poor", State: "ok", Windows: []slWindow{win("5h", 0.9, 1)}}
 
-	if got := pickAccount([]slAccount{rich, serving, poor}); got.Name != "busy" {
+	if got := pickAccount([]slAccount{rich, serving, poor}, ""); got.Name != "busy" {
 		t.Errorf("serving account should win, got %q", got.Name)
 	}
-	if got := pickAccount([]slAccount{poor, rich}); got.Name != "rich" {
+	if got := pickAccount([]slAccount{poor, rich}, ""); got.Name != "rich" {
 		t.Errorf("healthiest should win, got %q", got.Name)
 	}
 	// An account is only as good as its WORST window.
 	mixed := slAccount{Name: "mixed", State: "ok",
 		Windows: []slWindow{win("5h", 0, 1), win("7d", 0.95, 1)}}
-	if got := pickAccount([]slAccount{mixed, poor}); got.Name != "poor" {
+	if got := pickAccount([]slAccount{mixed, poor}, ""); got.Name != "poor" {
 		t.Errorf("a spent weekly window should sink the account, got %q", got.Name)
 	}
 }
@@ -99,7 +99,7 @@ func TestPickAccountPrefersServingThenHealthiest(t *testing.T) {
 func TestPickAccountSkipsUnusableAndReportsNone(t *testing.T) {
 	dry := slAccount{Name: "dry", State: "exhausted", Windows: []slWindow{win("5h", 1, 1)}}
 	off := slAccount{Name: "off", State: "disabled"}
-	if got := pickAccount([]slAccount{dry, off}); got != nil {
+	if got := pickAccount([]slAccount{dry, off}, ""); got != nil {
 		t.Errorf("no usable account should return nil, got %q", got.Name)
 	}
 }

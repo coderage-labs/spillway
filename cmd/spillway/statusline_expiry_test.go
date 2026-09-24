@@ -32,7 +32,7 @@ func TestPickAccountIgnoresExpiredWindow(t *testing.T) {
 		win("5h", 0, 1),
 		{Name: "7d", Used: 1, Limit: 1, ResetAt: time.Now().Add(-time.Hour), Expired: true},
 	}}
-	if got := pickAccount([]slAccount{poor, mixed}); got.Name != "mixed" {
+	if got := pickAccount([]slAccount{poor, mixed}, ""); got.Name != "mixed" {
 		t.Errorf("an expired spent window sank the account; got %q, want mixed", got.Name)
 	}
 }
