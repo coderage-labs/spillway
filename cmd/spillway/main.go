@@ -670,7 +670,18 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 	if err != nil {
 		return nil, err
 	}
-	mgr := accounts.NewManager(cfgPath, accounts.DefaultSource(), store, logger)
+	return buildPoolFrom(cfg, cfgPath, accounts.DefaultSource(), store, logger, now, notifier)
+}
+
+// buildPoolFrom is buildPool with its two machine-wide dependencies passed
+// in: the config path, and the claude CLI's credential store. Split out so
+// the zero-accounts bootstrap path is reachable from a test — the whole
+// point of issue #131 is what that fallback does, and a test that has to
+// open the user's real login keychain to find out is not a test anyone can
+// run.
+func buildPoolFrom(cfg *config.Config, cfgPath string, src accounts.Source, store secrets.Store,
+	logger *slog.Logger, now time.Time, notifier *notify.Notifier) (*pool.Pool, error) {
+	mgr := accounts.NewManager(cfgPath, src, store, logger)
 	// Issue #101: "account-disabled" fires wherever this Manager disables an
 	// account (dead refresh token, rejected static key, failed keychain
 	// reload).
@@ -680,7 +691,7 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 	for _, a := range cfg.Accounts {
 		var acct *pool.Account
 		if a.Source == "keychain" {
-			oauth, err := accounts.LoadClaude(accounts.DefaultSource(), now)
+			oauth, err := accounts.LoadClaude(src, now)
 			if err != nil {
 				return nil, fmt.Errorf("account %q: %w", a.Name, err)
 			}
@@ -698,10 +709,11 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 				"expires", time.UnixMilli(oauth.ExpiresAt).UTC().Format(time.RFC3339),
 			)
 		} else {
-			acct, err = accounts.ResolveYAML(a, store)
+			resolved, err := accounts.ResolveYAML(a, store)
 			if err != nil {
 				return nil, err
 			}
+			acct = resolved
 			logger.Info("account loaded",
 				"name", a.Name,
 				"expires", time.UnixMilli(a.ExpiresAt).UTC().Format(time.RFC3339),
@@ -710,7 +722,7 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 		accts = append(accts, acct)
 	}
 	if len(accts) == 0 {
-		oauth, err := accounts.LoadClaude(accounts.DefaultSource(), now)
+		oauth, err := accounts.LoadClaude(src, now)
 		if err != nil {
 			return nil, err
 		}
@@ -720,9 +732,17 @@ func buildPool(cfg *config.Config, store secrets.Store, logger *slog.Logger, now
 			"scopes", strings.Join(oauth.Scopes, ","),
 			"expires", time.UnixMilli(oauth.ExpiresAt).UTC().Format(time.RFC3339),
 		)
-		accts = append(accts, pool.NewAccount("local", pool.SourceKeychain,
-			oauth.AccessToken, oauth.RefreshToken, oauth.ExpiresAt, ""))
-		accts[0].Type = "claude-oauth"
+		fallback := pool.NewAccount("local", pool.SourceKeychain,
+			oauth.AccessToken, oauth.RefreshToken, oauth.ExpiresAt, "")
+		fallback.Type = "claude-oauth"
+		// Issue #131: the one thing that marks the bootstrap fallback, so
+		// Pool.DisplaceBootstrap can drop it the moment a genuinely
+		// configured account arrives — via the config watcher or via
+		// POST /api/accounts/add, which is the divergence #131 reports.
+		// Only reached when cfg.Accounts is empty, so this can never flag
+		// an account the config named.
+		fallback.SetBootstrap(true)
+		accts = append(accts, fallback)
 	}
 
 	// Config-level disable: parked by the operator, distinct from an account

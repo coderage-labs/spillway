@@ -61,6 +61,12 @@ type accountAddResponse struct {
 	// "still restart-only" case).
 	RestartRequired bool   `json:"restartRequired"`
 	Reason          string `json:"reason,omitempty"`
+	// Displaced names the zero-accounts bootstrap fallback this add pushed
+	// out of the running pool, or "" (issue #131). Reported rather than
+	// done silently: the account that just left rotation is the user's own
+	// borrowed claude CLI login, and "your pool no longer includes it" is
+	// exactly the kind of thing that should not be discovered later.
+	Displaced string `json:"displaced,omitempty"`
 }
 
 // handleAccountAdd never reports "the account was already there" as an
@@ -91,6 +97,13 @@ func (s *Server) handleAccountAdd(w http.ResponseWriter, r *http.Request) {
 		if a.Name == req.Name {
 			wasDisabled := a.State() == pool.StateDisabled
 			a.SetCredentials(req.AccessToken, req.RefreshToken, req.ExpiresAt)
+			// Issue #131: logging in under the fallback's own name is the
+			// one way it stops being the fallback — spillway now holds its
+			// own grant for it and the config records it, so it is a
+			// genuinely configured account from here on. Clearing the flag
+			// is not cosmetic: left set, the next ordinary add would
+			// displace a real pool member.
+			a.SetBootstrap(false)
 			if wasDisabled && a.State() != pool.StateDisabled {
 				// Issue #105: a live re-auth reviving a disabled credential
 				// is a transition into potentially-usable capacity — wake
@@ -136,7 +149,14 @@ func (s *Server) handleAccountAdd(w http.ResponseWriter, r *http.Request) {
 	if added && s.refreshHosts != nil {
 		s.refreshHosts()
 	}
-	s.writeJSON(w, accountAddResponse{Added: added, RestartRequired: restart, Reason: reason})
+	// Issue #131: the first genuinely configured account displaces the
+	// zero-accounts bootstrap fallback. Exactly the call the config
+	// watcher's apply makes, so a live add and an external edit of the same
+	// config leave the same pool — and the same pool a restart would build,
+	// where buildPool never synthesises the fallback at all once the file
+	// names an account.
+	displaced := s.pool.DisplaceBootstrap()
+	s.writeJSON(w, accountAddResponse{Added: added, RestartRequired: restart, Reason: reason, Displaced: displaced})
 }
 
 // checkUpstreamLive reports whether upstream needs a restart before

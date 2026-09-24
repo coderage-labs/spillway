@@ -112,6 +112,12 @@ type accountAddResult struct {
 	Added           bool   `json:"added"`
 	RestartRequired bool   `json:"restartRequired"`
 	Reason          string `json:"reason"`
+	// Displaced names the zero-accounts bootstrap fallback this add pushed
+	// out of the running pool, or "" (issue #131). Printed rather than
+	// swallowed: the credential that just left rotation is the user's own
+	// claude CLI login, and a pool member silently disappearing is the kind
+	// of thing that should not be discovered later.
+	Displaced string `json:"displaced"`
 }
 
 // liveAddAccount tells a reachable daemon to add req to its pool
@@ -138,6 +144,10 @@ func liveAddAccount(req accountAddPayload) string {
 	switch {
 	case resp.RestartRequired:
 		return fmt.Sprintf("applied to the running daemon for ordinary requests, but %s", resp.Reason)
+	case resp.Added && resp.Displaced != "":
+		return fmt.Sprintf("added to the running daemon immediately — selectable for the very next request; "+
+			"%q, the startup fallback borrowing the claude CLI's own login, has left rotation now that the pool "+
+			"has a configured account (issue #131 — a restart would have dropped it too)", resp.Displaced)
 	case resp.Added:
 		return "added to the running daemon immediately — selectable for the very next request"
 	default:
