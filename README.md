@@ -259,7 +259,10 @@ spillway statusline install
 
 The bottom row is the pool: serving account, the model **actually** going
 upstream, a headroom bar per quota window, `✈` requests in flight and `💀`
-accounts with nothing left. The top row is the session Claude Code is running,
+accounts with nothing left. A `📌` after the account name means selection is
+pinned there — the row is describing one account because it was told to, not
+because the pool chose. While a pin is set the row always shows the pinned
+account, whatever its headroom, because that is where the next request goes. The top row is the session Claude Code is running,
 read from the JSON payload it pipes to the status line on every render:
 working directory, git branch, the model the **CLI** selected with its effort
 level, how full the context window is, and the session's cumulative tokens
@@ -275,7 +278,9 @@ be invisible.
 columns wide, colour escapes are none) and trimmed to fit, lowest value first:
 on the top row the rate, then the branch, then the path is abbreviated
 (`~/Repos/spillway` → `~/spillway`); on the bottom row `💀`, then `✈`, then
-the fable window. Width comes from `COLUMNS`, or from
+the fable window. The `📌` is never trimmed: it costs three columns, it is
+only there while a pin is set, and dropping it would not lose a number — it
+would make a directed pool look like a rotating one. Width comes from `COLUMNS`, or from
 `SPILLWAY_STATUSLINE_COLUMNS` if you need to set it explicitly; with neither,
 nothing is trimmed.
 
@@ -1081,6 +1086,26 @@ Ambiguous input lists the candidates and pins nothing — it never guesses.
 what is currently pinned (or that selection is automatic) and which accounts
 you could switch to, marking any that would serve from paid extra usage or
 that are parked, disabled or already spent.
+
+**A pin is visible where you are already looking.** `spillway status` opens
+with a banner naming the pinned account and what the pin suppresses, and the
+status line marks the pinned account with `📌`:
+
+```
+pinned to arena — rotation, priority and thresholds are bypassed
+  `spillway switch --auto` restores automatic selection; a daemon restart also clears it
+
+ACCOUNT  TYPE          STATE  IN FLIGHT  5H LEFT
+arena    claude-oauth  ok             2      60%
+beta     claude-oauth  ok             0      90%
+```
+
+The banner sits above the table rather than inside it: the table is unchanged
+by pinning, so anything parsing it sees exactly what it saw before. With no
+pin set, nothing is printed above the table at all. Without this, a pinned
+pool and an automatic one printed an identical table while behaving nothing
+alike, and the only way to confirm a pin had been cleared was to read
+`/api/state` and notice a field was absent.
 
 A pin survives the rotate-away threshold — naming an account is a statement
 that you want it — but not exhaustion: holding every request while healthy

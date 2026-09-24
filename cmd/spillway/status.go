@@ -67,6 +67,18 @@ func statusTable(api *adminAPI, out io.Writer) error {
 		fmt.Fprintln(out, "no accounts")
 		return nil
 	}
+
+	// One fetch of /api/state for both halves of this render — the pin
+	// banner above the table and the unpooled note below it. Two fetches
+	// would let one command report two different moments.
+	//
+	// A missing or failing /api/state is not fatal and adds nothing: an
+	// older daemon has no such section, and the accounts table below is
+	// still the answer to what was asked. statusline.go takes the same line.
+	var st statusState
+	_ = api.get("/api/state", &st)
+
+	printPin(st.Pinned, out)
 	// One column per quota window, in the order they are first seen. Accounts
 	// can report different windows (5h/7d on Claude, one on Kimi), so the
 	// columns are the union rather than the first account's set.
@@ -138,8 +150,53 @@ func statusTable(api *adminAPI, out io.Writer) error {
 		fmt.Fprintln(out, line)
 	}
 
-	printUnpooled(api, out)
+	printUnpooled(st, out)
 	return nil
+}
+
+// statusState is the slice of /api/state the human view reads.
+type statusState struct {
+	// Pinned names the account selection has been directed at (#158).
+	Pinned   string `json:"pinned"`
+	Unpooled *struct {
+		Requests        int      `json:"requests"`
+		Paths           int      `json:"paths"`
+		InferenceShaped []string `json:"inferenceShaped"`
+	} `json:"unpooled"`
+}
+
+// printPin announces a pin above the table (issue #158).
+//
+// A pin overrides every routing decision spillway makes — threshold,
+// priority, stickiness, rotation — so a pinned pool and an automatic one
+// print an identical table while behaving nothing alike: the pinned one is a
+// single-account setup wearing a multi-account dashboard. Confirming a pin
+// was cleared used to mean reading /api/state and inferring from an
+// omitempty field being ABSENT, which is both a check nobody performs and a
+// poor signal to reason from.
+//
+// Above the table, not below it: this is the frame the rows are read in, not
+// a footnote about them. The overage and unpooled notes below the table are
+// facts about particular rows; a pin is the mode the whole table is in.
+//
+// A header line rather than a column or a marked row, for two reasons. The
+// table is read by people who know its shape and possibly parsed by scripts,
+// and a line that appears only while a pin is set is a smaller change than a
+// column that appears always or a row whose account cell grows a marker. And
+// naming the account outright is what keeps it unambiguous in the common
+// case — the pinned account is usually also the one serving, which is
+// precisely where a marker sitting in a busy row is hardest to pick out.
+func printPin(pinned string, out io.Writer) {
+	if pinned == "" {
+		return
+	}
+	fmt.Fprintf(out, "pinned to %s — rotation, priority and thresholds are bypassed\n", pinned)
+	// `switch --auto`, not bare `spillway switch`: bare switch REPORTS the
+	// pin, it does not clear it (see runSwitchReport). Printing the wrong
+	// incantation here would leave the pin set by someone who believed they
+	// had followed the instruction.
+	fmt.Fprintln(out, "  `spillway switch --auto` restores automatic selection; a daemon restart also clears it")
+	fmt.Fprintln(out)
 }
 
 // printUnpooled reports traffic spillway passed through without a pooled
@@ -153,18 +210,11 @@ func statusTable(api *adminAPI, out io.Writer) error {
 // the log; this is the same fact for someone who runs `spillway status`
 // rather than tailing a log file.
 //
-// A missing or failing /api/state is not fatal and prints nothing: an older
-// daemon has no such section, and the accounts table above is still the
-// answer to what was asked. statusline.go takes the same line.
-func printUnpooled(api *adminAPI, out io.Writer) {
-	var st struct {
-		Unpooled *struct {
-			Requests        int      `json:"requests"`
-			Paths           int      `json:"paths"`
-			InferenceShaped []string `json:"inferenceShaped"`
-		} `json:"unpooled"`
-	}
-	if err := api.get("/api/state", &st); err != nil || st.Unpooled == nil {
+// A daemon too old to serve /api/state leaves the section nil and prints
+// nothing: the accounts table above is still the answer to what was asked.
+// statusline.go takes the same line.
+func printUnpooled(st statusState, out io.Writer) {
+	if st.Unpooled == nil {
 		return
 	}
 	fmt.Fprintf(out, "unpooled: %d requests on %d paths spillway does not recognise, passed through on the client's own credential\n",

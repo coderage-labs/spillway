@@ -195,6 +195,12 @@ type slState struct {
 	Disabled  int        `json:"disabled"`
 	InFlight  int        `json:"inFlight"`
 	NextReset *time.Time `json:"nextReset"`
+	// Pinned mirrors /api/state's pinned (#158): the account selection has
+	// been directed at, if any. The status line needs it for two separate
+	// reasons — it decides WHICH account is worth showing (a pin means every
+	// next request lands there, whatever the headroom says), and it is the
+	// answer to "why is only one of my accounts being used".
+	Pinned string `json:"pinned"`
 	// StaleCA mirrors /api/state's staleCA (issue #66): true while a MITM
 	// CA regeneration this daemon run performed looks like it has left a
 	// client stuck trusting the old anchor. See degraded() for how it's
@@ -260,9 +266,29 @@ func fetchAccounts(addr, token string) ([]slAccount, error) {
 	return out, getJSON(addr, token, "/api/accounts", &out)
 }
 
-// pickAccount returns the one worth showing: whoever is serving, else the
-// healthiest — that is the account the next request will land on.
-func pickAccount(list []slAccount) *slAccount {
+// pickAccount returns the one worth showing: the pinned account if there is
+// one, else whoever is serving, else the healthiest — that is the account
+// the next request will land on.
+//
+// The pin comes first and beats even an in-flight request (#158). Ranking by
+// headroom while a pin is set answers a question nobody asked: the pool is
+// not choosing, it has been told, and the next request goes to the pinned
+// account however spent it is. Before this, a pin on a low-headroom account
+// made the status line name a DIFFERENT account — the healthiest — which is
+// worse than saying nothing about the pin at all. An in-flight request on
+// some other account is the tail of whatever preceded the pin; it is
+// finishing, not being chosen.
+func pickAccount(list []slAccount, pinned string) *slAccount {
+	if pinned != "" {
+		for i := range list {
+			if list[i].Name == pinned {
+				return &list[i]
+			}
+		}
+		// Pinned to a name that is in no account: fall through rather than
+		// return nothing. `spillway status` reports the pin properly; the
+		// prompt is better off describing the pool than going blank.
+	}
 	var best *slAccount
 	bestHead := -2.0
 	for i := range list {
@@ -517,7 +543,7 @@ func renderPool(p palette, list []slAccount, st slState, sess *slSession, now ti
 		return b.String()
 	}
 
-	a := pickAccount(list)
+	a := pickAccount(list, st.Pinned)
 	if a == nil {
 		// Nothing usable and nothing parked — `exhausted: fail` mode, or the
 		// credentials are gone. Say when it lifts if we know.
@@ -532,6 +558,20 @@ func renderPool(p palette, list []slAccount, st slState, sess *slSession, now ti
 	var b strings.Builder
 	b.WriteString(p.dim("⛁ "))
 	b.WriteString(a.display())
+
+	// 📌: this account is not the pool's choice, it is the pool's
+	// instruction (#158). Rotation, priority and thresholds are all
+	// bypassed, which makes it the explanation for everything else on the
+	// row describing a single account — the exact thing someone is looking
+	// for when they wonder why only one of their accounts is being used.
+	//
+	// Deliberately NOT in poolTrim's reduction order. It costs three
+	// columns, it appears only while a pin is set, and it is a mode rather
+	// than a datum: dropping it to fit would not lose a number, it would
+	// make a directed pool look like a rotating one, which is the bug.
+	if st.Pinned != "" && st.Pinned == a.Name {
+		b.WriteString(p.dim(" 📌"))
+	}
 
 	// 🎯 is what spillway SERVED, as against the top row's 🤖 — what the CLI
 	// selected. Suppressed only when they are the same model.
