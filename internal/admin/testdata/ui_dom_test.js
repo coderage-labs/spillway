@@ -79,13 +79,39 @@ const probeCalls = [];
 // records what the dashboard itself sent to POST/DELETE /api/pin.
 let pinState = { pinned: "" };
 const pinCalls = [];
-global.fetch = async (u, opts) => {
-  const url = String(u);
-  const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
-  // Before the /api/accounts branch: that one matches by substring, so a
-  // probe POST would otherwise be answered with the account list and the
-  // control would look like it worked.
-  if (url.includes('/api/accounts/probe')) {
+// ── fixture routes ──────────────────────────────────────────────────────
+// Keyed on METHOD and the exact path, never a substring (#202). Two defects
+// of that shape have already shipped here: /api/settings matched by
+// substring with no method branch, so a PUT was answered with the read
+// fixture and a write that never happened looked like it worked; and
+// /api/accounts matched by substring, which would have swallowed the
+// /api/accounts/probe POST (#192) and made that control look functional
+// too. A path that exists but does not answer this method is a hard error,
+// not a fallback — a lenient fixture is how the page under test gets to be
+// wrong and pass.
+const ok200 = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+const ROUTES = {
+  'GET /api/accounts':      () => { fetchCount.accounts++; return ok200(ACCOUNTS); },
+  'GET /api/quota-history': () => { fetchCount.history++;  return ok200(HISTORY); },
+  'GET /api/activity':      () => { fetchCount.activity++; return ok200(ACTIVITY); },
+  'GET /api/requests':      () => { fetchCount.requests++; return ok200(REQUESTS); },
+  'GET /api/state':         () => { fetchCount.state++;    return ok200(pinState); },
+  'GET /api/settings':      () => { fetchCount.settings++; return ok200(SETTINGS); },
+
+  'PUT /api/settings': (opts) => {
+    // The Authorization header is recorded too — a write sent with auth()
+    // applied to the URL instead of the init is unauthenticated and
+    // invisible on a loopback dashboard, which has no token at all.
+    const body = JSON.parse(opts.body);
+    settingsPuts.push({ body, auth: (opts.headers || {}).Authorization || '' });
+    // Mirrors the server: config.Settings' pointer fields mean only the keys
+    // actually named are applied, and everything else is left as it was. So
+    // a partial body here must leave the rest of SETTINGS alone.
+    Object.assign(SETTINGS, body);
+    return { ok: true, status: 200, text: async () => JSON.stringify(SETTINGS), json: async () => SETTINGS };
+  },
+
+  'POST /api/accounts/probe': (opts) => {
     const req = JSON.parse(opts.body);
     // The Authorization header is recorded, not just the body: the pin
     // control shipped once with auth() applied to the URL instead of the
@@ -106,42 +132,11 @@ global.fetch = async (u, opts) => {
     const body = { account: req.name, billed: !!req.force,
                    quotaWindows: [{ name: '5h', limit: 1, used: 0.07 }, { name: '7d', limit: 1, used: 0 }] };
     return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
-  }
-  if (url.includes('/api/accounts'))       { fetchCount.accounts++; return ok(ACCOUNTS); }
-  if (url.includes('/api/quota-history'))  { fetchCount.history++;  return ok(HISTORY); }
-  if (url.includes('/api/activity'))       { fetchCount.activity++; return ok(ACTIVITY); }
-  if (url.includes('/api/requests'))       { fetchCount.requests++; return ok(REQUESTS); }
-  if (url.includes('/api/settings')) {
-    const method = (opts && opts.method) || 'GET';
-    if (method === 'PUT') {
-      // Branched on the METHOD, for the same reason /api/accounts/probe is
-      // branched before /api/accounts: answering a write with the read
-      // fixture makes a control that never wrote anything look like it
-      // worked, and that is exactly the failure this file exists to catch.
-      // The Authorization header is recorded too — a write sent with auth()
-      // applied to the URL instead of the init is unauthenticated and
-      // invisible on a loopback dashboard, which has no token at all.
-      const body = JSON.parse(opts.body);
-      settingsPuts.push({ body, auth: (opts.headers || {}).Authorization || '' });
-      // Mirrors the server: config.Settings' pointer fields mean only the
-      // keys actually named are applied, and everything else is left as it
-      // was. So a partial body here must leave the rest of SETTINGS alone.
-      Object.assign(SETTINGS, body);
-      return { ok: true, status: 200, text: async () => JSON.stringify(SETTINGS), json: async () => SETTINGS };
-    }
-    fetchCount.settings++;
-    return ok(SETTINGS);
-  }
-  if (url.includes('/api/state'))          { fetchCount.state++;    return ok(pinState); }
-  if (url.includes('/api/pin')) {
-    const method = (opts && opts.method) || 'POST';
-    if (method === 'DELETE') {
-      pinCalls.push({ method });
-      pinState = { pinned: "" };
-      return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
-    }
+  },
+
+  'POST /api/pin': (opts) => {
     const req = JSON.parse(opts.body);
-    pinCalls.push({ method, account: req.account, force: req.force });
+    pinCalls.push({ method: 'POST', account: req.account, force: req.force });
     // Fixed fixture behaviour, keyed by account, so the test can exercise
     // every documented outcome without a real backend:
     //   example-one -> always 400 (malformed/unknown account: no retry)
@@ -156,8 +151,28 @@ global.fetch = async (u, opts) => {
     pinState = { pinned: req.account };
     const body = { pinned: req.account, warning: 'prompt cache is per account, so the next request will miss it' };
     return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+  },
+
+  'DELETE /api/pin': () => {
+    pinCalls.push({ method: 'DELETE' });
+    pinState = { pinned: "" };
+    return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+  },
+};
+global.fetch = async (u, opts) => {
+  const path = String(u).split('?')[0].split('#')[0];
+  const method = String((opts && opts.method) || 'GET').toUpperCase();
+  const h = ROUTES[method + ' ' + path];
+  if (h) return h(opts || {});
+  const otherMethods = Object.keys(ROUTES)
+    .filter(k => k.slice(k.indexOf(' ') + 1) === path)
+    .map(k => k.slice(0, k.indexOf(' ')));
+  if (otherMethods.length) {
+    throw new Error('fixture: ' + method + ' ' + path + ' has no route; this path answers only ' +
+      otherMethods.join('/') + '. A write must never be answered by a read (#202).');
   }
-  return { ok: false, status: 404, json: async () => ({}) };
+  throw new Error('fixture: no route for ' + method + ' ' + path +
+    ' — the page fetched something this harness does not model.');
 };
 global.EventSource = class { constructor() { this.onmessage = this.onopen = this.onerror = null; } };
 
@@ -175,6 +190,19 @@ const waves = [];
 // dashboard sets SVG classes with setAttribute — and a matcher that only
 // looked at the property silently found none of them.
 function matches(el, sel) {
+  // Attribute selectors, for collectSettings' document.querySelectorAll(
+  // "[data-account]"). Without this the account rows were unreachable and
+  // every per-account setting went uncollected — see the querySelectorAll
+  // comment on `document` below (#202).
+  if (sel.startsWith('[') && sel.endsWith(']')) {
+    const name = sel.slice(1, -1);
+    const dm = /^data-(.+)$/.exec(name);
+    if (dm) {
+      const key = dm[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      return !!el.dataset && el.dataset[key] !== undefined;
+    }
+    return !!el.attrs && el.attrs[name] !== undefined;
+  }
   // Tag selectors as well as classes. Without this findAllIn(root, 'input')
   // returned [] for every call, so the assertion that extra usage is NOT an
   // editable input passed while testing nothing at all.
@@ -266,9 +294,39 @@ function mkEl(tag) {
   });
   return el;
 }
+// Every id index.html's own markup declares, seeded as an empty element —
+// that is what a browser hands the page on load. Anything else must have been
+// given an id by the page at runtime (the "set-<key>" and "park-<name>"
+// controls, through the id setter above). A lookup that is neither is a test,
+// or a page, asking for something that does not exist, and inventing an
+// element for it is how collectSettings came to read phantoms and submit a
+// body the real server would 400 (#202).
+const MARKUP_IDS = [...html.replace(/<script>[\s\S]*?<\/script>/g, '')
+  .matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
+if (!MARKUP_IDS.length) throw new Error('harness: index.html declares no ids — the id scrape is broken');
+for (const id of MARKUP_IDS) mkEl().id = id;
+
 global.document = {
-  getElementById: (id) => els[id] || (els[id] = mkEl()),
-  querySelectorAll: () => [],
+  getElementById: (id) => {
+    const el = els[id];
+    if (!el) {
+      throw new Error('getElementById(' + JSON.stringify(id) + '): no such element. ' +
+        'index.html does not declare it and the page never created it. ' +
+        'The harness will not invent one (#202).');
+    }
+    return el;
+  },
+  // Searches every root the markup declares, rather than returning nothing.
+  // The stub used to be `() => []`, which is the same lie as the phantom
+  // getElementById and hid the same kind of defect: collectSettings reaches
+  // the label, priority and park controls ONLY through
+  // querySelectorAll("[data-account]"), so every per-account setting was
+  // silently dropped from every Save and no assertion could see it (#202).
+  querySelectorAll: (sel) => {
+    const out = [];
+    for (const id of MARKUP_IDS) findAllIn(els[id], sel, out);
+    return out;
+  },
   createElement: (tag) => mkEl(tag),
   createElementNS: (_ns, tag) => mkEl(tag),
   addEventListener: (ev, fn) => { if (ev === 'DOMContentLoaded') fn(); },
@@ -285,7 +343,29 @@ global.window = global;
 // the page's own strictness.
 eval(js + '\n;global.__page = { buildSettings };');
 
-(async () => {
+// Results live out here, and every exit path prints them. A throw used to
+// take the whole run with it, so a missing element crashed the harness
+// instead of failing it (#168) — and now that an unknown id throws by design
+// (#202), that mattered more than ever. An abort is reported as a named
+// failure with whatever was already established still printed.
+const ok = {};
+function report() {
+  let fail = 0;
+  for (const [k, v] of Object.entries(ok)) { console.log((v ? 'PASS' : 'FAIL') + ': ' + k); if (!v) fail++; }
+  console.log('fetches:', JSON.stringify(fetchCount));
+  process.exit(fail ? 1 : 0);
+}
+function abort(what, err) {
+  console.log('--- ' + what + ' ---\n' + ((err && err.stack) || err));
+  ok['the harness ran to completion'] = false;
+  report();
+}
+// The page's controls are fire-and-forget: a click handler returns a promise
+// nobody awaits, so a rejection inside one would otherwise kill node with no
+// assertion output at all.
+process.on('unhandledRejection', (err) => abort('unhandled rejection', err));
+
+async function run() {
   // start() is invoked by the stubbed DOMContentLoaded during eval; give its
   // async fetch chain time to settle.
   await new Promise(r => setTimeout(r, 200));
@@ -295,7 +375,7 @@ eval(js + '\n;global.__page = { buildSettings };');
   const reqs = els['requests'] ? els['requests'].innerHTML : '';
   const burn = els['burn'] ? els['burn'].textContent : '';
 
-  const ok = {
+  Object.assign(ok, {
     'tank shows configured label': tanks.includes('work'),
     // Issue #135: an expired window says so in the figures, and never
     // fabricates a zero-second refill countdown.
@@ -343,7 +423,54 @@ eval(js + '\n;global.__page = { buildSettings };');
       const secs = waves.map(w => Math.abs(parseFloat(w.style.animationDelay || '0')));
       return secs.length > 1 && (Math.max(...secs) - Math.min(...secs)) > 6;
     })(),
+  });
+
+  // ── guards on the harness itself (#202) ──────────────────────────────
+  // This file is the only check on a page with no compiler and no type
+  // checker, and twice it has quietly agreed with whatever it was asked: it
+  // invented an element for any id, and it answered a PUT with the read
+  // fixture. Nothing below tests the dashboard — they test that the fixture
+  // still refuses to lie, so the next defect of that shape lands here.
+  const throws = async (fn) => {
+    try { await fn(); return false; } catch (e) { return true; }
   };
+  ok['harness throws on an unknown element id'] =
+    await throws(() => document.getElementById('no-such-element-anywhere'));
+  // The other half of the same property: an id the page really did create
+  // must come back as the page's own element, not a fresh empty one. A
+  // harness that threw for everything would pass the assertion above and
+  // still be useless.
+  ok['harness returns the page’s own element for an id it created'] = (() => {
+    // Caught, so a page that stopped giving its controls ids reports THIS
+    // assertion red rather than aborting the run on the very lookup that is
+    // under test.
+    try {
+      const el = document.getElementById('set-exhaustedMode');
+      return !!el && el.tagName === 'SELECT' && el.dataset.key === 'exhaustedMode';
+    } catch (e) { return false; }
+  })();
+  ok['harness serves an id declared only in the markup'] =
+    document.getElementById('settings-msg') === els['settings-msg'];
+  // A write answered by a read is defect 2 of #202. /api/accounts is
+  // read-only here, so a PUT to it must be an error rather than the account
+  // list.
+  ok['harness refuses a write to a read-only route'] =
+    await throws(() => fetch('/api/accounts', { method: 'PUT', body: '{}' }));
+  ok['harness refuses a read of a write-only route'] =
+    await throws(() => fetch('/api/pin'));
+  // The #192 trap: /api/accounts/probe must never be reached by a substring
+  // match on /api/accounts, in either direction.
+  ok['harness matches the probe path exactly, not by prefix'] =
+    await throws(() => fetch('/api/accounts/probe')) &&
+    await throws(() => fetch('/api/accounts/probe/extra', { method: 'POST', body: '{}' }));
+  // And a GET of /api/settings must still be a GET: the PUT branch records
+  // into settingsPuts, so a read that landed there would be counted as a
+  // write by every slider assertion below.
+  ok['a settings read is not recorded as a write'] = await (async () => {
+    const before = settingsPuts.length;
+    await fetch('/api/settings');
+    return settingsPuts.length === before;
+  })();
 
   // Dry-tank countdown: an empty tank is a blank rectangle, and the only
   // thing worth saying over it is when it comes back.
@@ -364,7 +491,10 @@ eval(js + '\n;global.__page = { buildSettings };');
   // length was guessed from the window's name. That is right for "5h" and
   // wrong for "7d", whose reset is when the oldest usage ages out — hours
   // away, not days — so the arc sat above 90% full permanently.
+  // Anchored on the tanks being there at all: an absence assertion over an
+  // empty panel passes while testing nothing (#202).
   ok['no progress arc is drawn'] =
+    findAllIn(els.accounts, '.cyl').length > 0 &&
     findAllIn(els.accounts, '.arc').length === 0 &&
     findAllIn(els.accounts, '.track').length === 0;
   // One number in the glass, not a boxed label duplicating the caption below
@@ -401,9 +531,15 @@ eval(js + '\n;global.__page = { buildSettings };');
 
   const ro = findAllIn(els.settings, '.readonly');
   ok['extra usage state shown per account'] = ro.length >= 1;
+  // Over the per-account rows, and only after confirming there ARE some: the
+  // previous version ran .every() over a collection that is empty whenever
+  // the panel fails to build, which passes without testing anything (#202).
+  // Each such row must carry the read-only cell and no overage input.
+  const acctRows = findAllIn(els.settings, '.acct').filter(r => !matches(r, '.head'));
   ok['extra usage is not an input'] =
-    findAllIn(els.settings, '.setrow')
-      .every(r => !findAllIn(r, 'input').some(i => i.dataset && i.dataset.field === 'allowOverage'));
+    acctRows.length > 0 &&
+    acctRows.every(r => findAllIn(r, '.readonly').length === 1) &&
+    acctRows.every(r => !findAllIn(r, 'input').some(i => i.dataset && i.dataset.field === 'allowOverage'));
 
   // Fire the poll tick: it must re-fetch every panel (the frozen-dashboard bug).
   const before = { ...fetchCount };
@@ -484,9 +620,20 @@ eval(js + '\n;global.__page = { buildSettings };');
   // it the way another client would (`spillway switch` from the CLI) --
   // directly in the fixture the dashboard never touches -- with NO click
   // anywhere in this dashboard, and confirm the NEXT poll alone updates it.
-  pinState = { pinned: 'you@example-one.com' };
+  // Seed the pin onto account two through the poll alone first. Without
+  // this step, two had ALREADY been unpinned by the click above, so 'the
+  // account that lost the pin updates too' passed whatever the poll did —
+  // it asserted a state that was true before the poll ran (#202). Losing
+  // the pin has to be a transition to be observable.
+  pinState = { pinned: 'you@example-two.com' };
   if (pollFn) { await pollFn(); await new Promise(r => setTimeout(r, 150)); }
   ok['a pin set by another client appears after the next poll'] =
+    String(twoBtn.btn.className).includes('active') &&
+    String(twoBtn.card.className).includes('pinned');
+  // Now move it, again with no click anywhere in this dashboard.
+  pinState = { pinned: 'you@example-one.com' };
+  if (pollFn) { await pollFn(); await new Promise(r => setTimeout(r, 150)); }
+  ok['a pin moved by another client follows it'] =
     String(oneBtn.btn.className).includes('active') &&
     String(oneBtn.card.className).includes('pinned');
   ok['the account that lost the pin updates too'] =
@@ -566,9 +713,13 @@ eval(js + '\n;global.__page = { buildSettings };');
     twoBtn.msg.innerHTML.toLowerCase().includes('charged');
   // Probing is not pinning. The two controls share a card and a message box;
   // they must not share an effect.
+  // Both halves: two must not acquire the pin, AND one must not lose it.
+  // The negative alone passed over a two that was already unpinned (#202).
   ok['probing does not pin the account'] =
     !String(twoBtn.btn.className).includes('active') &&
-    !String(twoBtn.card.className).includes('pinned');
+    !String(twoBtn.card.className).includes('pinned') &&
+    String(oneBtn.btn.className).includes('active') &&
+    String(oneBtn.card.className).includes('pinned');
 
   // ── rotate-away slider (#168) ────────────────────────────────────────
   // Last in the file on purpose: a slider write calls refresh(), which
@@ -611,7 +762,9 @@ eval(js + '\n;global.__page = { buildSettings };');
                    'the slider write names only its own key',
                    'an unrelated setting survives the slider write',
                    'the low bound renders as 0.50',
-                   'the high bound renders as 1.00']) ok[k] = false;
+                   'the high bound renders as 1.00',
+                   'a config value under the floor widens the slider, not the other way round',
+                  ]) ok[k] = false;
 
   if (slider && readout && slider._on && slider._on.input) {
     // An untouched slider must write back what the SERVER sent, not what the
@@ -628,6 +781,23 @@ eval(js + '\n;global.__page = { buildSettings };');
     ok['Save of an untouched slider does not rewrite the value'] =
       settingsPuts.length === beforeUntouched + 1 &&
       settingsPuts[beforeUntouched].body.switchThreshold === '0.98';
+    // Defect 1 of #202, stated head-on: collectSettings read phantom
+    // elements, so a Save submitted exhaustedMode:"" with no switchThreshold
+    // and no probeOnStart — a body the page cannot produce and the real
+    // server answers with a 400. Assert the WHOLE body against the values
+    // the fixture served, so a lookup that finds nothing real is a failure
+    // here rather than a passing test of an empty form.
+    const saved = settingsPuts.length > beforeUntouched ? settingsPuts[beforeUntouched].body : null;
+    ok['Save submits every settings field with the panel\u2019s own value'] =
+      !!saved && saved.exhaustedMode === 'notify' && saved.holdMax === '4h' &&
+      saved.switchThreshold === '0.98' && saved.probeInterval === '30m' &&
+      saved.probeOnStart === true && saved.crossProvider === false;
+    // The per-account rows go out on the same body, and they are read by a
+    // different path (querySelectorAll over [data-account], not by id).
+    ok['Save submits the per-account rows'] = (() => {
+      const a = saved && saved.accounts && saved.accounts['you@example-one.com'];
+      return !!a && a.label === 'work' && a.disabled === false && a.priority === 0;
+    })();
     slider.value = '0.98';                        // undo the simulated snap
 
     // Debounce: dragging fires an input event per pixel, and each write is a
@@ -657,7 +827,12 @@ eval(js + '\n;global.__page = { buildSettings };');
       wrote === 1 && Object.keys(settingsPuts[beforeDrag].body).join(',') === 'switchThreshold';
     // Same property from the other side: the stored settings the fixture
     // applies each body to must still hold everything the slider never named.
+    // Gated on the write having happened: the stored settings are untouched
+    // when NOTHING was written, which is precisely the state defect 2 of
+    // #202 produced, so the ungated version passed hardest when the write
+    // path was most broken.
     ok['an unrelated setting survives the slider write'] =
+      wrote === 1 &&
       SETTINGS.exhaustedMode === 'notify' && SETTINGS.holdMax === '4h' &&
       SETTINGS.probeInterval === '30m' && SETTINGS.crossProvider === false;
 
@@ -688,8 +863,7 @@ eval(js + '\n;global.__page = { buildSettings };');
       !!low && parseFloat(low.getAttribute('min')) === 0.3 && parseFloat(low.value) === 0.3;
   }
 
-  let fail = 0;
-  for (const [k, v] of Object.entries(ok)) { console.log((v ? 'PASS' : 'FAIL') + ': ' + k); if (!v) fail++; }
-  console.log('fetches:', JSON.stringify(fetchCount));
-  process.exit(fail ? 1 : 0);
-})();
+  ok['the harness ran to completion'] = true;
+}
+
+run().then(report, (err) => abort('harness aborted', err));

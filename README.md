@@ -1869,8 +1869,21 @@ go build ./... && go vet ./... && go test ./...
 ```
 
 The dashboard's JavaScript is exercised against a fake DOM by
-`internal/admin/testdata/ui_dom_test.js`, run from Go when `node` is available
-and skipped when it is not — the repo stays `go build`-only.
+`internal/admin/testdata/ui_dom_test.js`, run from Go by `TestDashboardJS`.
+That harness is the whole of the dashboard's test coverage — it is the one
+surface with no compiler and no type checker behind it — so a missing `node`
+is a test **failure**, not a skip. `node` stays a test-only dependency; the
+repo is still `go build`-only. Without it:
+
+```sh
+brew install node          # macOS
+apt install nodejs         # Debian/Ubuntu
+
+SPILLWAY_SKIP_NODE_TESTS=1 go test ./...   # skip it, knowingly
+```
+
+The opt-out is an env var so that "the dashboard is untested in this run" is
+something somebody typed, rather than a state a machine drifts into unnoticed.
 
 ## Licence
 

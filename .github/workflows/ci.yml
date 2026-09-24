@@ -48,9 +48,11 @@ jobs:
           go-version: stable
           cache: true
 
-      # Node is a test-only convenience: the dashboard's JS is exercised
-      # against a fake DOM. The suite skips those checks without it, so this
-      # is what stops them silently never running in CI.
+      # Node is a test-only dependency: the dashboard's JS is exercised
+      # against a fake DOM, and that harness is the whole of the dashboard's
+      # test coverage — the page has no compiler behind it. TestDashboardJS
+      # FAILS rather than skips when node is missing (#202), so this step is
+      # load-bearing. SPILLWAY_SKIP_NODE_TESTS must never be set here.
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
