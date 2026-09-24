@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,12 +19,64 @@ import (
 	"github.com/coderage-labs/spillway/internal/secrets"
 )
 
-// runLoginClaude implements `spillway login claude <name>`: PKCE auth-code
-// flow with manual paste-back (the official CLI's code#state format), tokens
-// to the keychain, metadata to the yaml.
+// parseLoginPriority pulls an optional `--priority <n>` (or
+// `--priority=<n>`) out of a login command's arguments, returning what is
+// left for positional parsing and the priority the user asked for, or nil
+// when they did not ask for one.
+//
+// A pointer, not a sentinel: `--priority 0` is a real request ("this new
+// account is the one I want reached for first"), and has to be
+// distinguishable from saying nothing, which means "put it at the back"
+// (issue #169). Hand-rolled rather than via flagValue because this also has
+// to REMOVE the flag and its value from the positional arguments — the
+// account name is args[0] and a leftover `--priority` would become a login
+// name.
+func parseLoginPriority(args []string) ([]string, *int, error) {
+	var rest []string
+	var prio *int
+	for i := 0; i < len(args); i++ {
+		var raw string
+		switch a := args[i]; {
+		case a == "--priority":
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("--priority needs a whole number, e.g. --priority 3")
+			}
+			raw = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--priority="):
+			raw = strings.TrimPrefix(a, "--priority=")
+		default:
+			rest = append(rest, a)
+			continue
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("priority must be a whole number (got %q)", raw)
+		}
+		prio = &n
+	}
+	return rest, prio, nil
+}
+
+// priorityNotice is what a login prints about the priority the account
+// ended up with. Always printed, never only on the defaulted path: the
+// whole point of issue #169 is that a number nobody said out loud is one
+// the user discovers later, from routing they did not expect.
+func priorityNotice(name string, prio int) string {
+	return fmt.Sprintf("%s: priority %d — lower is preferred, and an account is only\n"+
+		"  reached for when everything above it cannot serve", name, prio)
+}
+
+// runLoginClaude implements `spillway login claude <name> [--priority <n>]`:
+// PKCE auth-code flow with manual paste-back (the official CLI's code#state
+// format), tokens to the keychain, metadata to the yaml.
 func runLoginClaude(args []string) error {
+	args, prio, err := parseLoginPriority(args)
+	if err != nil {
+		return err
+	}
 	if len(args) < 1 {
-		return fmt.Errorf("usage: spillway login claude <name>")
+		return fmt.Errorf("usage: spillway login claude <name> [--priority <n>]")
 	}
 	cfgPath, err := config.Path()
 	if err != nil {
@@ -87,37 +140,78 @@ func runLoginClaude(args []string) error {
 	}); err != nil {
 		return err
 	}
-	if err := config.UpsertAccount(cfgPath, config.AccountConfig{
-		Name:        name,
-		Type:        "claude-oauth",
-		ExpiresAt:   tokens.ExpiresAt,
-		AccountUUID: profile.AccountUUID,
-	}); err != nil {
+	// Issue #87: the live-add puts this straight into a running daemon's
+	// pool — brand new, or for an existing name a hot-swap of the
+	// just-refreshed credential in place (folding in #46's re-auth gap) —
+	// rather than #46's old restart-only notice.
+	return recordLogin(os.Stdout, cfgPath, recordedLogin{
+		Account: config.AccountConfig{
+			Name:        name,
+			Type:        "claude-oauth",
+			ExpiresAt:   tokens.ExpiresAt,
+			AccountUUID: profile.AccountUUID,
+		},
+		Priority: prio,
+		Add: accountAddPayload{
+			Name:         name,
+			Type:         "claude-oauth",
+			AccessToken:  tokens.AccessToken,
+			RefreshToken: tokens.RefreshToken,
+			ExpiresAt:    tokens.ExpiresAt,
+			AccountUUID:  profile.AccountUUID,
+		},
+		Banner: fmt.Sprintf("logged in: %s (%s, org %s) — token expires %s",
+			name, profile.Email, profile.OrgName,
+			time.UnixMilli(tokens.ExpiresAt).UTC().Format(time.RFC3339)),
+	})
+}
+
+// recordedLogin is everything recordLogin needs about an account that has
+// just authenticated successfully.
+type recordedLogin struct {
+	// Account is the metadata to persist — never token material (§5).
+	Account config.AccountConfig
+	// Priority is what the user asked for with --priority, or nil.
+	Priority *int
+	// Add is the live-add payload, minus its Priority: recordLogin fills
+	// that in from what the config actually recorded, so the two cannot
+	// disagree.
+	Add accountAddPayload
+	// Banner is the provider-specific "logged in" line(s), printed first.
+	Banner string
+}
+
+// recordLogin is the tail every login path shares: persist the metadata,
+// say which priority the account ended up with, and hand it to a running
+// daemon with that same priority.
+//
+// One function rather than a copy per provider because of issue #169's
+// failure mode: the config's priority and the priority the live pool is
+// told about have to be the same number. Two copies of "upsert, then post"
+// is exactly how they drift, and the drift is invisible — the config would
+// say 7 and the running daemon would rank the account at 0 until something
+// restarted it, which is the bug #169 is about, just relocated.
+func recordLogin(out io.Writer, cfgPath string, rec recordedLogin) error {
+	assigned, err := config.UpsertAccountWithPriority(cfgPath, rec.Account, rec.Priority)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("logged in: %s (%s, org %s) — token expires %s\n",
-		name, profile.Email, profile.OrgName,
-		time.UnixMilli(tokens.ExpiresAt).UTC().Format(time.RFC3339))
-	// Issue #87: put this straight into a running daemon's pool — brand new
-	// or, for an existing name, hot-swap the just-refreshed credential in
-	// place (folding in #46's re-auth gap) — rather than #46's old
-	// restart-only notice.
-	fmt.Println(liveAddAccount(accountAddPayload{
-		Name:         name,
-		Type:         "claude-oauth",
-		AccessToken:  tokens.AccessToken,
-		RefreshToken: tokens.RefreshToken,
-		ExpiresAt:    tokens.ExpiresAt,
-		AccountUUID:  profile.AccountUUID,
-	}))
+	fmt.Fprintln(out, rec.Banner)
+	fmt.Fprintln(out, priorityNotice(rec.Account.Name, assigned))
+	rec.Add.Priority = assigned
+	fmt.Fprintln(out, liveAddAccount(rec.Add))
 	return nil
 }
 
 // runLoginKimi implements `spillway login kimi <name>`: RFC 8628 device
 // flow (design doc §12a), tokens to the keychain, metadata to the yaml.
 func runLoginKimi(args []string) error {
+	args, prio, err := parseLoginPriority(args)
+	if err != nil {
+		return err
+	}
 	if len(args) < 1 {
-		return fmt.Errorf("usage: spillway login kimi <name>")
+		return fmt.Errorf("usage: spillway login kimi <name> [--priority <n>]")
 	}
 	cfgPath, err := config.Path()
 	if err != nil {
@@ -151,30 +245,32 @@ func runLoginKimi(args []string) error {
 	}); err != nil {
 		return err
 	}
-	if err := config.UpsertAccount(cfgPath, config.AccountConfig{
-		Name:      name,
-		Type:      "kimi-oauth",
-		Upstream:  provider.KimiUpstream,
-		ExpiresAt: tokens.ExpiresAtMs(time.Now()),
-	}); err != nil {
-		return err
-	}
-	fmt.Printf("logged in: %s (kimi) — token expires %s\n",
-		name, time.UnixMilli(tokens.ExpiresAtMs(time.Now())).UTC().Format(time.RFC3339))
-	fmt.Println("note: set modelMap for this account in the config, e.g. claude-sonnet-4-6 → your kimi model id (see README)")
 	// Issue #87: kimi's DefaultUpstream is pre-minted for MITM at startup
 	// regardless of whether any kimi account existed yet (see
 	// provider.DefaultUpstreamHosts), so this account is fully live —
 	// selectable AND CONNECT-mode covered — with no restart.
-	fmt.Println(liveAddAccount(accountAddPayload{
-		Name:         name,
-		Type:         "kimi-oauth",
-		Upstream:     provider.KimiUpstream,
-		AccessToken:  tokens.AccessToken,
-		RefreshToken: tokens.RefreshToken,
-		ExpiresAt:    tokens.ExpiresAtMs(time.Now()),
-	}))
-	return nil
+	expires := tokens.ExpiresAtMs(time.Now())
+	return recordLogin(os.Stdout, cfgPath, recordedLogin{
+		Account: config.AccountConfig{
+			Name:      name,
+			Type:      "kimi-oauth",
+			Upstream:  provider.KimiUpstream,
+			ExpiresAt: expires,
+		},
+		Priority: prio,
+		Add: accountAddPayload{
+			Name:         name,
+			Type:         "kimi-oauth",
+			Upstream:     provider.KimiUpstream,
+			AccessToken:  tokens.AccessToken,
+			RefreshToken: tokens.RefreshToken,
+			ExpiresAt:    expires,
+		},
+		Banner: fmt.Sprintf("logged in: %s (kimi) — token expires %s\n"+
+			"note: set modelMap for this account in the config, "+
+			"e.g. claude-sonnet-4-6 → your kimi model id (see README)",
+			name, time.UnixMilli(expires).UTC().Format(time.RFC3339)),
+	})
 }
 
 // accountRow is one line of `spillway accounts` output.

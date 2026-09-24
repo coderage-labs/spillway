@@ -8,15 +8,40 @@ import (
 
 // UpsertAccount adds or replaces (by name) an account's metadata in the
 // config file, atomically at 0600. Token material is never written here.
+//
+// A brand-new account with no priority set lands at the BACK of the queue
+// rather than at priority 0 — see UpsertAccountWithPriority and
+// NextPriority for the rule, and why it is enforced here, in the one place
+// every durable add goes through, rather than in each caller.
 func UpsertAccount(path string, acct AccountConfig) error {
+	_, err := UpsertAccountWithPriority(path, acct, nil)
+	return err
+}
+
+// UpsertAccountWithPriority is UpsertAccount plus an explicit priority
+// (issue #169), and reports the priority the account ends up with so the
+// caller can say it out loud — a default nobody is told about is how
+// someone ends up surprised by routing later.
+//
+// priority non-nil always wins, including an explicit 0 ("put this one at
+// the front"), and including on a re-login, where it is the one field a
+// login payload is allowed to change. priority nil means: leave an existing
+// account's priority exactly as the user set it, and give a brand-new one
+// NextPriority — unless the caller set acct.Priority itself, which is just
+// as explicit as passing a pointer.
+func UpsertAccountWithPriority(path string, acct AccountConfig, priority *int) (int, error) {
 	cfg, err := readOrDefaults(path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for i := range cfg.Accounts {
 		if cfg.Accounts[i].Name == acct.Name {
-			cfg.Accounts[i] = mergeLoginUpdate(cfg.Accounts[i], acct)
-			return validateAndWrite(path, cfg)
+			merged := mergeLoginUpdate(cfg.Accounts[i], acct)
+			if priority != nil {
+				merged.Priority = *priority
+			}
+			cfg.Accounts[i] = merged
+			return merged.Priority, validateAndWrite(path, cfg)
 		}
 	}
 	// A second login to the same provider account under a different name is
@@ -25,13 +50,51 @@ func UpsertAccount(path string, acct AccountConfig) error {
 	// left, and — worst — runs two refreshers against one credential, which
 	// is how a live token got killed early in this project.
 	if dup := findByUUID(cfg.Accounts, acct.AccountUUID); dup != "" {
-		return fmt.Errorf("that is the same provider account as %q (account uuid %s)\n"+
+		return 0, fmt.Errorf("that is the same provider account as %q (account uuid %s)\n"+
 			"  to re-authenticate it:  spillway login claude %s\n"+
 			"  to replace it:          spillway accounts remove %s",
 			dup, acct.AccountUUID, dup, dup)
 	}
+	switch {
+	case priority != nil:
+		acct.Priority = *priority
+	case acct.Priority == 0:
+		acct.Priority = NextPriority(cfg.Accounts)
+	}
 	cfg.Accounts = append(cfg.Accounts, acct)
-	return validateAndWrite(path, cfg)
+	return acct.Priority, validateAndWrite(path, cfg)
+}
+
+// NextPriority is the priority a brand-new account should take: one past
+// the highest already in use, so it lands at the back of the queue. An
+// empty pool starts at 0 — the first account is the first choice, and there
+// is nothing for it to queue behind.
+//
+// One past the maximum, deliberately NOT the lowest unused number. Filling
+// a gap (5, 6, 9 → 7) would slot a brand-new account AHEAD of an existing
+// one, which is the opposite of what "I just added a spare" means; a gap is
+// a reservation the user left themselves, not an error to tidy up. For the
+// same reason a duplicate priority already present in a hand-edited config
+// is left exactly as it is: an add decides its own number and never
+// renumbers the accounts the user already has.
+//
+// The zero-accounts bootstrap fallback account (#131 — "local", synthesised
+// in buildPool from the claude CLI's own keychain login when the config
+// lists no accounts) is deliberately not counted, and cannot be: it has no
+// config entry, so it can never appear in accts. That is the right answer
+// rather than an accident of where this reads from. It exists only while
+// the config is empty and is gone the moment a real account is added, so
+// counting its implicit 0 would push the very first real account to 1 and
+// leave a pool with nothing in its top tier — and it would contradict the
+// plain reading of "an empty pool's first account gets 0".
+func NextPriority(accts []AccountConfig) int {
+	next := 0
+	for i, a := range accts {
+		if i == 0 || a.Priority+1 > next {
+			next = a.Priority + 1
+		}
+	}
+	return next
 }
 
 // RemoveAccount deletes an account by name. Missing is an error — a typo'd

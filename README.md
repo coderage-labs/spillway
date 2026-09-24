@@ -222,8 +222,8 @@ that works over SSH.
 | `spillway notify remove <channel>` | Delete a channel's config entry and its stored credential |
 | `spillway switch [<account>\|--auto] [--force]` | Point the pool at one account — resolved by name, label or a unique prefix/substring — until told otherwise; with no argument, reports what's pinned and what you could switch to |
 | `spillway probe <account> [--force]` | Re-measure one account's quota immediately — resolved by name, label or a unique prefix/substring. Bypasses both probe schedules: the re-probe backoff an exhausted account builds up, and the once-a-day rationing of a probe that costs money. Refused with `409` on an account whose quota is spent *and* whose extra usage is permitted, because that probe is a charged request; `--force` buys it. Everywhere else the probe is free and the flag does nothing. This is the answer to "I bought a reset and spillway hasn't noticed" — previously, restarting the daemon |
-| `spillway login claude <account>` | Add a Claude account (OAuth PKCE), or re-authenticate an existing one — `<account>` resolves against existing accounts by name, label or a unique prefix/substring first, and only becomes a new account's name if nothing matches. Reaches a running daemon immediately: a new account is selectable before the command returns, and re-authenticating an existing one hot-swaps its credential in the running pool rather than leaving the daemon holding the stale one until restarted |
-| `spillway login kimi <account>` | Add a Kimi account (OAuth device flow), or re-authenticate an existing one — same resolution and live-apply behaviour as `login claude` |
+| `spillway login claude <account> [--priority <n>]` | Add a Claude account (OAuth PKCE), or re-authenticate an existing one — `<account>` resolves against existing accounts by name, label or a unique prefix/substring first, and only becomes a new account's name if nothing matches. A brand-new account is given the next free priority — one past the highest already in use — so it joins at the *back* of the queue rather than competing for first-choice traffic; `--priority <n>` overrides that, and either way the command prints the number it assigned. Reaches a running daemon immediately: a new account is selectable before the command returns, and re-authenticating an existing one hot-swaps its credential in the running pool rather than leaving the daemon holding the stale one until restarted |
+| `spillway login kimi <account> [--priority <n>]` | Add a Kimi account (OAuth device flow), or re-authenticate an existing one — same resolution, priority and live-apply behaviour as `login claude` |
 | `spillway statusline` | Print the Claude Code status line |
 | `spillway statusline install\|uninstall\|status` | Wire it into `~/.claude/settings.json` |
 | `spillway service install\|uninstall\|status` | Run the daemon in the background — launchd on macOS, a Scheduled Task on Windows, a systemd user unit on Linux |
@@ -1071,6 +1071,22 @@ spillway accounts priority kimi 2                # last resort
 Like overage, this reaches a running daemon immediately — no restart —
 falling back cleanly to "takes effect at the next start" when no daemon is
 reachable.
+
+**New accounts join at the back.** `spillway login` gives a brand-new account
+the next free priority — one past the highest already in use — and says which
+number it assigned. The first account into an empty pool gets `0`; after that,
+a pool holding 5, 6 and 9 puts the next one at 10. Deliberately not the lowest
+unused number: filling the gap at 7 would slot a brand-new account *ahead* of
+the one at 9, which is the opposite of what adding a spare means. A gap is a
+reservation you left yourself, and a duplicate you hand-edited into the config
+is yours — an add decides its own number and never renumbers the accounts you
+already have. Pass `--priority <n>` at login time to place it yourself, `0`
+included:
+
+```sh
+spillway login claude you@spare.example                 # → next free, at the back
+spillway login claude you@main.example --priority 0     # → straight to the front
+```
 
 **Pinning overrides all of it.** `spillway switch <account>` directs selection
 at one account until `spillway switch --auto`, or until the daemon restarts —
