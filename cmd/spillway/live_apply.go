@@ -99,8 +99,12 @@ type accountAddPayload struct {
 	AccountUUID  string            `json:"accountUuid,omitempty"`
 	ModelMap     map[string]string `json:"modelMap,omitempty"`
 	Label        string            `json:"label,omitempty"`
-	Priority     int               `json:"priority,omitempty"`
-	AllowOverage *bool             `json:"allowOverage,omitempty"`
+	// Priority is always sent, never omitted when zero (issue #169):
+	// priority 0 is a real, meaningful value — the top tier — and the
+	// daemon has to rank the account exactly as the config now records it,
+	// not fall back to its own idea of a default.
+	Priority     int   `json:"priority"`
+	AllowOverage *bool `json:"allowOverage,omitempty"`
 }
 
 // accountAddResult mirrors admin's accountAddResponse.

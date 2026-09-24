@@ -118,6 +118,15 @@ func (s *Server) handleAccountAdd(w http.ResponseWriter, r *http.Request) {
 	acct := pool.NewAccount(req.Name, pool.SourceYAML, req.AccessToken, req.RefreshToken, req.ExpiresAt, upstream)
 	acct.Type = req.Type
 	acct.SetLabel(req.Label)
+	// Applied exactly as sent, never defaulted here (issue #169). The
+	// next-free-priority rule lives in config.UpsertAccountWithPriority,
+	// because the config file is what a restart reads and therefore the only
+	// place the number can be made durable — a default invented here would
+	// evaporate on the next start. Worse, it would have to guess from the
+	// running pool, which can hold the zero-accounts bootstrap account
+	// (#131) that no config lists, so it could disagree with the file the
+	// CLI has already written. The CLI sends the number the config now
+	// records; this endpoint's whole job is to make the pool match it.
 	acct.SetPriority(req.Priority)
 	acct.SetAllowOverage(req.AllowOverage)
 	acct.AccountUUID = req.AccountUUID
