@@ -1693,7 +1693,7 @@ function queueSettingWrite(key, value) {
   if (pendingWrites.has(key)) clearTimeout(pendingWrites.get(key));
   const msg = document.getElementById("settings-msg");
   msg.className = "hint";
-  msg.textContent = "saving when you stop…";
+  msg.textContent = "saving when you stop\u2026";
   pendingWrites.set(key, setTimeout(() => {
     pendingWrites.delete(key);
     // One key, not the whole form. config.Settings' pointer fields
@@ -1753,7 +1753,7 @@ async function putSettings(patch) {
     // The tanks re-colour and the over-threshold markers move off the next
     // poll: both are server-computed, from /api/state's threshold and
     // /api/accounts' overThreshold, so they are only right once the daemon
-    // has the new value. Which it does \u2014 the handler applies it to the
+    // has the new value. Which it does — the handler applies it to the
     // running pool before answering.
     refresh();
     return true;
