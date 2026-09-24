@@ -422,6 +422,13 @@
     border: 1px solid var(--wall); border-radius: 3px;
   }
   .setrow input[type=checkbox] { accent-color: var(--water-a); }
+  /* The rotate-away slider (issue #168). The number sits beside the track
+     because this is a figure people quote at each other — a bare slider
+     hides what it is actually set to. */
+  .setrow .rangecell { display: flex; align-items: center; gap: .6rem; }
+  .setrow input[type=range] { width: 12rem; accent-color: var(--water-a); }
+  .setrow .rangeval { font-size: 12px; min-width: 2.6rem; color: var(--ink);
+                      font-variant-numeric: tabular-nums; }
   .settings-foot { display: flex; gap: .6rem; align-items: center; padding: .6rem .9rem; }
   button {
     font: inherit; font-size: 12px; padding: .3rem .8rem; cursor: pointer;
@@ -1514,8 +1521,19 @@ const SETTINGS_FIELDS = [
     desc: "notify and hold park the request until a reset; fail returns the 429" },
   { key: "holdMax", label: "Longest hold", type: "text",
     desc: "e.g. 4h. \u201c0\u201d never holds" },
-  { key: "switchThreshold", label: "Rotate away at", type: "text",
-    desc: "fraction of a window used, 0-1. 0.98 = skip an account at 98%" },
+  // A bounded fraction with an immediate effect on routing, so it is a
+  // slider rather than a text box (issue #168). Floor at 0.50: below half a
+  // window used, this stops being predictive rotation and becomes a
+  // different strategy — spreading load across accounts that are barely
+  // touched. Ceiling at 1.00, which the config also treats as the limit, and
+  // which means "never rotate early". Step 0.01 because that is the
+  // granularity anyone states it in, and it can express the 0.98 default.
+  { key: "switchThreshold", label: "Rotate away at", type: "range",
+    min: 0.5, max: 1, step: 0.01,
+    desc: "predictive rotation, on every request: an account is skipped once this " +
+      "fraction of the quota window governing the request is used, while another " +
+      "eligible account exists. 1.00 never rotates early. Saved on its own a " +
+      "moment after you stop dragging." },
   { key: "probeInterval", label: "Re-probe idle accounts", type: "text",
     desc: "e.g. 30m. \u201c0\u201d probes at startup only" },
   { key: "probeOnStart", label: "Probe at startup", type: "checkbox",
@@ -1544,13 +1562,44 @@ function buildSettings(cur) {
       }
     } else {
       input = document.createElement("input");
-      input.type = f.type === "checkbox" ? "checkbox" : "text";
+      input.type = f.type === "checkbox" ? "checkbox" : f.type === "range" ? "range" : "text";
     }
     input.id = "set-" + f.key;
     input.dataset.key = f.key;
     if (f.type === "checkbox") input.checked = !!cur[f.key];
     else input.value = cur[f.key] == null ? "" : String(cur[f.key]);
-    row.appendChild(input);
+
+    if (f.type === "range") {
+      // The value exactly as the server reported it. An untouched slider
+      // writes THIS back, never input.value: config.Validate accepts any
+      // fraction in (0, 1], so a hand-edited 0.3 or 0.975 is legal, and the
+      // browser snaps input.value to the step grid the moment it is read.
+      // Saving some unrelated field must not quietly rewrite it.
+      input.dataset.raw = input.value;
+      const num = parseFloat(input.value);
+      // Same reason the floor moves down to meet a low config value rather
+      // than clamping it: the slider is a convenience over the config, not a
+      // narrower definition of what is valid.
+      const lo = Number.isFinite(num) ? Math.min(f.min, num) : f.min;
+      input.setAttribute("min", String(lo));
+      input.setAttribute("max", String(f.max));
+      input.setAttribute("step", String(f.step));
+      input.setAttribute("aria-label", f.label);
+
+      const cell = div("rangecell", row);
+      cell.appendChild(input);
+      const readout = span("rangeval", cell);
+      readout.textContent = rangeText(input.value);
+      input.addEventListener("input", () => {
+        // Marks the value as the user's, so collectSettings stops deferring
+        // to dataset.raw.
+        input.dataset.touched = "1";
+        readout.textContent = rangeText(input.value);
+        queueSettingWrite(f.key, input.value);
+      });
+    } else {
+      row.appendChild(input);
+    }
 
     const d = div("desc", row);
     d.textContent = f.desc;
@@ -1622,12 +1671,50 @@ function buildSettings(cur) {
   note.textContent = "Applied to the running pool immediately — no restart.";
 }
 
+// rangeText renders a slider's value the way the config states it. Two
+// decimals, so 1 reads as "1.00" rather than "1" and 0.98 does not come back
+// as 0.9800000000000001. A hand-edited value finer than the step keeps its
+// own digits instead of being rounded in the readout — the number shown has
+// to be the number in the file.
+function rangeText(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return String(v);
+  return parseFloat(n.toFixed(2)) === n ? n.toFixed(2) : String(n);
+}
+
+// A drag fires one input event per pixel, and every write here rewrites the
+// config file and calls pool.Apply on the running pool. So the write waits
+// until the control has been still for this long, and a further move of the
+// same key replaces the pending write rather than queueing behind it: N
+// positions dragged through issue one PUT, carrying the last value.
+const WRITE_DEBOUNCE_MS = 400;
+const pendingWrites = new Map();
+function queueSettingWrite(key, value) {
+  if (pendingWrites.has(key)) clearTimeout(pendingWrites.get(key));
+  const msg = document.getElementById("settings-msg");
+  msg.className = "hint";
+  msg.textContent = "saving when you stop\u2026";
+  pendingWrites.set(key, setTimeout(() => {
+    pendingWrites.delete(key);
+    // One key, not the whole form. config.Settings' pointer fields
+    // distinguish "not supplied" from "set to the zero value", and
+    // UpdateSettings re-reads the file before applying, so a one-key body
+    // cannot disturb a field it does not name — including one the user is
+    // part-way through typing in another row.
+    putSettings({ [key]: value });
+  }, WRITE_DEBOUNCE_MS));
+}
+
 function collectSettings() {
   const out = { accounts: {} };
   for (const f of SETTINGS_FIELDS) {
     const el = document.getElementById("set-" + f.key);
     if (!el) continue;
-    out[f.key] = f.type === "checkbox" ? el.checked : el.value;
+    out[f.key] = f.type === "checkbox" ? el.checked
+      // An untouched slider reports what the server sent, not what the step
+      // grid snapped it to. See the dataset.raw comment in buildSettings.
+      : f.type === "range" && !el.dataset.touched ? el.dataset.raw
+      : el.value;
   }
   for (const el of document.querySelectorAll("[data-account]")) {
     const name = el.dataset.account;
@@ -1641,31 +1728,46 @@ function collectSettings() {
   return out;
 }
 
-async function saveSettings(button) {
+// The one writer of PUT /api/settings, shared by the Save button (which
+// sends the whole form) and the debounced slider (which sends one key).
+async function putSettings(patch) {
   const msg = document.getElementById("settings-msg");
-  button.disabled = true;
   msg.className = "hint";
   msg.textContent = "saving\u2026";
   try {
     const r = await fetch("/api/settings", auth({
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(collectSettings()),
+      body: JSON.stringify(patch),
     }));
     const text = await r.text();
     if (!r.ok) {
       // The server names the offending field; show that rather than "failed".
       msg.className = "hint alarm";
       msg.textContent = text.trim() || ("save failed (" + r.status + ")");
-      return;
+      return false;
     }
     msg.className = "hint ok";
     msg.textContent = "saved";
     setTimeout(() => { msg.textContent = ""; msg.className = "hint"; }, 4000);
+    // The tanks re-colour and the over-threshold markers move off the next
+    // poll: both are server-computed, from /api/state's threshold and
+    // /api/accounts' overThreshold, so they are only right once the daemon
+    // has the new value. Which it does — the handler applies it to the
+    // running pool before answering.
     refresh();
+    return true;
   } catch (err) {
     msg.className = "hint alarm";
     msg.textContent = "save failed: " + err.message;
+    return false;
+  }
+}
+
+async function saveSettings(button) {
+  button.disabled = true;
+  try {
+    await putSettings(collectSettings());
   } finally {
     button.disabled = false;
   }

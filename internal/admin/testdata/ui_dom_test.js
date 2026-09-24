@@ -65,6 +65,10 @@ const SETTINGS = {
   accounts: { 'you@example-one.com': { label: 'work', disabled: false } },
 };
 const fetchCount = { accounts: 0, requests: 0, history: 0, activity: 0, settings: 0, state: 0 };
+// settingsPuts records every PUT /api/settings body the dashboard sent, so a
+// test can assert what was written and how often. Separate from
+// fetchCount.settings, which stays a count of GETs.
+const settingsPuts = [];
 // probeCalls records what the "check now" control (#192) sent to
 // POST /api/accounts/probe, so a test can assert both that a refusal was NOT
 // silently forced and that a confirmed retry actually carried force:true.
@@ -107,7 +111,27 @@ global.fetch = async (u, opts) => {
   if (url.includes('/api/quota-history'))  { fetchCount.history++;  return ok(HISTORY); }
   if (url.includes('/api/activity'))       { fetchCount.activity++; return ok(ACTIVITY); }
   if (url.includes('/api/requests'))       { fetchCount.requests++; return ok(REQUESTS); }
-  if (url.includes('/api/settings'))       { fetchCount.settings++; return ok(SETTINGS); }
+  if (url.includes('/api/settings')) {
+    const method = (opts && opts.method) || 'GET';
+    if (method === 'PUT') {
+      // Branched on the METHOD, for the same reason /api/accounts/probe is
+      // branched before /api/accounts: answering a write with the read
+      // fixture makes a control that never wrote anything look like it
+      // worked, and that is exactly the failure this file exists to catch.
+      // The Authorization header is recorded too — a write sent with auth()
+      // applied to the URL instead of the init is unauthenticated and
+      // invisible on a loopback dashboard, which has no token at all.
+      const body = JSON.parse(opts.body);
+      settingsPuts.push({ body, auth: (opts.headers || {}).Authorization || '' });
+      // Mirrors the server: config.Settings' pointer fields mean only the
+      // keys actually named are applied, and everything else is left as it
+      // was. So a partial body here must leave the rest of SETTINGS alone.
+      Object.assign(SETTINGS, body);
+      return { ok: true, status: 200, text: async () => JSON.stringify(SETTINGS), json: async () => SETTINGS };
+    }
+    fetchCount.settings++;
+    return ok(SETTINGS);
+  }
   if (url.includes('/api/state'))          { fetchCount.state++;    return ok(pinState); }
   if (url.includes('/api/pin')) {
     const method = (opts && opts.method) || 'POST';
@@ -221,6 +245,16 @@ function mkEl(tag) {
     get() { return this._html + this.children.map(c => c.innerHTML).join(''); },
     set(v) { this._html = v; this.children.length = 0; },
   });
+  // An element the page gave an id to must be findable by that id. Without
+  // this, document.getElementById auto-created a fresh empty element for
+  // every "set-<key>" the settings panel had just built, so collectSettings
+  // read phantoms: a Save sent exhaustedMode:"" and no switchThreshold at
+  // all, and every assertion about what the form submits passed against a
+  // body the dashboard never produces.
+  Object.defineProperty(el, 'id', {
+    get() { return this._id || ''; },
+    set(v) { this._id = String(v); els[this._id] = this; },
+  });
   // esc() relies on textContent -> innerHTML escaping; emulate it.
   Object.defineProperty(el, 'textContent', {
     get() { return this._text; },
@@ -243,7 +277,13 @@ global.location = { search: '?token=T', href: '' };
 global.sessionStorage = { getItem: () => 'T', setItem() {}, removeItem() {} };
 global.window = global;
 
-eval(js);
+// The page declares "use strict", so its declarations stay inside the eval's
+// own scope and nothing here can name them. Everything below reaches the
+// dashboard through the DOM or through a callback it handed out (pollFn via
+// setInterval) — except buildSettings, which a test re-runs with a payload
+// the fixture cannot express. Published explicitly rather than by relaxing
+// the page's own strictness.
+eval(js + '\n;global.__page = { buildSettings };');
 
 (async () => {
   // start() is invoked by the stubbed DOMContentLoaded during eval; give its
@@ -529,6 +569,124 @@ eval(js);
   ok['probing does not pin the account'] =
     !String(twoBtn.btn.className).includes('active') &&
     !String(twoBtn.card.className).includes('pinned');
+
+  // ── rotate-away slider (#168) ────────────────────────────────────────
+  // Last in the file on purpose: a slider write calls refresh(), which
+  // re-fetches and re-renders the tanks, so running it earlier would move
+  // the ground under the pin and probe assertions above.
+  const slider = findAllIn(els.settings, 'input')
+    .find(i => i.dataset && i.dataset.key === 'switchThreshold');
+  const readout = findIn(els.settings, '.rangeval');
+  ok['rotate-away is a slider'] = !!slider && slider.type === 'range';
+  // 0.50-1.00 in hundredths. Below half a window used this stops being
+  // predictive rotation and becomes a different strategy; 1.00 is the
+  // config's own ceiling and means "never rotate early".
+  ok['slider bounds are 0.50 to 1.00'] = !!slider &&
+    parseFloat(slider.getAttribute('min')) === 0.5 &&
+    parseFloat(slider.getAttribute('max')) === 1;
+  ok['slider steps in hundredths'] = !!slider && parseFloat(slider.getAttribute('step')) === 0.01;
+  ok['slider starts at the configured value'] = !!slider && parseFloat(slider.value) === 0.98;
+  // A bare slider hides what it is set to, and this is a number people quote.
+  ok['slider shows its numeric value'] = !!readout && readout.textContent === '0.98';
+
+  // The label has to say what it does, not just name the field: it changes
+  // routing for every request.
+  const thrRow = findAllIn(els.settings, '.setrow')
+    .find(r => findAllIn(r, 'input').some(i => i.dataset && i.dataset.key === 'switchThreshold'));
+  const thrText = thrRow ? thrRow.innerHTML : '';
+  ok['slider is labelled in the README’s words'] =
+    /Rotate away at/.test(thrText) && /predictive rotation/i.test(thrText) &&
+    /skipped/i.test(thrText) && /every request/i.test(thrText);
+
+  // Every assertion below drives the control. Pre-seeded false and guarded,
+  // so a defect that drops the slider or its readout shows up as the
+  // assertions above going red rather than as a TypeError that kills the run
+  // before anything prints — the same guard the pin and probe blocks use.
+  for (const k of ['Save of an untouched slider does not rewrite the value',
+                   'no write is issued mid-drag',
+                   'readout tracks the slider while dragging',
+                   'dragging 12 positions issues one write',
+                   'the write carries the final position',
+                   'the slider write is authenticated',
+                   'the slider write names only its own key',
+                   'an unrelated setting survives the slider write',
+                   'the low bound renders as 0.50',
+                   'the high bound renders as 1.00']) ok[k] = false;
+
+  if (slider && readout && slider._on && slider._on.input) {
+    // An untouched slider must write back what the SERVER sent, not what the
+    // control holds: config.Validate accepts any fraction in (0, 1], and a
+    // browser snaps a range input's value onto the step grid on read.
+    // Simulate that snap, then Save some other field, and confirm the
+    // hand-edited value survived. Deliberately before any input event below
+    // — once the user has moved it, the control IS the value.
+    const saveBtn = findAllIn(els.settings, 'button')[0];
+    slider.value = '0.97';                        // the browser, not the user
+    const beforeUntouched = settingsPuts.length;
+    if (saveBtn && saveBtn._on) saveBtn._on.click();
+    await new Promise(r => setTimeout(r, 200));
+    ok['Save of an untouched slider does not rewrite the value'] =
+      settingsPuts.length === beforeUntouched + 1 &&
+      settingsPuts[beforeUntouched].body.switchThreshold === '0.98';
+    slider.value = '0.98';                        // undo the simulated snap
+
+    // Debounce: dragging fires an input event per pixel, and each write is a
+    // config rewrite plus a pool.Apply on the running daemon.
+    const beforeDrag = settingsPuts.length;
+    const drag = ['0.97', '0.96', '0.95', '0.94', '0.93', '0.92',
+                  '0.91', '0.90', '0.89', '0.88', '0.87', '0.86'];
+    for (const v of drag) {
+      slider.value = v;
+      slider._on.input();
+      await new Promise(r => setTimeout(r, 15)); // ~180ms of drag, under the debounce
+    }
+    // Nothing may have gone out yet: the drag has not paused.
+    ok['no write is issued mid-drag'] = settingsPuts.length - beforeDrag === 0;
+    // The readout tracks the thumb the whole way, with no write behind it.
+    ok['readout tracks the slider while dragging'] = readout.textContent === '0.86';
+    await new Promise(r => setTimeout(r, 700));  // past WRITE_DEBOUNCE_MS
+    const wrote = settingsPuts.length - beforeDrag;
+    ok['dragging 12 positions issues one write'] = wrote === 1;
+    ok['the write carries the final position'] =
+      wrote === 1 && settingsPuts[beforeDrag].body.switchThreshold === '0.86';
+    ok['the slider write is authenticated'] =
+      wrote === 1 && settingsPuts[beforeDrag].auth === 'Bearer T';
+    // The write path is shared with every other setting, and a body naming
+    // more than it changed is how a slider clobbers an unrelated field.
+    ok['the slider write names only its own key'] =
+      wrote === 1 && Object.keys(settingsPuts[beforeDrag].body).join(',') === 'switchThreshold';
+    // Same property from the other side: the stored settings the fixture
+    // applies each body to must still hold everything the slider never named.
+    ok['an unrelated setting survives the slider write'] =
+      SETTINGS.exhaustedMode === 'notify' && SETTINGS.holdMax === '4h' &&
+      SETTINGS.probeInterval === '30m' && SETTINGS.crossProvider === false;
+
+    // Both bounds render as the two-decimal figure the config states, and
+    // the rendered figure is the slider's own position — not a stale one.
+    const atBound = async (v) => {
+      slider.value = v;
+      slider._on.input();
+      await new Promise(r => setTimeout(r, 10));
+      return readout.textContent;
+    };
+    const atMin = await atBound('0.5');
+    const atMax = await atBound('1');
+    ok['the low bound renders as 0.50'] = atMin === '0.50' && parseFloat(atMin) === 0.5;
+    ok['the high bound renders as 1.00'] = atMax === '1.00' && parseFloat(atMax) === 1;
+    // Let the trailing debounce fire so it cannot land after the summary.
+    await new Promise(r => setTimeout(r, 700));
+
+    // A config value under the slider's floor is legal — config.Validate
+    // accepts anything in (0, 1] — so the floor moves down to meet it rather
+    // than the control clamping a hand-edited number the next time anything
+    // on the panel is saved. Rebuilt from a fresh payload, because the panel
+    // is built once per page load; last of all, so nothing above sees it.
+    __page.buildSettings({ switchThreshold: '0.3', exhaustedMode: 'notify', accounts: {} });
+    const low = findAllIn(els.settings, 'input')
+      .find(i => i.dataset && i.dataset.key === 'switchThreshold');
+    ok['a config value under the floor widens the slider, not the other way round'] =
+      !!low && parseFloat(low.getAttribute('min')) === 0.3 && parseFloat(low.value) === 0.3;
+  }
 
   let fail = 0;
   for (const [k, v] of Object.entries(ok)) { console.log((v ? 'PASS' : 'FAIL') + ': ' + k); if (!v) fail++; }
