@@ -50,6 +50,16 @@ type Account struct {
 	// StateDisabled, which means the credential died: un-parking must never
 	// revive an account whose token is dead.
 	parked bool
+	// bootstrap marks the zero-accounts startup fallback (issue #131): the
+	// account cmd/spillway synthesises from the claude CLI's own keychain
+	// login when the config names none, which exists in memory and in no
+	// config file. It is a flag rather than a name or Source test on
+	// purpose — "local" is a name a real account may take, and a configured
+	// `source: keychain` entry is a genuine, deliberate pool member that
+	// must never be displaced. Guarded by mu: DisplaceBootstrap reads it
+	// from the admin HTTP goroutine and the config watcher's, and the
+	// account-add handler clears it on a re-auth of that same name.
+	bootstrap bool
 	// LastModel is the model this account most recently served, after any
 	// modelMap rewrite — the answer to "what am I actually talking to".
 	lastModel string
@@ -1152,6 +1162,27 @@ func (a *Account) Parked() bool {
 	return a.parked
 }
 
+// IsBootstrap reports whether this is the zero-accounts startup fallback
+// (issue #131) rather than an account any config file names.
+func (a *Account) IsBootstrap() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.bootstrap
+}
+
+// SetBootstrap marks or unmarks the startup fallback.
+//
+// Set once, at construction, by the only thing that creates the fallback.
+// CLEARED when a login re-authenticates that same name: at that moment
+// spillway holds its own grant, the config records the account, and it has
+// stopped being the borrowed credential #131 is about — leaving the flag on
+// would let the next genuine add displace a real configured account.
+func (a *Account) SetBootstrap(v bool) {
+	a.mu.Lock()
+	a.bootstrap = v
+	a.mu.Unlock()
+}
+
 // Label returns the display name the dashboard uses instead of Name, or ""
 // to fall back to deriving one from Name.
 func (a *Account) Label() string {
@@ -1610,6 +1641,56 @@ func (p *Pool) Add(a *Account) bool {
 	// leaving it to find out only when its timer eventually fires.
 	p.signalCapacityLocked()
 	return true
+}
+
+// DisplaceBootstrap drops the zero-accounts startup fallback once the pool
+// holds an account that a config file genuinely names, and reports the name
+// it removed (empty when there was nothing to do).
+//
+// Issue #131's semantics, in ONE place: the first genuinely configured
+// account displaces the bootstrap fallback, live and at startup alike.
+// Startup already behaves this way by construction — buildPool only
+// synthesises the fallback when the config lists no accounts — so this is
+// what makes a live add and a restart reach the same pool from the same
+// config. Both live routes (POST /api/accounts/add and the config
+// watcher's apply) call this and nothing else, so they cannot drift.
+//
+// Why the borrowed login must go rather than stay alongside: it is the
+// user's own claude CLI credential, spillway is not allowed to refresh it
+// (#81), and its quota is not tracked the way a configured account's is —
+// so traffic the user believes is going to their configured pool gets spent
+// against it instead. That is the ambiguity `source: keychain` was
+// deprecated to remove.
+//
+// Deliberately composed from Accounts() and Remove() rather than reaching
+// into p.accounts under one lock: Remove is already the live removal path
+// (#83) and removal is idempotent, so there is nothing to gain from a
+// second implementation. Neither call is made while the other's lock is
+// held, and neither is made while holding an Account's mu — a.IsBootstrap()
+// takes a.mu only after Accounts() has released p.mu, which is the same
+// direction ClearExhausted observes.
+//
+// The guard is "some OTHER account is present", not "the config is
+// non-empty": a reload whose new account could not actually be added (no
+// credential in the store, or an uncovered upstream host) must leave the
+// pool able to serve, and an empty pool is worse than a borrowed one.
+func (p *Pool) DisplaceBootstrap() string {
+	var fallback string
+	configured := false
+	for _, a := range p.Accounts() {
+		if a.IsBootstrap() {
+			fallback = a.Name
+			continue
+		}
+		configured = true
+	}
+	if fallback == "" || !configured {
+		return ""
+	}
+	if !p.Remove(fallback) {
+		return ""
+	}
+	return fallback
 }
 
 // SetOverageForTest seeds the extra-usage state as of now. Production code

@@ -197,58 +197,50 @@ func (a *liveApplier) report(source string, res *applyResult) {
 //
 // The diff is against the PREVIOUS config, not against the pool: an account
 // the pool has that no config ever mentioned is the zero-accounts bootstrap
-// fallback (buildPool's "local" keychain login), and a reload must not
-// delete it just because it was never in the yaml.
+// fallback (buildPool's "local" keychain login), and the diff must not
+// delete it just because it was never in the yaml. What DOES delete it is
+// the explicit rule at the end — Pool.DisplaceBootstrap, issue #131 — which
+// fires on the fallback specifically, and only once a genuinely configured
+// account is actually in the pool.
 func (a *liveApplier) syncAccounts(prev, nc *config.Config, res *applyResult) {
-	if prev == nil {
-		return
-	}
-	next := accountsByName(nc.Accounts)
-	for _, old := range prev.Accounts {
-		if _, ok := next[old.Name]; ok {
-			continue
+	if prev != nil {
+		next := accountsByName(nc.Accounts)
+		for _, old := range prev.Accounts {
+			if _, ok := next[old.Name]; ok {
+				continue
+			}
+			// Immediately, before anything can select it: the credential
+			// backing it may already have been deleted from the store (issue
+			// #83's original report).
+			if a.pool.Remove(old.Name) {
+				res.applied = append(res.applied, fmt.Sprintf("account %q removed from rotation", old.Name))
+			}
 		}
-		// Immediately, before anything can select it: the credential
-		// backing it may already have been deleted from the store (issue
-		// #83's original report).
-		if a.pool.Remove(old.Name) {
-			res.applied = append(res.applied, fmt.Sprintf("account %q removed from rotation", old.Name))
+		previous := accountsByName(prev.Accounts)
+		for _, ac := range nc.Accounts {
+			if _, ok := previous[ac.Name]; ok {
+				continue
+			}
+			a.addAccount(ac, res)
 		}
-	}
-	previous := accountsByName(prev.Accounts)
-	for _, ac := range nc.Accounts {
-		if _, ok := previous[ac.Name]; ok {
-			continue
-		}
-		a.addAccount(ac, res)
 	}
 
-	// The zero-accounts bootstrap fallback — buildPool's borrowed claude CLI
-	// login, which appears in no config — is invisible to the diff above,
-	// deliberately: a reload must not delete a pool account just because the
-	// yaml never mentioned it. But once the file does name accounts, a
-	// restart would drop it, and until then the pool can still rotate onto a
-	// credential spillway is not allowed to refresh (#81). Say so rather
-	// than let the difference between "restarted" and "reloaded" be silent.
+	// Issue #131: the first genuinely configured account displaces the
+	// zero-accounts bootstrap fallback, live and at startup alike. #130 used
+	// to report this as restart-required instead — a holding position that
+	// left a live add and a restart reaching different pools from the same
+	// config, with the user's own borrowed claude CLI credential still in
+	// rotation, unrefreshable (#81) and untracked, in the live case.
 	//
-	// Only on the transition, not on every reload afterwards: buildPool
-	// creates the fallback exactly when the config named no accounts, so
-	// "the file went from naming none to naming some" is the one moment the
-	// difference appears. Repeating it on every subsequent reload would put
-	// an INFO line on every token-refresh rewrite of the file.
-	if len(prev.Accounts) > 0 || len(nc.Accounts) == 0 {
-		return
-	}
-	for _, existing := range a.pool.Accounts() {
-		if existing.Source != pool.SourceKeychain {
-			continue
-		}
-		if _, ok := next[existing.Name]; ok {
-			continue
-		}
-		res.restart = append(res.restart, fmt.Sprintf(
-			"account %q is the startup fallback borrowing the claude CLI's own login and is in no config — "+
-				"it stays in rotation until a restart", existing.Name))
+	// The very same call POST /api/accounts/add makes: one rule, one
+	// implementation, so the two routes cannot disagree. Unconditional and
+	// idempotent, like everything else apply does — a no-op unless the pool
+	// actually holds both the fallback and something else, so there is no
+	// transition to detect and nothing to repeat on later reloads.
+	if gone := a.pool.DisplaceBootstrap(); gone != "" {
+		res.applied = append(res.applied, fmt.Sprintf(
+			"account %q was the startup fallback borrowing the claude CLI's own login and is in no config — "+
+				"a configured account has taken over, so it has left rotation", gone))
 	}
 }
 
@@ -297,6 +289,19 @@ func (a *liveApplier) addAccount(ac config.AccountConfig, res *applyResult) {
 		res.restart = append(res.restart, fmt.Sprintf("account %q NOT added: %v", ac.Name, err))
 		return
 	}
+	// Issue #131, the one name collision that is not "already done": the
+	// pool's entry under this name may be the bootstrap fallback, which no
+	// config named. The file naming it now means the CONFIGURED credential
+	// should serve — it differs from the borrowed one in source, type,
+	// upstream and modelMap, not tokens alone — so the fallback gives way
+	// here rather than shadowing it forever. Through Pool.Remove, the live
+	// removal path #83 established, and only at this point: every refusal
+	// above returns before it, so a configured account that cannot be added
+	// never costs the pool the account it already had.
+	if a.removeBootstrapNamed(ac.Name) {
+		res.applied = append(res.applied, fmt.Sprintf(
+			"startup fallback %q gave way to the configured account of the same name", ac.Name))
+	}
 	if !a.pool.Add(acct) {
 		return // already present under that name; nothing to say
 	}
@@ -304,6 +309,19 @@ func (a *liveApplier) addAccount(ac config.AccountConfig, res *applyResult) {
 		a.refreshHosts()
 	}
 	res.applied = append(res.applied, fmt.Sprintf("account %q added to rotation", ac.Name))
+}
+
+// removeBootstrapNamed drops the pool's entry for name when, and only when,
+// it is the zero-accounts bootstrap fallback (issue #131). Reports whether
+// it removed anything. A configured account under that name — including a
+// deliberate `source: keychain` one — is never touched.
+func (a *liveApplier) removeBootstrapNamed(name string) bool {
+	for _, existing := range a.pool.Accounts() {
+		if existing.Name == name && existing.IsBootstrap() {
+			return a.pool.Remove(name)
+		}
+	}
+	return false
 }
 
 // warnInlineSecrets reports token material somebody has hand-written into

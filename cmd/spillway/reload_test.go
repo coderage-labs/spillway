@@ -138,6 +138,17 @@ func acct(name string) *pool.Account {
 	return a
 }
 
+// bootstrapAcct builds the zero-accounts startup fallback exactly as
+// buildPool does (issue #131): borrowed from the claude CLI's keychain
+// login, named "local", and FLAGGED — the flag is what the displacement
+// rule keys on, and a fixture that left it off would assert a no-op.
+func bootstrapAcct(name string) *pool.Account {
+	a := pool.NewAccount(name, pool.SourceKeychain, "borrowed-tok", "borrowed-refresh", 0, "")
+	a.Type = "claude-oauth"
+	a.SetBootstrap(true)
+	return a
+}
+
 func poolNames(p *pool.Pool) []string {
 	var out []string
 	for _, a := range p.Accounts() {
@@ -736,40 +747,109 @@ func TestNotifySetReachesTheRunningDaemon(t *testing.T) {
 	}
 }
 
-// TestReloadReportsTheBootstrapFallbackAccount: running with no accounts
-// configured, spillway borrows the claude CLI's own login as a single
-// "local" account. It is in no config, so the reload diff cannot see it —
-// and must not delete it on that basis. Once the file names real accounts a
-// restart WOULD drop it, and until then the pool can still rotate onto a
-// credential spillway is not allowed to refresh (#81), so the difference
-// has to be said rather than left silent.
-func TestReloadReportsTheBootstrapFallbackAccount(t *testing.T) {
-	local := pool.NewAccount("local", pool.SourceKeychain, "tok", "", 0, "")
-	local.Type = "claude-oauth"
+// TestReloadDisplacesTheBootstrapFallbackAccount is issue #131 on the
+// config-watcher route. Running with no accounts configured, spillway
+// borrows the claude CLI's own login as a single "local" account that is in
+// no config. The moment the file names a genuinely configured account, a
+// restart would build a pool WITHOUT the borrowed login — so a reload has
+// to reach the same place. #130's holding position (report it as
+// restart-required and leave it rotating) is what this replaces.
+func TestReloadDisplacesTheBootstrapFallbackAccount(t *testing.T) {
+	local := bootstrapAcct("local")
 	h := newHarness(t, "log:\n  level: info\n", local)
-	if err := h.store.Set("work", secrets.Secrets{AccessToken: "at"}); err != nil {
+	if err := h.store.Set("work", secrets.Secrets{AccessToken: "at", RefreshToken: "rt"}); err != nil {
 		t.Fatal(err)
 	}
 
 	h.write("accounts:\n  - name: work\n    type: claude-oauth\n")
 	h.reload()
 
-	if names := poolNames(h.pool); len(names) != 2 {
-		t.Fatalf("pool = %v; the bootstrap fallback must not be deleted by a reload, and the new account must be added", names)
+	if names := poolNames(h.pool); len(names) != 1 || names[0] != "work" {
+		t.Fatalf("pool = %v; want only the configured account — the borrowed CLI login must leave rotation", names)
 	}
-	log := h.logs.String()
-	if !strings.Contains(log, "startup fallback") || !strings.Contains(log, "restart_required") {
-		t.Fatalf("the still-borrowed fallback account was not reported as needing a restart:\n%s", log)
+	// Gone from the RUNNING pool, not merely from a listing: nothing may be
+	// able to route a request to it.
+	if err := h.pool.Pin("local", false); err == nil {
+		t.Fatal("the displaced fallback is still resolvable by the pool — it can still be selected")
+	}
+	for i := 0; i < 20; i++ {
+		got := h.pool.SelectFor(fmt.Sprintf("s%d", i), nil)
+		if got == nil {
+			t.Fatal("nothing selectable after the fallback was displaced")
+		}
+		if got.Name == "local" {
+			t.Fatal("the borrowed CLI login is still being selected for requests")
+		}
+		h.pool.Done(got)
+	}
+	if log := h.logs.String(); !strings.Contains(log, "left rotation") {
+		t.Fatalf("the displacement was not reported in the log:\n%s", log)
+	}
+}
+
+// TestReloadKeepsTheBootstrapFallbackWhenNothingReplacesIt: the displacement
+// rule must never empty the pool. A config that names an account the reload
+// cannot actually add (no credential in the secret store) leaves the
+// borrowed login exactly where it was — a pool with one imperfect account
+// still serves; a pool with none does not.
+func TestReloadKeepsTheBootstrapFallbackWhenNothingReplacesIt(t *testing.T) {
+	h := newHarness(t, "log:\n  level: info\n", bootstrapAcct("local"))
+
+	h.write("accounts:\n  - name: work\n    type: claude-oauth\n")
+	h.reload()
+
+	if names := poolNames(h.pool); len(names) != 1 || names[0] != "local" {
+		t.Fatalf("pool = %v; want the fallback kept — the configured account could not be added", names)
+	}
+	if got := h.pool.SelectFor("s", nil); got == nil {
+		t.Fatal("the pool can no longer serve anything")
+	}
+}
+
+// TestReloadFallbackGivesWayToAConfiguredAccountOfTheSameName: naming the
+// fallback's own name in the config is not "already present, nothing to
+// do". The configured entry has its own credential in the secret store, and
+// that is what must serve.
+func TestReloadFallbackGivesWayToAConfiguredAccountOfTheSameName(t *testing.T) {
+	local := bootstrapAcct("local")
+	h := newHarness(t, "log:\n  level: info\n", local)
+	if err := h.store.Set("local", secrets.Secrets{AccessToken: "configured-tok", RefreshToken: "rt"}); err != nil {
+		t.Fatal(err)
 	}
 
-	// Said once, at the transition — not on every reload afterwards. The
-	// daemon rewrites this file on every token refresh, and a line per
-	// refresh would bury the ones that matter.
-	mark := len(log)
-	h.write("accounts:\n  - name: work\n    type: claude-oauth\n    label: day job\n")
+	h.write("accounts:\n  - name: local\n    type: claude-oauth\n")
 	h.reload()
-	if after := h.logs.String()[mark:]; strings.Contains(after, "startup fallback") {
-		t.Fatalf("the fallback notice repeated on a later reload:\n%s", after)
+
+	accts := h.pool.Accounts()
+	if len(accts) != 1 {
+		t.Fatalf("pool = %v; want exactly one account named local", poolNames(h.pool))
+	}
+	if accts[0].IsBootstrap() {
+		t.Fatal("the pool is still serving the borrowed CLI login under the configured account's name")
+	}
+	if tok := accts[0].Token(); tok != "configured-tok" {
+		t.Fatalf("token = %q; want the configured credential from the secret store", tok)
+	}
+}
+
+// TestReloadNeverDisplacesAConfiguredKeychainAccount guards the rule against
+// being a name-or-source heuristic. A deliberate `source: keychain` entry is
+// a genuine pool member someone wrote down; it shares both the name and the
+// Source of the bootstrap fallback and must survive every add.
+func TestReloadNeverDisplacesAConfiguredKeychainAccount(t *testing.T) {
+	local := pool.NewAccount("local", pool.SourceKeychain, "tok", "rt", 0, "")
+	local.Type = "claude-oauth"
+	h := newHarness(t, "accounts:\n  - name: local\n    source: keychain\n    type: claude-oauth\n", local)
+	if err := h.store.Set("work", secrets.Secrets{AccessToken: "at", RefreshToken: "rt"}); err != nil {
+		t.Fatal(err)
+	}
+
+	h.write("accounts:\n  - name: local\n    source: keychain\n    type: claude-oauth\n  - name: work\n    type: claude-oauth\n")
+	h.reload()
+
+	names := poolNames(h.pool)
+	if len(names) != 2 {
+		t.Fatalf("pool = %v; a configured source: keychain account must not be displaced", names)
 	}
 }
 

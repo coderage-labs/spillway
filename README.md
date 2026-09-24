@@ -779,6 +779,13 @@ worth adding — spillway's bootstrap fallback (running with zero accounts
 configured) reads it as a convenience for quick, single-account use — but
 that is a one-account passthrough, not a way to add an account to the pool.
 
+That fallback account (`local`) leaves the pool the moment a genuinely
+configured account joins it, whether that happens at startup, through
+`spillway login`, or through an external edit of the config file picked up
+by the watcher. All three routes agree, so the pool you get never depends on
+how the account arrived. Until then it keeps serving, so an empty config
+still gives you a working pool.
+
 ### Where they are kept
 
 The OS keychain by default: Keychain Services, Credential Manager, or Secret
