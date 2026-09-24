@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -152,6 +153,66 @@ func TestSliderThresholdReachesConfigAndRunningPool(t *testing.T) {
 	if got.Name != "reserve" {
 		t.Fatalf("selected %q after lowering the threshold to 0.55; preferred is at 0.60 of its window "+
 			"and must now be rotated away from — the new threshold is not reaching the selector", got.Name)
+	}
+}
+
+// TestSliderThresholdBoundsRoundTrip covers what the slider sends at its two
+// extremes, which is not what it renders: JavaScript stringifies the top of
+// the range as "1", not "1.00", and the bottom as "0.5". Both have to be
+// accepted, land as the right number, and come back through CurrentSettings
+// in a form the control can be rebuilt from — a bound that 400s or reads back
+// as something else is a control that fails only at the ends.
+func TestSliderThresholdBoundsRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		sent string
+		want float64
+	}{
+		{"1", 1},
+		{"0.5", 0.5},
+	} {
+		t.Run(tc.sent, func(t *testing.T) {
+			a := pool.NewAccount("only", pool.SourceYAML, "t", "", 0, "")
+			a.Type = "claude-oauth"
+			p := pool.New([]*pool.Account{a}, time.Now())
+			srv := admin.New(p, nil, events.New(), "")
+			front := httptest.NewServer(srv)
+			defer front.Close()
+
+			cfgPath := filepath.Join(t.TempDir(), "spillway.yaml")
+			seed := "admin:\n  addr: " + strings.TrimPrefix(front.URL, "http://") + "\n" +
+				"pool:\n  switchThreshold: 0.98\n"
+			if err := os.WriteFile(cfgPath, []byte(seed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := config.UpsertAccount(cfgPath, config.AccountConfig{Name: "only", Type: "claude-oauth"}); err != nil {
+				t.Fatal(err)
+			}
+			srv.EnableSettings(cfgPath, func(nc *config.Config) { p.Apply(poolSettings(nc)) })
+
+			putSettings(t, front.URL, `{"switchThreshold":"`+tc.sent+`"}`)
+
+			after, err := config.LoadFrom(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Pool.SwitchThreshold != tc.want {
+				t.Errorf("config switchThreshold = %v, want %v", after.Pool.SwitchThreshold, tc.want)
+			}
+			if p.Threshold() != tc.want {
+				t.Errorf("pool.Threshold() = %v, want %v", p.Threshold(), tc.want)
+			}
+			// And back out again: the panel is rebuilt from this, so a bound
+			// that reads back unparseable is a slider that resets on reload.
+			cur := config.CurrentSettings(after)
+			if cur.SwitchThreshold == nil {
+				t.Fatal("CurrentSettings dropped switchThreshold")
+			}
+			var back float64
+			if _, err := fmt.Sscanf(*cur.SwitchThreshold, "%g", &back); err != nil || back != tc.want {
+				t.Errorf("CurrentSettings switchThreshold = %q (parsed %v, err %v), want %v",
+					*cur.SwitchThreshold, back, err, tc.want)
+			}
+		})
 	}
 }
 
