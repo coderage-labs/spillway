@@ -43,11 +43,35 @@ const ACCOUNTS = [{
     { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now + 6 * 3600e3).toISOString(), source: 'rejected' },
   ],
 }];
-const HISTORY = [{
-  account: 'you@example-one.com', window: '5h',
-  ts: [now - 3600e3, now - 1800e3, now - 60e3],
-  headroom: [0.75, 0.62, 0.58],
-}];
+// Issue #167's actual shape: /api/quota-history returns a series per account
+// PER WINDOW, so eight accounts is twenty-four series, not eight. The three
+// accounts that also appear in ACCOUNTS keep shapes the tank and burn-rate
+// assertions depend on -- in particular example-one's 5h curve is the one the
+// "no window runs dry" verdict is computed from, and example-two's spent 7d
+// is deliberately FLAT so it raises no dry-window alarm. The other five exist
+// only in the history, which is what the chart gets for an account retired
+// from the pool whose samples have not aged out yet.
+//
+// Their domains differ in the first few characters on purpose: short() falls
+// back to the domain's first label, and three accounts all reading
+// "example-..." is a fixture artefact, not what a real pool looks like.
+const H_TS = [now - 3600e3, now - 1800e3, now - 60e3];
+const HIST_ACCOUNTS = [
+  'you@example-one.com', 'you@example-two.com', 'you@example-three.com',
+  'you@acme.com', 'you@initech.com', 'you@hooli.io', 'you@globex.net', 'you@umbrella.org',
+];
+const H_5H = [[0.75, 0.62, 0.58], [0.86, 0.83, 0.80], [0.55, 0.52, 0.49], [0.91, 0.88, 0.84],
+              [0.40, 0.36, 0.31], [0.70, 0.66, 0.61], [0.25, 0.21, 0.18], [0.60, 0.57, 0.55]];
+const H_7D = [[0.44, 0.43, 0.42], [0, 0, 0], [0.66, 0.65, 0.64], [0.80, 0.79, 0.78],
+              [0.30, 0.29, 0.28], [0.52, 0.51, 0.50], [0.15, 0.14, 0.13], [0.90, 0.89, 0.88]];
+// Every fable window spent, which is the state the issue describes for 5h:
+// eight lines flat along the floor, a shape and not a reading.
+const H_FABLE = HIST_ACCOUNTS.map(() => [0, 0, 0]);
+const HISTORY = [
+  ...HIST_ACCOUNTS.map((account, i) => ({ account, window: '5h', ts: H_TS, headroom: H_5H[i] })),
+  ...HIST_ACCOUNTS.map((account, i) => ({ account, window: '7d', ts: H_TS, headroom: H_7D[i] })),
+  ...HIST_ACCOUNTS.map((account, i) => ({ account, window: '7d-fable', ts: H_TS, headroom: H_FABLE[i] })),
+];
 const ACTIVITY = [{ ts: now - 60e3, count: 3, errors: 0, rotated: 0, p95_ms: 800 }];
 const REQUESTS = [
   { ts: new Date(now).toISOString(), account: 'you@example-one.com', path: '/v1/messages',
@@ -301,10 +325,23 @@ function mkEl(tag) {
 // or a page, asking for something that does not exist, and inventing an
 // element for it is how collectSettings came to read phantoms and submit a
 // body the real server would 400 (#202).
-const MARKUP_IDS = [...html.replace(/<script>[\s\S]*?<\/script>/g, '')
-  .matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
+// Seeded with the TAG and the CLASS the markup gave them, not just the id. A
+// class-less, tag-less seed is the same family of lie as the phantom
+// getElementById (#202): index.html's own stylesheet targets those classes,
+// so a test could not ask which CSS rule governs an element the markup
+// declares — and the layout rules are the whole of #167's mobile reflow.
+const MARKUP_IDS = [];
+for (const m of html.replace(/<script>[\s\S]*?<\/script>/g, '')
+    .matchAll(/<([a-z][a-z0-9]*)\b([^>]*)>/gi)) {
+  const id = /\bid="([^"]+)"/.exec(m[2]);
+  if (!id) continue;
+  const e = mkEl(m[1]);
+  e.id = id[1];
+  const cls = /\bclass="([^"]*)"/.exec(m[2]);
+  if (cls) e.className = cls[1];
+  MARKUP_IDS.push(id[1]);
+}
 if (!MARKUP_IDS.length) throw new Error('harness: index.html declares no ids — the id scrape is broken');
-for (const id of MARKUP_IDS) mkEl().id = id;
 
 global.document = {
   getElementById: (id) => {
@@ -424,6 +461,150 @@ async function run() {
       return secs.length > 1 && (Math.max(...secs) - Math.min(...secs)) > 6;
     })(),
   });
+
+  // ── headroom small multiples (#167) ──────────────────────────────────
+  // Eight accounts x three windows was twenty-four lines on one 760x190 plot.
+  // Everything below is anchored on the facets actually being there: a count
+  // or an .every() over an empty container passes while testing nothing
+  // (#202), and this whole section would be exactly that if the chart were
+  // absent.
+  const facets = findAllIn(els.headrooms, '.facet');
+  const plots = findAllIn(els.headrooms, '.plot');
+  const plotIn = (f) => findIn(f, '.plot');
+  const facetWin = (f) => { const p = plotIn(f); return p && p.getAttribute('data-window'); };
+  const seriesIn = (f) => findAllIn(f, '.series');
+
+  ok['headroom is split into one plot per quota window'] =
+    facets.length === 3 && plots.length === 3 &&
+    JSON.stringify(facets.map(facetWin)) === JSON.stringify(['5h', '7d', '7d-fable']);
+  // The split has to be a split. Every line in a plot belongs to that plot's
+  // window, and each plot carries one per account.
+  ok['each plot draws only its own window, one line per account'] =
+    facets.length === 3 && facets.every(f => {
+      const w = facetWin(f), s = seriesIn(f);
+      return s.length === 8 && s.every(p => p.getAttribute('data-window') === w) &&
+        new Set(s.map(p => p.getAttribute('data-account'))).size === 8;
+    });
+  ok['all 24 series are drawn, three ways rather than overlaid'] =
+    plots.length === 3 && findAllIn(els.headrooms, '.series').length === 24;
+
+  // The property the whole split rests on: colour follows the account, never
+  // its rank inside a plot -- otherwise the three cannot be read together,
+  // which is the only reason to have split them. Both halves: one account is
+  // ONE hue in all three, AND two accounts are not the same hue (without
+  // which "all identical" would pass on a chart painted in a single colour).
+  const strokeOf = (f, acct) => {
+    const p = seriesIn(f).find(s => s.getAttribute('data-account') === acct);
+    return p && p.getAttribute('stroke');
+  };
+  const twoHues = facets.map(f => strokeOf(f, 'you@example-two.com'));
+  const acmeHues = facets.map(f => strokeOf(f, 'you@acme.com'));
+  const isSlot = (c) => /^var\(--series-\d+\)$/.test(String(c));
+  ok['one account keeps one colour across all three plots'] =
+    twoHues.length === 3 && twoHues.every(c => c && c === twoHues[0]) && isSlot(twoHues[0]);
+  ok['two accounts do not share a colour'] =
+    acmeHues.length === 3 && acmeHues.every(c => c && c === acmeHues[0]) &&
+    isSlot(acmeHues[0]) && acmeHues[0] !== twoHues[0];
+
+  // The ask was the same space, not three times it. A facet renders at a
+  // third of the row's width, so its height is width/3 x (vbH/vbW); the row
+  // is no taller than the old single plot iff vbH/vbW <= 3 x (190/760). The
+  // column gaps and the caption line come out of the slack that leaves.
+  const ratioOf = (f) => {
+    const p = plotIn(f);
+    const n = String((p && p.getAttribute('viewBox')) || '').trim().split(/\s+/).map(Number);
+    return (n.length === 4 && n[2] > 0 && n[3] > 0) ? n[3] / n[2] : null;
+  };
+  const ratios = facets.map(ratioOf);
+  ok['the three plots stand no taller than the one they replace'] =
+    ratios.length === 3 && ratios.every(r => r !== null && r === ratios[0]) &&
+    ratios[0] <= 3 * (190 / 760);
+
+  // The reflow is a CSS rule, so assert the rule -- tied to the class the
+  // container actually carries, so renaming one without the other fails here
+  // instead of quietly leaving a three-column grid on a phone.
+  const plotsCls = String(els.headrooms.className || els.headrooms.attrs.class || '').trim();
+  const wideRule = new RegExp('\\.' + plotsCls +
+    '\\s*\\{[^}]*grid-template-columns:\\s*repeat\\(3,\\s*minmax\\(0');
+  const narrowRule = new RegExp('@media[^{]*max-width[^{]*\\{\\s*\\.' + plotsCls +
+    '\\s*\\{[^}]*grid-template-columns:\\s*minmax\\(0,\\s*1fr\\)');
+  ok['the plots are a three-column grid on a wide screen'] =
+    !!plotsCls && facets.length === 3 && wideRule.test(css);
+  // minmax(0, ...) and not a bare 1fr: `1fr` means minmax(auto, 1fr), and an
+  // SVG's intrinsic width then floors the track, which is precisely how this
+  // grid would give a 400px phone a sideways scrollbar.
+  ok['the plots stack to one column on a narrow screen'] =
+    !!plotsCls && facets.length === 3 && narrowRule.test(css);
+  ok['no plot carries a pixel width'] = plots.length === 3 &&
+    plots.every(p => !p.getAttribute('width') && !/\d\s*px/.test(String(p.attrs.style || '')));
+
+  // Eight flat lines on the floor is a shape, not a reading. The plot says so
+  // in words, keeps drawing the data, and does not stack eight direct labels
+  // on one pixel of line to prove it.
+  const fableFacet = facets.find(f => facetWin(f) === '7d-fable');
+  const fiveFacet = facets.find(f => facetWin(f) === '5h');
+  const noteOf = (f) => { const n = f && findIn(f, '.facet-note'); return (n && n.textContent) || ''; };
+  ok['an all-spent plot says so in words'] =
+    !!fableFacet && /below the spill point/.test(noteOf(fableFacet));
+  ok['an all-spent plot still draws its series'] =
+    !!fableFacet && seriesIn(fableFacet).length === 8;
+  // Anchored on the other plot HAVING labels, or "no labels here" passes on a
+  // page that draws none anywhere.
+  ok['an all-spent plot drops the unreadable direct labels'] =
+    !!fableFacet && !!fiveFacet &&
+    findAllIn(fableFacet, '.lbl').length === 0 &&
+    findAllIn(fiveFacet, '.lbl').length > 0;
+  ok['a readable plot states its series count instead'] =
+    !!fiveFacet && /^8 accounts$/.test(noteOf(fiveFacet));
+
+  // Text never wears the data colour: three of the eight light-mode slots are
+  // under 3:1 on white and illegible as text. Identity rides the end dot and
+  // the leader line beside the label -- and there is one leader per label, or
+  // a nudged label belongs to no line at all.
+  const fiveLbls = fiveFacet ? findAllIn(fiveFacet, '.lbl') : [];
+  const fiveLeads = fiveFacet ? findAllIn(fiveFacet, '.lead') : [];
+  ok['direct labels are ink, never the series hue'] =
+    fiveLbls.length > 0 && fiveLbls.every(t => !t.getAttribute('fill'));
+  ok['every direct label has a coloured leader back to its line'] =
+    fiveLbls.length > 0 && fiveLeads.length === fiveLbls.length &&
+    fiveLeads.every(p => isSlot(p.getAttribute('stroke')));
+
+  // A legend is mandatory past a few series, and it is the dependable channel
+  // here: the direct labels are clipped to nine characters, the legend is not.
+  ok['the legend names every account exactly once'] = (() => {
+    const html = els.legend.innerHTML;
+    const names = ['work', 'example-two', 'example-three', 'acme', 'initech',
+                   'hooli', 'globex', 'umbrella'];
+    return names.every(n => html.split('>' + n + '</span>').length === 2) &&
+      (html.match(/<i /g) || []).length === 8;
+  })();
+
+  // ── the categorical palette itself (#167) ────────────────────────────
+  // Eight series per plot is the documented ceiling for categorical colour,
+  // so the eight slots have to hold up rather than be assumed to. Only the
+  // computable gate is asserted here: OKLCH lightness inside the band for the
+  // surface each set is drawn on. Dark slots 7 and 8 were outside it (L 0.714
+  // and 0.785 against a 0.48-0.67 band) until #167 re-stepped them.
+  const okL = (hex) => {
+    const v = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map(c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+    const l = Math.cbrt(0.4122214708 * v[0] + 0.5363325363 * v[1] + 0.0514459929 * v[2]);
+    const m = Math.cbrt(0.2119034982 * v[0] + 0.6806995451 * v[1] + 0.1073969566 * v[2]);
+    const s = Math.cbrt(0.0883024619 * v[0] + 0.2817188376 * v[1] + 0.6299787005 * v[2]);
+    return 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
+  };
+  const slotsIn = (text) => {
+    const m = {};
+    for (const x of text.matchAll(/--series-(\d+)\s*:\s*(#[0-9a-f]{6})/gi)) m[+x[1]] = x[2];
+    return Array.from({ length: 8 }, (_, i) => m[i + 1]);
+  };
+  const darkAt = css.indexOf('prefers-color-scheme: dark');
+  const inBand = (hexes, lo, hi) => hexes.length === 8 && hexes.every(Boolean) &&
+    hexes.every(h => okL(h) >= lo && okL(h) <= hi);
+  ok['light series slots 1-8 sit inside the light lightness band'] =
+    darkAt > 0 && inBand(slotsIn(css.slice(0, darkAt)), 0.43, 0.77);
+  ok['dark series slots 1-8 sit inside the dark lightness band'] =
+    darkAt > 0 && inBand(slotsIn(css.slice(darkAt)), 0.48, 0.67);
 
   // ── guards on the harness itself (#202) ──────────────────────────────
   // This file is the only check on a page with no compiler and no type
