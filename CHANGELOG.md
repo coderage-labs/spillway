@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.25.1](https://github.com/coderage-labs/spillway/compare/v0.25.0...v0.25.1) (2026-09-25)
+
+
+### Fixes
+
+* **dashboard:** set the slider bounds before its value ([#223](https://github.com/coderage-labs/spillway/issues/223)) ([#224](https://github.com/coderage-labs/spillway/issues/224)) ([c44c66a](https://github.com/coderage-labs/spillway/commit/c44c66a003769f2d98fd4c637283f260ec05071b))
+* **proxy:** retry a transient tunnel dial instead of failing the client ([#221](https://github.com/coderage-labs/spillway/issues/221)) ([#226](https://github.com/coderage-labs/spillway/issues/226)) ([9e8d525](https://github.com/coderage-labs/spillway/commit/9e8d525aef36af73e0aae50ace46a5a9f4a90bb6))
+
 ## [0.25.0](https://github.com/coderage-labs/spillway/compare/v0.24.0...v0.25.0) (2026-09-25)
 
 
