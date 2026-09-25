@@ -1320,17 +1320,21 @@ Changes validate before they are written and apply to the running pool with no
 restart. Credentials are not editable and are not exposed: token material must
 not be reachable from a browser, loopback or not.
 
-`switchThreshold` — "rotate away at" on the panel — is a slider rather than a
-text box, from 0.50 to 1.00 in steps of 0.01, with the figure shown beside it.
-Below 0.50 this stops being predictive rotation and becomes a different
-strategy, and 1.00 (the config's own ceiling) means never rotate early; a
-config value outside that range is still legal and still honoured — the slider
-widens to reach it rather than clamping it. It is the one control that writes
-on its own, about half a second after you stop dragging, so a drag is one write
-rather than one per pixel. It sends only its own key, so it cannot disturb a
-field you are part-way through editing elsewhere on the panel. The tanks
-re-colour and the "spent" markers move on the next poll, because both are
-computed by the daemon from the value it has just applied.
+`switchThreshold` — `Spill point` on the panel — is a slider rather than a
+text box, and shows headroom remaining rather than the fraction used, to match
+the tanks, the headroom chart's y-axis and its own "spill point" line: 0% to
+10% in steps of 1%, with the figure shown beside it. The stored value is
+unchanged — still the used-fraction `switchThreshold` always was, in (0, 1] —
+so dragging right raises the headroom figure shown while lowering the fraction
+written, rotating earlier. 0% (the config's own ceiling, 1.00) means never
+rotate early; a config value outside that range is still legal and still
+honoured — the slider widens its ceiling to reach it rather than clamping it.
+It is the one control that writes on its own, about half a second after you
+stop dragging, so a drag is one write rather than one per pixel. It sends
+only its own key, so it cannot disturb a field you are part-way through
+editing elsewhere on the panel. The tanks re-colour and the "spent" markers
+move on the next poll, because both are computed by the daemon from the value
+it has just applied.
 
 `disabled` parks an account — kept, with its credential, but out of rotation.
 That is deliberately distinct from the disable that means a credential died,

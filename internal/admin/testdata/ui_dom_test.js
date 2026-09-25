@@ -1032,24 +1032,31 @@ async function run() {
     .find(i => i.dataset && i.dataset.key === 'switchThreshold');
   const readout = findIn(els.settings, '.rangeval');
   ok['rotate-away is a slider'] = !!slider && slider.type === 'range';
-  // 0.50-1.00 in hundredths. Below half a window used this stops being
-  // predictive rotation and becomes a different strategy; 1.00 is the
-  // config's own ceiling and means "never rotate early".
-  ok['slider bounds are 0.50 to 1.00'] = !!slider &&
-    parseFloat(slider.getAttribute('min')) === 0.5 &&
-    parseFloat(slider.getAttribute('max')) === 1;
+  // 0%-10% headroom in hundredths (#216). The control now counts headroom
+  // remaining, matching the tanks and the chart's own "spill point" line,
+  // rather than the used-fraction the config stores; 0% is the config's own
+  // ceiling (switchThreshold 1.00) and means "never rotate early".
+  ok['slider bounds are 0% to 10% headroom'] = !!slider &&
+    parseFloat(slider.getAttribute('min')) === 0 &&
+    parseFloat(slider.getAttribute('max')) === 0.1;
   ok['slider steps in hundredths'] = !!slider && parseFloat(slider.getAttribute('step')) === 0.01;
-  ok['slider starts at the configured value'] = !!slider && parseFloat(slider.value) === 0.98;
+  // The fixture's switchThreshold is '0.98' (98% used) -- displayed as 2%
+  // headroom. If this reads 0.98 the display/stored inversion never happened.
+  ok['slider starts at the configured value'] = !!slider && parseFloat(slider.value) === 0.02;
   // A bare slider hides what it is set to, and this is a number people quote.
-  ok['slider shows its numeric value'] = !!readout && readout.textContent === '0.98';
+  // Percentage, not the raw fraction (#214) -- and the fraction the PUT body
+  // still carries is asserted separately below (#216): display and storage
+  // must never be checked against the same expectation, or a broken
+  // conversion that inverts both consistently would still pass.
+  ok['slider shows its value as headroom, not used'] = !!readout && readout.textContent === '2%';
 
   // The label has to say what it does, not just name the field: it changes
-  // routing for every request.
+  // routing for every request. Renamed to the chart's own phrase (#216).
   const thrRow = findAllIn(els.settings, '.setrow')
     .find(r => findAllIn(r, 'input').some(i => i.dataset && i.dataset.key === 'switchThreshold'));
   const thrText = thrRow ? thrRow.innerHTML : '';
-  ok['slider is labelled in the README’s words'] =
-    /Rotate away at/.test(thrText) && /predictive rotation/i.test(thrText) &&
+  ok['slider is labelled Spill point'] =
+    /Spill point/.test(thrText) && /predictive rotation/i.test(thrText) &&
     /skipped/i.test(thrText) && /every request/i.test(thrText);
 
   // Every assertion below drives the control. Pre-seeded false and guarded,
@@ -1059,14 +1066,16 @@ async function run() {
   for (const k of ['Save of an untouched slider does not rewrite the value',
                    'no write is issued mid-drag',
                    'readout tracks the slider while dragging',
-                   'dragging 12 positions issues one write',
-                   'the write carries the final position',
+                   'dragging 5 positions issues one write',
+                   'the write carries the fraction, not the headroom',
                    'the slider write is authenticated',
                    'the slider write names only its own key',
                    'an unrelated setting survives the slider write',
-                   'the low bound renders as 0.50',
-                   'the high bound renders as 1.00',
-                   'a config value under the floor widens the slider, not the other way round',
+                   'the low bound renders as 0%',
+                   'the high bound renders as 10%',
+                   'a noisy step position renders without float noise',
+                   'an off-grid value keeps its precision',
+                   'a config value beyond the ceiling widens the slider, not the other way round',
                   ]) ok[k] = false;
 
   if (slider && readout && slider._on && slider._on.input) {
@@ -1075,9 +1084,12 @@ async function run() {
     // browser snaps a range input's value onto the step grid on read.
     // Simulate that snap, then Save some other field, and confirm the
     // hand-edited value survived. Deliberately before any input event below
-    // — once the user has moved it, the control IS the value.
+    // — once the user has moved it, the control IS the value. The
+    // slider's own units are headroom (#216); 0.03 is the "browser snap"
+    // here, and it must still resolve to the stored fraction 0.98, never to
+    // 0.03 itself and never to its unrounded complement.
     const saveBtn = findAllIn(els.settings, 'button')[0];
-    slider.value = '0.97';                        // the browser, not the user
+    slider.value = '0.03';                        // the browser, not the user
     const beforeUntouched = settingsPuts.length;
     if (saveBtn && saveBtn._on) saveBtn._on.click();
     await new Promise(r => setTimeout(r, 200));
@@ -1101,27 +1113,40 @@ async function run() {
       const a = saved && saved.accounts && saved.accounts['you@example-one.com'];
       return !!a && a.label === 'work' && a.disabled === false && a.priority === 0;
     })();
-    slider.value = '0.98';                        // undo the simulated snap
+    slider.value = '0.02';                        // undo the simulated snap
 
     // Debounce: dragging fires an input event per pixel, and each write is a
-    // config rewrite plus a pool.Apply on the running daemon.
+    // config rewrite plus a pool.Apply on the running daemon. Dragged in
+    // headroom units, rising towards the control's ceiling (0.10) — a
+    // value whose fraction (0.90) is NOT its own headroom (0.10), so a
+    // dropped conversion on the way out is caught by "carries the
+    // fraction" below.
     const beforeDrag = settingsPuts.length;
-    const drag = ['0.97', '0.96', '0.95', '0.94', '0.93', '0.92',
-                  '0.91', '0.90', '0.89', '0.88', '0.87', '0.86'];
+    // 0.07 headroom is switchThreshold 1 - 0.07, which is 0.9299999999999999
+    // in binary floating point -- so the final drag position doubles as the
+    // float-noise check for the write direction (rangeText already covers
+    // the readout direction below): a fromDisplay that skips round2 sends
+    // that noisy digit string instead of '0.93'.
+    const drag = ['0.03', '0.04', '0.05', '0.06', '0.07'];
     for (const v of drag) {
       slider.value = v;
       slider._on.input();
-      await new Promise(r => setTimeout(r, 15)); // ~180ms of drag, under the debounce
+      await new Promise(r => setTimeout(r, 15)); // ~75ms of drag, under the debounce
     }
     // Nothing may have gone out yet: the drag has not paused.
     ok['no write is issued mid-drag'] = settingsPuts.length - beforeDrag === 0;
     // The readout tracks the thumb the whole way, with no write behind it.
-    ok['readout tracks the slider while dragging'] = readout.textContent === '0.86';
+    ok['readout tracks the slider while dragging'] = readout.textContent === '7%';
     await new Promise(r => setTimeout(r, 700));  // past WRITE_DEBOUNCE_MS
     const wrote = settingsPuts.length - beforeDrag;
-    ok['dragging 12 positions issues one write'] = wrote === 1;
-    ok['the write carries the final position'] =
-      wrote === 1 && settingsPuts[beforeDrag].body.switchThreshold === '0.86';
+    ok['dragging 5 positions issues one write'] = wrote === 1;
+    // 7% headroom is switchThreshold 0.93, not '0.07' and not the noisy
+    // 0.9299999999999999 that 1 - 0.07 is in floating point — a slider
+    // that wrote its own (display) value straight through, or one that
+    // inverted without rounding, both fail this rather than coincidentally
+    // passing.
+    ok['the write carries the fraction, not the headroom'] =
+      wrote === 1 && settingsPuts[beforeDrag].body.switchThreshold === '0.93';
     ok['the slider write is authenticated'] =
       wrote === 1 && settingsPuts[beforeDrag].auth === 'Bearer T';
     // The write path is shared with every other setting, and a body naming
@@ -1139,31 +1164,44 @@ async function run() {
       SETTINGS.exhaustedMode === 'notify' && SETTINGS.holdMax === '4h' &&
       SETTINGS.probeInterval === '30m' && SETTINGS.crossProvider === false;
 
-    // Both bounds render as the two-decimal figure the config states, and
-    // the rendered figure is the slider's own position — not a stale one.
+    // Both bounds render as a whole percentage, and the rendered figure is
+    // the slider's own position — not a stale one.
     const atBound = async (v) => {
       slider.value = v;
       slider._on.input();
       await new Promise(r => setTimeout(r, 10));
       return readout.textContent;
     };
-    const atMin = await atBound('0.5');
-    const atMax = await atBound('1');
-    ok['the low bound renders as 0.50'] = atMin === '0.50' && parseFloat(atMin) === 0.5;
-    ok['the high bound renders as 1.00'] = atMax === '1.00' && parseFloat(atMax) === 1;
+    const atMin = await atBound('0');
+    const atMax = await atBound('0.1');
+    ok['the low bound renders as 0%'] = atMin === '0%' && parseFloat(atMin) === 0;
+    ok['the high bound renders as 10%'] = atMax === '10%' && parseFloat(atMax) === 10;
+    // A position ON the step grid produces a float artefact when scaled
+    // naively -- 0.07 * 100 is 7.000000000000001 -- so the readout is
+    // checked there, not at a value that happens to divide cleanly.
+    ok['a noisy step position renders without float noise'] = (await atBound('0.07')) === '7%';
+    // A legal hand-edited value off the step grid keeps its real precision
+    // rather than being rounded to a whole percent.
+    ok['an off-grid value keeps its precision'] = (await atBound('0.075')) === '7.5%';
     // Let the trailing debounce fire so it cannot land after the summary.
     await new Promise(r => setTimeout(r, 700));
 
-    // A config value under the slider's floor is legal — config.Validate
-    // accepts anything in (0, 1] — so the floor moves down to meet it rather
-    // than the control clamping a hand-edited number the next time anything
-    // on the panel is saved. Rebuilt from a fresh payload, because the panel
-    // is built once per page load; last of all, so nothing above sees it.
+    // A config value beyond the slider's declared ceiling is legal --
+    // config.Validate accepts anything in (0, 1] -- so the control widens to
+    // meet it rather than clamping a hand-edited number the next time
+    // anything on the panel is saved. 0.3 stored (70% headroom) is well past
+    // the 10% ceiling: pre-#216 this widened the FLOOR (the control counted
+    // used-fraction, so a low config value undershot the floor); inverted,
+    // the same legal-but-unusual value now overshoots the ceiling, and it is
+    // the ceiling, not the floor, that must move. Rebuilt from a fresh
+    // payload, because the panel is built once per page load; last of all,
+    // so nothing above sees it.
     __page.buildSettings({ switchThreshold: '0.3', exhaustedMode: 'notify', accounts: {} });
     const low = findAllIn(els.settings, 'input')
       .find(i => i.dataset && i.dataset.key === 'switchThreshold');
-    ok['a config value under the floor widens the slider, not the other way round'] =
-      !!low && parseFloat(low.getAttribute('min')) === 0.3 && parseFloat(low.value) === 0.3;
+    ok['a config value beyond the ceiling widens the slider, not the other way round'] =
+      !!low && parseFloat(low.getAttribute('min')) === 0 &&
+      parseFloat(low.getAttribute('max')) === 0.7 && parseFloat(low.value) === 0.7;
   }
 
   ok['the harness ran to completion'] = true;
