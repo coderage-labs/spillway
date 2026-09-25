@@ -1745,6 +1745,12 @@ function addOverageState(row, name) {
     "set with:  spillway accounts overage " + name + " on|off|default";
 }
 
+// round2 rounds a fraction to 2 decimal places and drops float noise, e.g.
+// 1 - 0.98 is 0.020000000000000018 in binary floating point. Shared by
+// switchThreshold's toDisplay/fromDisplay so neither the readout nor the PUT
+// body ever carries that noise (#216).
+function round2(n) { return parseFloat(n.toFixed(2)); }
+
 const SETTINGS_FIELDS = [
   { key: "exhaustedMode", label: "When every account is spent",
     options: ["notify", "hold", "fail"],
@@ -1752,19 +1758,23 @@ const SETTINGS_FIELDS = [
   { key: "holdMax", label: "Longest hold", type: "text",
     desc: "e.g. 4h. \u201c0\u201d never holds" },
   // A bounded fraction with an immediate effect on routing, so it is a
-  // slider rather than a text box (issue #168). Floor at 0.50: below half a
-  // window used, this stops being predictive rotation and becomes a
-  // different strategy — spreading load across accounts that are barely
-  // touched. Ceiling at 1.00, which the config also treats as the limit, and
-  // which means "never rotate early". Step 0.01 because that is the
-  // granularity anyone states it in, and it can express the 98% default.
-  // Shown as a percentage (#214); the value stored is still the fraction.
-  { key: "switchThreshold", label: "Rotate away at", type: "range",
-    min: 0.5, max: 1, step: 0.01,
-    desc: "predictive rotation, on every request: an account is skipped once this " +
-      "much of the quota window governing the request is used, while another " +
-      "eligible account exists. 100% never rotates early. Saved on its own a " +
-      "moment after you stop dragging." },
+  // slider rather than a text box (issue #168). Displayed as headroom
+  // remaining rather than the fraction used, to match the tanks, the
+  // headroom chart's y-axis and its own "spill point" line (#216) — the
+  // stored config value is unchanged: still switchThreshold, still the
+  // used-fraction in (0, 1]. toDisplay/fromDisplay do the 1 - x conversion,
+  // through round2 so the float noise never reaches the readout or the PUT
+  // body. Range 0% to 10% headroom, step 1%: the full band anyone would
+  // tune in, eleven positions. 0% means never rotate early (the config's
+  // own ceiling, switchThreshold 1.00).
+  { key: "switchThreshold", label: "Spill point", type: "range",
+    min: 0, max: 0.1, step: 0.01,
+    toDisplay: (v) => round2(1 - v),
+    fromDisplay: (v) => round2(1 - v),
+    desc: "predictive rotation, on every request: an account is skipped once " +
+      "headroom in the quota window governing the request drops to this level, " +
+      "while another eligible account exists. 0% never rotates early. Saved on " +
+      "its own a moment after you stop dragging." },
   { key: "probeInterval", label: "Re-probe idle accounts", type: "text",
     desc: "e.g. 30m. \u201c0\u201d probes at startup only" },
   { key: "probeOnStart", label: "Probe at startup", type: "checkbox",
@@ -1798,22 +1808,35 @@ function buildSettings(cur) {
     input.id = "set-" + f.key;
     input.dataset.key = f.key;
     if (f.type === "checkbox") input.checked = !!cur[f.key];
-    else input.value = cur[f.key] == null ? "" : String(cur[f.key]);
-
-    if (f.type === "range") {
-      // The value exactly as the server reported it. An untouched slider
-      // writes THIS back, never input.value: config.Validate accepts any
+    else if (f.type === "range") {
+      // The value exactly as the server reported it, in the units
+      // config.Settings stores (the used-fraction, for switchThreshold). An
+      // untouched slider writes THIS back, never input.value or a
+      // toDisplay/fromDisplay round trip of it: config.Validate accepts any
       // fraction in (0, 1], so a hand-edited 0.3 or 0.975 is legal, and the
       // browser snaps input.value to the step grid the moment it is read.
       // Saving some unrelated field must not quietly rewrite it.
-      input.dataset.raw = input.value;
+      input.dataset.raw = cur[f.key] == null ? "" : String(cur[f.key]);
+      const stored = parseFloat(input.dataset.raw);
+      const disp = Number.isFinite(stored) ? (f.toDisplay ? f.toDisplay(stored) : stored) : NaN;
+      input.value = Number.isFinite(disp) ? String(disp) : "";
+    } else input.value = cur[f.key] == null ? "" : String(cur[f.key]);
+
+    if (f.type === "range") {
       const num = parseFloat(input.value);
-      // Same reason the floor moves down to meet a low config value rather
-      // than clamping it: the slider is a convenience over the config, not a
-      // narrower definition of what is valid.
-      const lo = Number.isFinite(num) ? Math.min(f.min, num) : f.min;
+      // A config value outside the control's declared band is still legal
+      // (config.Validate accepts any fraction in (0, 1]), so the control
+      // widens to meet it rather than clamping a hand-edited value the next
+      // time anything on the panel is saved. Which edge moves depends on
+      // which way the control counts: switchThreshold now displays headroom,
+      // which rises as the stored fraction falls, so a stored value below
+      // the control's floor (e.g. 0.3, i.e. 70% headroom) shows up as a
+      // display value ABOVE the control's ceiling and widens that ceiling,
+      // not the floor (#216 — this inverts the pre-#216 "widen the floor").
+      const lo = Number.isFinite(num) && num < f.min ? num : f.min;
+      const hi = Number.isFinite(num) && num > f.max ? num : f.max;
       input.setAttribute("min", String(lo));
-      input.setAttribute("max", String(f.max));
+      input.setAttribute("max", String(hi));
       input.setAttribute("step", String(f.step));
       input.setAttribute("aria-label", f.label);
 
@@ -1826,7 +1849,11 @@ function buildSettings(cur) {
         // to dataset.raw.
         input.dataset.touched = "1";
         readout.textContent = rangeText(input.value);
-        queueSettingWrite(f.key, input.value);
+        // The control holds the display value (headroom); the write has to
+        // carry what config.Settings stores (the used-fraction).
+        const n = parseFloat(input.value);
+        const out = f.fromDisplay && Number.isFinite(n) ? f.fromDisplay(n) : input.value;
+        queueSettingWrite(f.key, String(out));
       });
     } else {
       row.appendChild(input);
@@ -1950,6 +1977,9 @@ function collectSettings() {
       // An untouched slider reports what the server sent, not what the step
       // grid snapped it to. See the dataset.raw comment in buildSettings.
       : f.type === "range" && !el.dataset.touched ? el.dataset.raw
+      // A touched slider holds the display value (e.g. headroom); convert
+      // back to what config.Settings stores before it goes on the wire.
+      : f.type === "range" && f.fromDisplay ? String(f.fromDisplay(parseFloat(el.value)))
       : el.value;
   }
   for (const el of document.querySelectorAll("[data-account]")) {
