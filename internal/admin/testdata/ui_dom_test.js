@@ -480,6 +480,47 @@ async function run() {
     })(),
   });
 
+  // ── controls sit in their own row, not the name/flag row (#210) ──────
+  // A wrapping .tank-head let the pin/probe pair drop onto a line of their
+  // own whenever a long name plus the serving flag overran the card, so the
+  // header is now two deterministic rows: .tank-head (swatch/name/flag) and
+  // .tank-controls (pin/probe). There is no layout engine here, so the only
+  // checkable property is structural, not "it doesn't wrap": the buttons are
+  // not descendants of .tank-head, and .tank-controls holds exactly one of
+  // each, on every card the fixture renders -- not just the one this test
+  // happens to look at, or a defect on a single card would pass unseen.
+  const cardFor = (acct) => els.accounts.children.find(c => c.dataset.acct === acct);
+  ok['pin and probe buttons are not inside .tank-head, on every card'] =
+    els.accounts.children.length === ACCOUNTS.length &&
+    els.accounts.children.every(c => {
+      const head = findIn(c, '.tank-head');
+      return !!head && findAllIn(head, '.pin-btn').length === 0 &&
+        findAllIn(head, '.probe-btn').length === 0;
+    });
+  ok['pin and probe buttons live together in their own controls row, on every card'] =
+    els.accounts.children.length === ACCOUNTS.length &&
+    els.accounts.children.every(c => {
+      const controls = findIn(c, '.tank-controls');
+      return !!controls && findAllIn(controls, '.pin-btn').length === 1 &&
+        findAllIn(controls, '.probe-btn').length === 1;
+    });
+  // example-one has inFlight > 0 (flag "serving"); example-two/three sit at
+  // inFlight 0 (flag "standby") -- the controls row must not depend on which.
+  const servingCard = cardFor('you@example-one.com');
+  const standbyCard = cardFor('you@example-two.com');
+  ok['controls row present when the serving flag is set'] =
+    !!servingCard && findIn(servingCard, '.flag').textContent === 'serving' &&
+    !!findIn(servingCard, '.tank-controls');
+  ok['controls row present when the serving flag is not set'] =
+    !!standbyCard && findIn(standbyCard, '.flag').textContent !== 'serving' &&
+    !!findIn(standbyCard, '.tank-controls');
+  // And on the shortest displayed name in the fixture ("work", example-one's
+  // label) -- so this isn't only proven against a name long enough to need
+  // row 1's ellipsis.
+  ok['controls row present on a card with a short name'] =
+    !!servingCard && findIn(servingCard, '.tank-name').textContent === 'work' &&
+    !!findIn(servingCard, '.tank-controls');
+
   // ── tank order follows the payload (issue #209) ──────────────────────
   // /api/accounts is sorted server-side by (priority, name); the dashboard
   // just has to render whatever order it is given, for both the tanks and
