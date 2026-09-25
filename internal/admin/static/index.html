@@ -151,15 +151,23 @@
            grid-template-columns:
              repeat(auto-fit, minmax(max(260px, (100% - 3 * .7rem) / 4), 1fr)); }
   .tank { padding: .85rem .95rem 1rem; }
-  /* Wraps rather than overflows: a narrow card (260px floor) plus a long
-     name, the flag chip AND the pin button is more than one line can hold,
-     and letting the row wrap beats letting the pin button run off the card
-     -- two earlier designs here were rejected for exactly that overflow. */
-  .tank-head { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; row-gap: .3rem; }
+  /* Two deterministic rows, not one wrapping row (#210): flex-wrap let the
+     pin/probe pair drop onto a line of its own whenever the flag plus a long
+     name overran the 260px card floor, so the controls sat at a different
+     height on every card and jumped as accounts started and stopped serving
+     -- the exact overflow the wrap was originally chosen to avoid just moved
+     to a different pair of controls. Splitting swatch+name+flag (row 1) from
+     pin+probe (row 2) costs ~22px of card height unconditionally, but the
+     controls now sit at the same place on every card and never move. */
+  .tank-head { display: flex; align-items: baseline; gap: .5rem; }
   .tank-name { font-weight: 640; letter-spacing: -.015em; font-size: 13.5px;
                min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .flag { margin-left: auto; font-size: 9px; letter-spacing: .14em; text-transform: uppercase;
           color: var(--ink-2); white-space: nowrap; display: flex; align-items: center; gap: .3rem; }
+  /* Row 2 (#210): pin + "check now", unconditional and identical on every
+     card regardless of name length or serving state -- the whole point of
+     splitting it out of .tank-head. */
+  .tank-controls { display: flex; align-items: center; gap: .5rem; margin-top: .3rem; }
   .flag.serving { color: var(--water-a); }
   .flag.dry, .flag.off { color: var(--critical); }
   .flag.serving::before { content: "\25B8"; }
@@ -1133,10 +1141,15 @@ function ensureCard(a) {
   const swatch = span("swatch", head);
   const name = span("tank-name", head);
   const flag = span("flag", head);
+  // Row 2 (#210): its own container, separate from .tank-head, so the pin
+  // and probe buttons always land at the same height regardless of how long
+  // the name is or whether the flag is showing -- see the .tank-controls
+  // comment in the stylesheet.
+  const controls = div("tank-controls", card);
   const pinBtn = document.createElement("button");
   pinBtn.type = "button";
   pinBtn.className = "pin-btn";
-  head.appendChild(pinBtn);
+  controls.appendChild(pinBtn);
   // "Check now" (#192): force one quota probe of this account, past the
   // schedules that would otherwise suppress it. Next to pin because it is
   // the same kind of thing -- an instruction to the running daemon about
@@ -1146,13 +1159,13 @@ function ensureCard(a) {
   probeBtn.type = "button";
   probeBtn.className = "probe-btn";
   probeBtn.textContent = "check now";
-  head.appendChild(probeBtn);
+  controls.appendChild(probeBtn);
   // Inline result/conflict box, shared by both controls. Sits right under
   // the header so it appears next to the control that produced it, not in
   // some shared banner far away that the reader has to connect back to a
   // tank. Shared rather than one box per control: they are mutually
   // exclusive in practice, and two boxes stacked under a 260px card is the
-  // overflow .tank-head already had to be taught to avoid.
+  // same vertical cost the row split (#210) already pays once.
   const pinMsg = div("pin-msg", card);
   // Always present, even when empty: an account whose name IS its display
   // name has nothing to show here, but dropping the line shortens the card
