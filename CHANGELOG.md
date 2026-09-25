@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.23.0](https://github.com/coderage-labs/spillway/compare/v0.22.0...v0.23.0) (2026-09-25)
+
+
+### Features
+
+* a new account joins the pool at the back of the queue ([#199](https://github.com/coderage-labs/spillway/issues/199)) ([a2cbedc](https://github.com/coderage-labs/spillway/commit/a2cbedc9d55b3b1a5bc4f01bf17a4977956247c6))
+* **cli:** show a pin in `spillway status` and the status line ([#198](https://github.com/coderage-labs/spillway/issues/198)) ([eb7930f](https://github.com/coderage-labs/spillway/commit/eb7930f3ed765e851449bc4671c1aa8a7a095792))
+* **dashboard:** make "rotate away at" a slider ([#168](https://github.com/coderage-labs/spillway/issues/168)) ([#201](https://github.com/coderage-labs/spillway/issues/201)) ([93e27b9](https://github.com/coderage-labs/spillway/commit/93e27b97787f36be7fe96e369167c33bdb08ef48))
+
+
+### Fixes
+
+* **dashboard:** facet the headroom chart by window ([#167](https://github.com/coderage-labs/spillway/issues/167)) ([#205](https://github.com/coderage-labs/spillway/issues/205)) ([c3788f2](https://github.com/coderage-labs/spillway/commit/c3788f28f83047d07a89bc2a99f9854f9eaec92f))
+* the first configured account displaces the bootstrap fallback ([#203](https://github.com/coderage-labs/spillway/issues/203)) ([bdc8b8f](https://github.com/coderage-labs/spillway/commit/bdc8b8fe1efca362b25d2bb352be7636e94ed091))
+
+
+### Internal
+
+* **dashboard:** stop the DOM harness agreeing with whatever it is asked ([#204](https://github.com/coderage-labs/spillway/issues/204)) ([b3e21a3](https://github.com/coderage-labs/spillway/commit/b3e21a32c48380f009fe8bd14c43d368293abd05))
+
 ## [0.22.0](https://github.com/coderage-labs/spillway/compare/v0.21.2...v0.22.0) (2026-09-22)
 
 
