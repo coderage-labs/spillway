@@ -264,10 +264,46 @@ function findCardByBtnTitle(accounts, re) {
   }
   return null;
 }
+// <input type="range"> runs the HTML value-sanitisation algorithm on every
+// assignment to .value: clamp to [min, max], then snap onto the step grid,
+// using whatever min/max/step attributes are present AT THAT MOMENT --
+// falling back to the browser's own defaults (min=0, max=100, step=1) when
+// they are absent. This is what makes an ordering bug like #223 (value
+// assigned before setAttribute("min"/"max"/"step")) actually fail here:
+// without it, this fake element stored whatever it was told verbatim and
+// every slider assertion passed against a value a real browser would have
+// overwritten. A non-range input (text, etc.) is untouched -- it keeps
+// storing its value verbatim.
+function sanitizeRangeValue(el, raw) {
+  const attrNum = (name, def) => {
+    const v = el.attrs ? parseFloat(el.attrs[name]) : NaN;
+    return Number.isFinite(v) ? v : def;
+  };
+  const min = attrNum('min', 0);
+  let max = attrNum('max', 100);
+  if (max < min) max = min; // spec: an inverted range clamps to a single point at min
+  let step = attrNum('step', 1);
+  if (!(step > 0)) step = 1;
+  let num = parseFloat(raw);
+  if (!Number.isFinite(num)) num = min + (max - min) / 2; // spec default: midpoint
+  if (num < min) num = min;
+  if (num > max) num = max;
+  // Round through the STEP's own decimal precision, the way the production
+  // round2 helper rounds through a fixed one -- naive division/modulo on
+  // floats here produces noise like 0.30000000000000004.
+  const stepStr = el.attrs && el.attrs.step !== undefined ? el.attrs.step : '1';
+  const decimals = (String(stepStr).split('.')[1] || '').length;
+  const round = (n) => decimals ? parseFloat(n.toFixed(decimals)) : Math.round(n);
+  const ticks = Math.round((num - min) / step);
+  let snapped = round(min + ticks * step);
+  if (snapped > max) snapped = round(min + Math.floor((max - min) / step) * step);
+  if (snapped < min) snapped = min;
+  return String(snapped);
+}
 function mkEl(tag) {
   const el = {
     tagName: String(tag || 'div').toUpperCase(),
-    _html: '', _text: '', hidden: false, children: [], value: '',
+    _html: '', _text: '', hidden: false, children: [], _value: '',
     dataset: {}, className: '', title: '', attrs: {},
     style: { _p: {}, setProperty(k, v) { this._p[k] = v; }, getPropertyValue(k) { return this._p[k]; } },
     setAttribute(k, v) { this.attrs[k] = String(v); },
@@ -324,6 +360,15 @@ function mkEl(tag) {
   Object.defineProperty(el, 'id', {
     get() { return this._id || ''; },
     set(v) { this._id = String(v); els[this._id] = this; },
+  });
+  // Sanitised on assignment for type="range" only (see sanitizeRangeValue
+  // above), verbatim for everything else -- this is what makes the browser's
+  // clamp-and-snap-on-write behaviour visible to the assertions below.
+  Object.defineProperty(el, 'value', {
+    get() { return this._value; },
+    set(v) {
+      this._value = this.type === 'range' ? sanitizeRangeValue(this, v) : String(v);
+    },
   });
   // esc() relies on textContent -> innerHTML escaping; emulate it.
   Object.defineProperty(el, 'textContent', {
@@ -404,6 +449,47 @@ eval(js + '\n;global.__page = { buildSettings };');
 // (#202), that mattered more than ever. An abort is reported as a named
 // failure with whatever was already established still printed.
 const ok = {};
+
+// ── fake range-input sanitiser, exercised directly (#223) ─────────────────
+// Independent of the full page: proves the fake DOM's own value-sanitisation
+// (added for #223) behaves like a real <input type="range">, before relying
+// on it anywhere else in this file.
+{
+  const rangeProbe = mkEl('input');
+  rangeProbe.type = 'range';
+  // No min/max/step set yet -- the browser's own defaults (0/100/1) apply,
+  // which is exactly what snaps 0.02 to 0 under the pre-#223 ordering bug.
+  rangeProbe.value = '0.02';
+  ok['#223 harness: fake range input applies default bounds (min=0 max=100 step=1) when unset'] =
+    rangeProbe.value === '0';
+  rangeProbe.setAttribute('min', '0');
+  rangeProbe.setAttribute('max', '0.1');
+  rangeProbe.setAttribute('step', '0.01');
+  // Same raw value, bounds set first: this is the fixed ordering, and 0.98
+  // stored / 0.02 displayed is the exact figure from the bug report.
+  rangeProbe.value = '0.02';
+  ok['#223 harness: fake range input keeps 0.02 once real bounds are set first'] =
+    rangeProbe.value === '0.02';
+  // A value outside [min, max] is clamped, not left alone.
+  rangeProbe.value = '5';
+  ok['#223 harness: fake range input clamps a value above max'] = rangeProbe.value === '0.1';
+  // Off-grid values snap to the nearest step without float noise (naive
+  // (0.3 / 0.01) * 0.01-style arithmetic here would yield 0.30000000000000004).
+  rangeProbe.setAttribute('min', '0');
+  rangeProbe.setAttribute('max', '1');
+  rangeProbe.setAttribute('step', '0.01');
+  rangeProbe.value = '0.297';
+  ok['#223 harness: fake range input snaps off-grid values without float noise'] =
+    rangeProbe.value === '0.3';
+  // A plain text input is untouched by any of this -- it must store its
+  // value verbatim, snapping or clamping nothing.
+  const textProbe = mkEl('input');
+  textProbe.type = 'text';
+  textProbe.value = '0.30000000000000004';
+  ok['#223 harness: a text input still stores its value verbatim'] =
+    textProbe.value === '0.30000000000000004';
+}
+
 function report() {
   let fail = 0;
   for (const [k, v] of Object.entries(ok)) { console.log((v ? 'PASS' : 'FAIL') + ': ' + k); if (!v) fail++; }
@@ -1074,7 +1160,7 @@ async function run() {
                    'the low bound renders as 0%',
                    'the high bound renders as 10%',
                    'a noisy step position renders without float noise',
-                   'an off-grid value keeps its precision',
+                   'an off-grid value snaps to the nearest step, ties rounding up',
                    'a config value beyond the ceiling widens the slider, not the other way round',
                   ]) ok[k] = false;
 
@@ -1180,9 +1266,14 @@ async function run() {
     // naively -- 0.07 * 100 is 7.000000000000001 -- so the readout is
     // checked there, not at a value that happens to divide cleanly.
     ok['a noisy step position renders without float noise'] = (await atBound('0.07')) === '7%';
-    // A legal hand-edited value off the step grid keeps its real precision
-    // rather than being rounded to a whole percent.
-    ok['an off-grid value keeps its precision'] = (await atBound('0.075')) === '7.5%';
+    // A value off the step grid does not keep its precision -- <input
+    // type="range"> is documented as always valid because its value
+    // sanitisation algorithm snaps any off-grid assignment onto the nearest
+    // step itself (unlike type="number", which just flags stepMismatch and
+    // leaves the raw value alone). 0.075 sits exactly halfway between the
+    // 0.07 and 0.08 ticks, so this also pins the tie-break direction the
+    // spec requires: towards positive infinity, i.e. up to 0.08 (#223).
+    ok['an off-grid value snaps to the nearest step, ties rounding up'] = (await atBound('0.075')) === '8%';
     // Let the trailing debounce fire so it cannot land after the summary.
     await new Promise(r => setTimeout(r, 700));
 

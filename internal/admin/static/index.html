@@ -1819,11 +1819,14 @@ function buildSettings(cur) {
       input.dataset.raw = cur[f.key] == null ? "" : String(cur[f.key]);
       const stored = parseFloat(input.dataset.raw);
       const disp = Number.isFinite(stored) ? (f.toDisplay ? f.toDisplay(stored) : stored) : NaN;
-      input.value = Number.isFinite(disp) ? String(disp) : "";
-    } else input.value = cur[f.key] == null ? "" : String(cur[f.key]);
-
-    if (f.type === "range") {
-      const num = parseFloat(input.value);
+      // min/max/step must be set BEFORE input.value: an <input type="range">
+      // runs the HTML value-sanitisation algorithm at assignment time,
+      // against whatever bounds it has right then. Assigning value first
+      // (against the element's default min=0 max=100 step=1) snaps a real
+      // display value like 0.02 to 0 and setAttribute afterwards does not
+      // undo it (#223). So the widening below reads the computed display
+      // value directly, not input.value.
+      //
       // A config value outside the control's declared band is still legal
       // (config.Validate accepts any fraction in (0, 1]), so the control
       // widens to meet it rather than clamping a hand-edited value the next
@@ -1833,11 +1836,15 @@ function buildSettings(cur) {
       // the control's floor (e.g. 0.3, i.e. 70% headroom) shows up as a
       // display value ABOVE the control's ceiling and widens that ceiling,
       // not the floor (#216 — this inverts the pre-#216 "widen the floor").
-      const lo = Number.isFinite(num) && num < f.min ? num : f.min;
-      const hi = Number.isFinite(num) && num > f.max ? num : f.max;
+      const lo = Number.isFinite(disp) && disp < f.min ? disp : f.min;
+      const hi = Number.isFinite(disp) && disp > f.max ? disp : f.max;
       input.setAttribute("min", String(lo));
       input.setAttribute("max", String(hi));
       input.setAttribute("step", String(f.step));
+      input.value = Number.isFinite(disp) ? String(disp) : "";
+    } else input.value = cur[f.key] == null ? "" : String(cur[f.key]);
+
+    if (f.type === "range") {
       input.setAttribute("aria-label", f.label);
 
       const cell = div("rangecell", row);
