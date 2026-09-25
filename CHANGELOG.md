@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.0](https://github.com/coderage-labs/spillway/compare/v0.23.1...v0.24.0) (2026-09-25)
+
+
+### Features
+
+* **dashboard:** show the tanks in pool-priority order ([#209](https://github.com/coderage-labs/spillway/issues/209)) ([#211](https://github.com/coderage-labs/spillway/issues/211)) ([40fe6d9](https://github.com/coderage-labs/spillway/commit/40fe6d9c46ae07ca24865a25e289d9faa764c5a2))
+
+
+### Fixes
+
+* **dashboard:** give the tank controls their own row ([#210](https://github.com/coderage-labs/spillway/issues/210)) ([#213](https://github.com/coderage-labs/spillway/issues/213)) ([51e398a](https://github.com/coderage-labs/spillway/commit/51e398a156fae8238f0dc7c34fa26ebae5d74709))
+
 ## [0.23.1](https://github.com/coderage-labs/spillway/compare/v0.23.0...v0.23.1) (2026-09-25)
 
 
