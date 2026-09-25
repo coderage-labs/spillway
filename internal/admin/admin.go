@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -526,6 +527,17 @@ func (s *Server) accounts() []accountJSON {
 		}
 		out = append(out, j)
 	}
+	// Issue #209: the dashboard reads this list top-to-bottom as the pool's
+	// preference order, so it has to match better() (pool.go) -- lower
+	// Priority wins, same as selection. Break ties on Name rather than load:
+	// load moves on every poll, and sorting by it would reshuffle the tanks
+	// continuously instead of only when priority actually changes.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		return out[i].Name < out[j].Name
+	})
 	return out
 }
 

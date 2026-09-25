@@ -1125,6 +1125,10 @@ function ensureCard(a) {
   if (entry) return entry;
 
   const card = div("panel tank");
+  // reorderTanks (issue #209) reads this back off the live DOM to compare
+  // current card order against the payload's — cheaper and less error-prone
+  // than keeping a parallel array of names in sync with the container.
+  card.dataset.acct = a.name;
   const head = div("tank-head", card);
   const swatch = span("swatch", head);
   const name = span("tank-name", head);
@@ -1164,6 +1168,37 @@ function ensureCard(a) {
   tankCards.set(a.name, entry);
   document.getElementById("accounts").appendChild(card);
   return entry;
+}
+
+// Issue #209: /api/accounts now comes back in pool-priority order, but
+// ensureCard() early-returns for a name it has already built, so an
+// existing card never moves — a priority change in the settings panel would
+// leave the tanks exactly where they started. This reorders them to match.
+//
+// Guarded to a genuine no-op when the order already matches: appendChild
+// always detaches-then-reattaches even a node that's already in place,
+// which restarts the tank's wave/bubble CSS animations. Polled every 5s,
+// that would make every tank twitch continuously instead of only on an
+// actual reorder.
+function reorderTanks(names) {
+  const accounts = document.getElementById("accounts");
+  const current = accounts.children;
+  let matches = current.length === names.length;
+  for (let i = 0; matches && i < names.length; i++) {
+    if (current[i].dataset.acct !== names[i]) matches = false;
+  }
+  if (matches) return;
+
+  // Move only the cards that are out of place, rather than re-appending
+  // everything: insertBefore-ing a card already at position i is exactly
+  // the reattach this function exists to avoid.
+  for (let i = 0; i < names.length; i++) {
+    const entry = tankCards.get(names[i]);
+    if (!entry) continue;
+    if (accounts.children[i] !== entry.card) {
+      accounts.insertBefore(entry.card, accounts.children[i] || null);
+    }
+  }
 }
 
 // rings holds every live countdown so the one-second tick can update them
@@ -1549,6 +1584,11 @@ function renderTanks(list) {
   for (const [name, entry] of tankCards) {
     if (!seen.has(name)) { entry.card.remove(); tankCards.delete(name); }
   }
+
+  // list is already in pool-priority order (server sort, issue #209); make
+  // the cards match it. Must run after the drop above, so a removed
+  // account's stale position doesn't affect the comparison.
+  reorderTanks(list.map(a => a.name));
 
   if (!figures.children.length) {
     figures.innerHTML = '<tr><td colspan="10" class="empty">' +

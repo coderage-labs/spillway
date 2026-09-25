@@ -18,7 +18,22 @@ const tile = (css.match(/mask-size:\s*(\d+)px/) || [])[1];
 const shift = (css.match(/to\s*{[^}]*?[;{\s]mask-position:\s*(\d+)px/) || [])[1];
 
 const now = Date.now();
+// Issue #209: /api/accounts is now sorted server-side by (priority, name),
+// and the dashboard must render tanks (and the figures table built from the
+// same payload) in whatever order it is given. Declared here in NEITHER
+// alphabetical NOR the accounts' own priority order -- three, one, two --
+// so a test asserting the tanks follow the payload is actually exercising
+// that, rather than passing vacuously because the fixture already reads
+// top-to-bottom.
 const ACCOUNTS = [{
+  // Issue #194: a family-scoped 429 forges a 100%-used row so the exclusion
+  // is visible. It was never measured, so the provenance column must say so
+  // rather than "measured".
+  name: 'you@example-three.com', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 0,
+  quotaWindows: [
+    { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now + 6 * 3600e3).toISOString(), source: 'rejected' },
+  ],
+}, {
   name: 'you@example-one.com', label: 'work', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 1,
   quotaWindows: [{ name: '5h', limit: 1, used: 0.42, resetAt: new Date(now + 3600e3).toISOString(), source: 'headers' }],
   // Issue #110: cache hit rate and create/read volume, beside burn/h and
@@ -33,14 +48,6 @@ const ACCOUNTS = [{
     // Spent, but its reset passed an hour ago with nothing re-measuring it
     // (issue #135): must read as unknown, never as 0% with "refills 0s".
     { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now - 3600e3).toISOString(), source: 'headers', expired: true },
-  ],
-}, {
-  // Issue #194: a family-scoped 429 forges a 100%-used row so the exclusion
-  // is visible. It was never measured, so the provenance column must say so
-  // rather than "measured".
-  name: 'you@example-three.com', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 0,
-  quotaWindows: [
-    { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now + 6 * 3600e3).toISOString(), source: 'rejected' },
   ],
 }];
 // Issue #167's actual shape: /api/quota-history returns a series per account
@@ -276,6 +283,17 @@ function mkEl(tag) {
       return c;
     },
     prepend(c) { this.children.unshift(c); },
+    // reorderTanks (#209) moves an existing card within its current parent
+    // (#accounts) rather than rebuilding it, so this needs to actually
+    // relocate the node -- unlike appendChild above, which never has to
+    // handle a node that's already one of this.children.
+    insertBefore(node, ref) {
+      const at = this.children.indexOf(node);
+      if (at !== -1) this.children.splice(at, 1);
+      const ri = ref == null ? -1 : this.children.indexOf(ref);
+      this.children.splice(ri === -1 ? this.children.length : ri, 0, node);
+      return node;
+    },
     querySelector(sel) { return findIn(this, sel); },
     setAttribute2() {},
     querySelectorAll(sel) { return findAllIn(this, sel); },
@@ -461,6 +479,55 @@ async function run() {
       return secs.length > 1 && (Math.max(...secs) - Math.min(...secs)) > 6;
     })(),
   });
+
+  // ── tank order follows the payload (issue #209) ──────────────────────
+  // /api/accounts is sorted server-side by (priority, name); the dashboard
+  // just has to render whatever order it is given, for both the tanks and
+  // the figures table. domOrder() reads dataset.acct back off the live
+  // #accounts children, since this fake DOM keeps no separate index of
+  // "current card order" for the page to have gotten wrong.
+  const domOrder = () => els.accounts.children.map(c => c.dataset.acct);
+
+  ok['tanks render in the order the payload was delivered in, not sorted client-side'] =
+    JSON.stringify(domOrder()) === JSON.stringify(ACCOUNTS.map(a => a.name));
+
+  // ensureCard() early-returns for a name it has already built, so the bug
+  // this issue describes is specifically about EXISTING cards: a priority
+  // change reorders /api/accounts on the next poll, and the tanks must
+  // follow even though every card in play was created on an earlier poll,
+  // not this one. Reversing the fixture's own order guarantees the new
+  // order differs from both the original declaration and every prior
+  // scramble, so this cannot pass by the new order accidentally matching
+  // the old one.
+  const orderBeforeReorder = domOrder();
+  const wavesBeforeReorder = waves.length;
+  ACCOUNTS.reverse();
+  if (pollFn) { await pollFn(); await new Promise(r => setTimeout(r, 150)); }
+  ok['a later poll with a changed priority reorders the existing cards'] =
+    JSON.stringify(domOrder()) === JSON.stringify(ACCOUNTS.map(a => a.name)) &&
+    JSON.stringify(domOrder()) !== JSON.stringify(orderBeforeReorder);
+  // Moved, not rebuilt: a reorder that went through ensureCard/appendChild
+  // instead of relocating the existing node would tear down and recreate
+  // the wave elements, which is exactly the twitch #209 calls out.
+  ok['reordering existing cards does not recreate their wave elements'] =
+    waves.length === wavesBeforeReorder;
+
+  // The converse: a poll whose order has NOT changed must not touch
+  // #accounts at all, because appendChild/insertBefore detach-and-reattach
+  // even a node that is already in the right place, which restarts that
+  // tank's wave/bubble animation. Spy on the container's own methods
+  // (not the page's) so a card's internal updates -- filling in text,
+  // building a window's glass -- can't be mistaken for a reorder.
+  const accountsEl = els.accounts;
+  const realAppend = accountsEl.appendChild.bind(accountsEl);
+  const realInsert = accountsEl.insertBefore.bind(accountsEl);
+  let accountsTouched = 0;
+  accountsEl.appendChild = (c) => { accountsTouched++; return realAppend(c); };
+  accountsEl.insertBefore = (c, r) => { accountsTouched++; return realInsert(c, r); };
+  if (pollFn) { await pollFn(); await new Promise(r => setTimeout(r, 150)); }
+  accountsEl.appendChild = realAppend;
+  accountsEl.insertBefore = realInsert;
+  ok['a poll with unchanged order does not move any card'] = accountsTouched === 0;
 
   // ── headroom small multiples (#167) ──────────────────────────────────
   // Eight accounts x three windows was twenty-four lines on one 760x190 plot.
