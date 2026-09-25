@@ -1041,7 +1041,9 @@ async function run() {
   ok['slider steps in hundredths'] = !!slider && parseFloat(slider.getAttribute('step')) === 0.01;
   ok['slider starts at the configured value'] = !!slider && parseFloat(slider.value) === 0.98;
   // A bare slider hides what it is set to, and this is a number people quote.
-  ok['slider shows its numeric value'] = !!readout && readout.textContent === '0.98';
+  // Percentage, not the raw fraction (#214) -- and the fraction is what the
+  // PUT body still carries, which the settingsPuts assertions below hold.
+  ok['slider shows its value as a percentage'] = !!readout && readout.textContent === '98%';
 
   // The label has to say what it does, not just name the field: it changes
   // routing for every request.
@@ -1064,8 +1066,10 @@ async function run() {
                    'the slider write is authenticated',
                    'the slider write names only its own key',
                    'an unrelated setting survives the slider write',
-                   'the low bound renders as 0.50',
-                   'the high bound renders as 1.00',
+                   'the low bound renders as 50%',
+                   'the high bound renders as 100%',
+                   'a noisy step position renders without float noise',
+                   'an off-grid value keeps its precision',
                    'a config value under the floor widens the slider, not the other way round',
                   ]) ok[k] = false;
 
@@ -1116,7 +1120,7 @@ async function run() {
     // Nothing may have gone out yet: the drag has not paused.
     ok['no write is issued mid-drag'] = settingsPuts.length - beforeDrag === 0;
     // The readout tracks the thumb the whole way, with no write behind it.
-    ok['readout tracks the slider while dragging'] = readout.textContent === '0.86';
+    ok['readout tracks the slider while dragging'] = readout.textContent === '86%';
     await new Promise(r => setTimeout(r, 700));  // past WRITE_DEBOUNCE_MS
     const wrote = settingsPuts.length - beforeDrag;
     ok['dragging 12 positions issues one write'] = wrote === 1;
@@ -1139,8 +1143,8 @@ async function run() {
       SETTINGS.exhaustedMode === 'notify' && SETTINGS.holdMax === '4h' &&
       SETTINGS.probeInterval === '30m' && SETTINGS.crossProvider === false;
 
-    // Both bounds render as the two-decimal figure the config states, and
-    // the rendered figure is the slider's own position — not a stale one.
+    // Both bounds render as a whole percentage, and the rendered figure is
+    // the slider's own position — not a stale one.
     const atBound = async (v) => {
       slider.value = v;
       slider._on.input();
@@ -1149,8 +1153,16 @@ async function run() {
     };
     const atMin = await atBound('0.5');
     const atMax = await atBound('1');
-    ok['the low bound renders as 0.50'] = atMin === '0.50' && parseFloat(atMin) === 0.5;
-    ok['the high bound renders as 1.00'] = atMax === '1.00' && parseFloat(atMax) === 1;
+    ok['the low bound renders as 50%'] = atMin === '50%' && parseFloat(atMin) === 50;
+    ok['the high bound renders as 100%'] = atMax === '100%' && parseFloat(atMax) === 100;
+    // Four positions ON the step grid produce a float artefact when scaled
+    // naively -- 0.57 * 100 is 56.99999999999999 -- so the readout is checked
+    // at one of them, not at a value that happens to divide cleanly. 0.975 and
+    // 0.98 both scale exactly and would have passed a broken implementation.
+    ok['a noisy step position renders without float noise'] = (await atBound('0.57')) === '57%';
+    // A legal hand-edited value off the step grid keeps its real precision
+    // rather than being rounded to a whole percent.
+    ok['an off-grid value keeps its precision'] = (await atBound('0.975')) === '97.5%';
     // Let the trailing debounce fire so it cannot land after the summary.
     await new Promise(r => setTimeout(r, 700));
 

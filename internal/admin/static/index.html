@@ -1757,12 +1757,13 @@ const SETTINGS_FIELDS = [
   // different strategy — spreading load across accounts that are barely
   // touched. Ceiling at 1.00, which the config also treats as the limit, and
   // which means "never rotate early". Step 0.01 because that is the
-  // granularity anyone states it in, and it can express the 0.98 default.
+  // granularity anyone states it in, and it can express the 98% default.
+  // Shown as a percentage (#214); the value stored is still the fraction.
   { key: "switchThreshold", label: "Rotate away at", type: "range",
     min: 0.5, max: 1, step: 0.01,
     desc: "predictive rotation, on every request: an account is skipped once this " +
-      "fraction of the quota window governing the request is used, while another " +
-      "eligible account exists. 1.00 never rotates early. Saved on its own a " +
+      "much of the quota window governing the request is used, while another " +
+      "eligible account exists. 100% never rotates early. Saved on its own a " +
       "moment after you stop dragging." },
   { key: "probeInterval", label: "Re-probe idle accounts", type: "text",
     desc: "e.g. 30m. \u201c0\u201d probes at startup only" },
@@ -1906,10 +1907,15 @@ function buildSettings(cur) {
 // as 0.9800000000000001. A hand-edited value finer than the step keeps its
 // own digits instead of being rounded in the readout — the number shown has
 // to be the number in the file.
+// The readout only -- the value SAVED stays the fraction the config holds
+// (#214). toFixed before parseFloat because 0.98 * 100 is 98.00000000000001
+// in binary floating point, and "98.00000000000001%" is not a readout; the
+// parseFloat back off it drops the trailing zeros so a hand-edited 0.975
+// reads "97.5%" rather than "97.50%".
 function rangeText(v) {
   const n = parseFloat(v);
   if (!Number.isFinite(n)) return String(v);
-  return parseFloat(n.toFixed(2)) === n ? n.toFixed(2) : String(n);
+  return parseFloat((n * 100).toFixed(2)) + "%";
 }
 
 // A drag fires one input event per pixel, and every write here rewrites the
