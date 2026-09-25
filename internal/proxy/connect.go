@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"regexp"
@@ -150,6 +151,17 @@ func (h *Handler) terminateConnect(w http.ResponseWriter, r *http.Request, host 
 	}()
 }
 
+// tunnelDialTimeout bounds how long a blind-relay dial waits on the
+// upstream before we give it up as dead. Named rather than inlined so
+// dialTunnel's tests can shrink it instead of each case sleeping 10s
+// (issue #219).
+const tunnelDialTimeout = 10 * time.Second
+
+// dialFunc matches egress.Egress.DialContext's signature, narrowed to the
+// one method tunnelConnect needs so its tests can substitute a fake dialer
+// instead of touching the network (issue #219).
+type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
 // tunnelConnect blind-relays the tunnel: dial the target, 200, copy bytes
 // both ways. No auth gate: a proxy checks Proxy-Authorization because it
 // supports binding to non-loopback interfaces (a remote client could
@@ -159,13 +171,12 @@ func (h *Handler) tunnelConnect(w http.ResponseWriter, r *http.Request, host, po
 	// Through the same egress as everything else: a corporate proxy that
 	// only saw pooled requests, while tunnelled hosts went direct, would be
 	// worse than none.
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	up, err := h.egress.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	up, err := dialTunnel(r.Context(), h.logger, h.egress.DialContext, host, port, tunnelDialTimeout)
 	if err != nil {
-		h.logger.Warn("tunnel dial failed", "host", host, "port", port, "err", err)
 		// Reply before hijack so the client gets a real proxy error, not a
-		// silent drop.
+		// silent drop. This still applies when the client is the one who
+		// hung up (issue #219): it may not be gone yet — see the sibling
+		// issue #220 about recording that in the request log too.
 		http.Error(w, "spillway: tunnel dial failed", http.StatusBadGateway)
 		return
 	}
@@ -185,6 +196,45 @@ func (h *Handler) tunnelConnect(w http.ResponseWriter, r *http.Request, host, po
 	// not leave the paired socket lingering.
 	go relay(up, conn)
 	go relay(conn, up)
+}
+
+// dialTunnel dials the tunnel target under a bounded deadline and
+// classifies a failure before logging it (issue #219).
+//
+// The dial context is cancelled by EITHER our own timeout OR the client
+// (parent) hanging up, and a naive implementation logs the identical WARN
+// for both. Measured on the live log, 77% of "tunnel dial failed" lines
+// were the latter — mostly DNS lookups aborted mid-flight by an MCP client
+// teardown — burying the handful of real upstream failures underneath them.
+//
+// Classify by asking whether the PARENT is already done, not by matching
+// err's text and not by trusting the dial ctx's own Err(): a deadline that
+// expires here surfaces through net.Error as "i/o timeout", never as
+// context.DeadlineExceeded, and the real DNS-cancellation message is
+// "operation was canceled", not "context canceled" — so nothing about the
+// returned error reliably says which side gave up. Only the parent
+// context's own state does. The elapsed time is logged either way: a dial
+// that died at 0.2s because the client quit reads very differently from one
+// that burned the full timeout.
+func dialTunnel(parent context.Context, logger *slog.Logger, dial dialFunc, host, port string, timeout time.Duration) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	start := time.Now()
+	up, err := dial(ctx, "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		elapsed := time.Since(start)
+		if parent.Err() != nil {
+			// The client is gone (or went away) before the dial finished —
+			// its business, not the operator's. Still surfaces as a 502
+			// (see tunnelConnect); #220 is where that reaches the request
+			// log, not here.
+			logger.Debug("tunnel dial failed", "host", host, "port", port, "err", err, "elapsed", elapsed, "cause", "client gone")
+			return nil, err
+		}
+		logger.Warn("tunnel dial failed", "host", host, "port", port, "err", err, "elapsed", elapsed)
+		return nil, err
+	}
+	return up, nil
 }
 
 func relay(dst, src net.Conn) {
