@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.25.0](https://github.com/coderage-labs/spillway/compare/v0.24.0...v0.25.0) (2026-09-25)
+
+
+### Features
+
+* **dashboard:** state the spill point as headroom, in percent ([#214](https://github.com/coderage-labs/spillway/issues/214), [#216](https://github.com/coderage-labs/spillway/issues/216)) ([#215](https://github.com/coderage-labs/spillway/issues/215)) ([067ffc0](https://github.com/coderage-labs/spillway/commit/067ffc068947707c279a5a54186e36ede940e4cc))
+
+
+### Fixes
+
+* **proxy:** stop logging a client hang-up as a tunnel failure ([#219](https://github.com/coderage-labs/spillway/issues/219)) ([#222](https://github.com/coderage-labs/spillway/issues/222)) ([7c51a87](https://github.com/coderage-labs/spillway/commit/7c51a8753c5b72069792dd106de6a77e9b33e8ef))
+
 ## [0.24.0](https://github.com/coderage-labs/spillway/compare/v0.23.1...v0.24.0) (2026-09-25)
 
 
