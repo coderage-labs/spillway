@@ -74,8 +74,14 @@
       --series-4:#c98500;
       --series-5:#966be5;
       --series-6:#e35a9d;
-      --series-7:#28b5cf;
-      --series-8:#a5c94a;
+      /* Re-stepped for the dark band (#167). These two sat at OKLCH L 0.714
+         and 0.785, outside the 0.48-0.67 the dark surface wants, which is a
+         hard fail of the palette's lightness check -- they glared next to
+         the other six. Same hues, same chroma, stepped down: teal L 0.631,
+         yellow-green L 0.669. Worst adjacent CVD deltaE goes 7.6 -> 7.8 and
+         every slot clears 3:1 on this surface. */
+      --series-7:#029ab2;
+      --series-8:#82a419;
       --series-9:#e0525f;
       --series-10:#7188e5;
       --series-11:#d9943b;
@@ -377,10 +383,62 @@
   .legend i { width: 9px; height: 2px; border-radius: 1px; display: inline-block; }
   svg.plot { display: block; width: 100%; overflow: visible; }
   .axis  { font-size: 9.5px; fill: var(--ink-2); font-family: var(--sans); }
-  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .gridline { stroke: var(--grid); stroke-width: 1; vector-effect: non-scaling-stroke; }
   .spillband { fill: var(--critical); opacity: .09; }
-  .spilledge { stroke: var(--critical); stroke-width: 1; stroke-dasharray: 3 3; opacity: .5; }
-  .lbl { font-size: 10.5px; font-weight: 600; font-family: var(--sans); }
+  .spilledge { stroke: var(--critical); stroke-width: 1; stroke-dasharray: 3 3; opacity: .5;
+               vector-effect: non-scaling-stroke; }
+
+  /* Small multiples, one plot per quota window (#167).
+     -------------------------------------------------
+     /api/quota-history returns a series per account PER WINDOW, so eight
+     accounts was twenty-four lines on one 760x190 plot. Eight categorical
+     hues is the documented ceiling and twenty-four cannot be coloured at
+     all, so the window moves off the colour channel and becomes the facet:
+     three plots of eight lines, colour carrying account identity alone.
+
+     Same footprint, not three times it. Each facet's viewBox is 420x300,
+     and 300/420 = 0.714 is under three times the old plot's 190/760 = 0.25
+     -- so three of them side by side at a third of the width each stand no
+     taller than the single plot did, and the slack is what the per-facet
+     captions occupy. The column gaps only make the row shorter still. */
+  .plots { display: grid; gap: .55rem;
+           grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  /* minmax(0, 1fr), never a bare 1fr: `1fr` is shorthand for minmax(auto, 1fr),
+     and `auto` floors the track at the content's intrinsic width, which an SVG
+     supplies. That is how a grid of plots gives a phone a sideways scrollbar.
+     Same reason for min-width: 0 on the facet itself. */
+  @media (max-width: 660px) {
+    .plots { grid-template-columns: minmax(0, 1fr); }
+  }
+  .facet { margin: 0; min-width: 0; }
+  /* The one plot that does NOT get to overflow. svg.plot above turns off the
+     SVG default so the single wide chart could let a label sit past its
+     viewBox; between grid neighbours that same overflow puts one plot's
+     label on top of the next plot's axis. FR is sized so nothing reaches
+     here, and this makes a mistake visible instead of confusing. */
+  .facet svg.plot { overflow: hidden; }
+  .facet-head { display: flex; align-items: baseline; gap: .4rem; min-width: 0; }
+  .facet-win { font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+               color: var(--ink-2); white-space: nowrap; }
+  /* The plot's own verdict when it has nothing to show -- eight lines flat on
+     the floor is a shape, not a reading, so the caption says what it is. */
+  .facet-note { font-size: 10px; color: var(--ink-2); min-width: 0;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 2px lines and >=8px end dots, in CSS pixels whatever the facet is scaled
+     to: the viewBox is a third as wide on desktop and narrower again on a
+     phone, and a stroke-width in user units would thicken as the plot shrank. */
+  .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round;
+            vector-effect: non-scaling-stroke; }
+  /* Surface ring rather than a border: end dots overlap where series converge. */
+  .enddot { stroke: var(--surface); stroke-width: 2; vector-effect: non-scaling-stroke; }
+  /* Leader line from the label to the series end. Eight end labels nudged
+     apart detach from their lines and read as noise; the connector is what
+     re-attaches them. */
+  .lead { fill: none; stroke-width: 1; opacity: .55; vector-effect: non-scaling-stroke; }
+  /* Ink, never the series hue. Three of the eight light-mode slots sit under
+     3:1 on white and are illegible as text; identity comes from the dot and
+     the leader line beside the label. */
+  .lbl { font-size: 10.5px; font-weight: 600; font-family: var(--sans); fill: var(--ink); }
   .bar { fill: var(--water-b); }
   .bar.err { fill: var(--critical); }
   .hint { font-size: 10.5px; color: var(--ink-2); margin-top: .35rem; }
@@ -504,8 +562,11 @@
         <div class="eyebrow" style="margin:0">headroom &middot; last 6h</div>
         <div class="legend" id="legend"></div>
       </div>
-      <svg class="plot" id="headroom" viewBox="0 0 760 190"
-           role="img" aria-label="Headroom per account over the last six hours"></svg>
+      <!-- One plot per quota window, built by drawHeadroom. Empty in the
+           markup because the windows the pool reports are whatever the
+           accounts have: three today (5h, 7d, 7d-fable), and a hard-coded
+           three would draw an empty axis for a window nobody has. -->
+      <div class="plots" id="headrooms"></div>
       <svg class="plot" id="activity" viewBox="0 0 760 64"
            role="img" aria-label="Requests per bucket over the last six hours"></svg>
       <div class="hint" id="burn"></div>
@@ -797,85 +858,64 @@ function packLabels(items, gap, top, bottom) {
   return items[last].y <= bottom + 0.01;
 }
 
+/* The headroom chart: one small multiple per quota window (#167).
+   ---------------------------------------------------------------
+   /api/quota-history returns a series per account PER WINDOW, so the single
+   plot carried accounts x windows lines -- twenty-four of them at eight
+   accounts. Eight categorical hues is the documented ceiling and no palette
+   distinguishes twenty-four, so the window stops being a stroke pattern and
+   becomes the facet. Each plot then carries one line per account, and colour
+   means exactly one thing: which account.
+
+   Which is also why colour must not be assigned per plot. colourFor() is
+   keyed on the account name and never reassigned (see its declaration), so
+   an account is the same hue in all three -- the property that lets the
+   three plots be read as one chart instead of three unrelated ones. */
+
+// Facet order. The pool reports whatever windows the provider does, so the
+// list itself comes from the data; this only fixes the order they sit in.
+// 5h leads because it is the window the selector rotates on. Anything
+// unrecognised sorts alphabetically after, rather than in arrival order,
+// which differs between polls and would shuffle the plots under the reader.
+const WINDOW_ORDER = ["5h", "7d", "7d-fable"];
+function orderedWindows(list) {
+  const rank = w => { const i = WINDOW_ORDER.indexOf(w); return i < 0 ? WINDOW_ORDER.length : i; };
+  return [...new Set(list.map(s => s.window))]
+    .sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+// Facet geometry in viewBox units. 300/420 is under three times the single
+// plot's old 190/760, so three facets across stand no taller than it did --
+// see the .plots CSS. Nothing here is a pixel: the viewBox does the scaling,
+// which is what keeps a phone from scrolling sideways.
+//
+// 420 wide and not 253 (a literal third of 760) because a viewBox unit is
+// only a pixel at one scale. A third-width facet renders at roughly 1.1 units
+// to the pixel at 420, so the type sizes below read as the sizes they say; at
+// 253 the same declarations rendered at 1.75x and the axis labels swamped the
+// plot they were annotating.
+//
+// FR is the label gutter and is deliberately wide: the direct labels are
+// clipped to nine characters, which is about 55 units of this type, and a
+// label that runs past FW lands in the NEXT facet -- the plots are grid
+// neighbours now, so an overflowing label is somebody else's chart.
+const FW = 420, FH = 300, FL = 28, FR = 74, FT = 12, FB = 20;
+
 function drawHeadroom(list) {
-  const svg = document.getElementById("headroom");
+  const wrap = document.getElementById("headrooms");
   const legend = document.getElementById("legend");
-  svg.innerHTML = ""; legend.innerHTML = "";
-  const W = 760, H = 190, L = 34, R = 88, T = 10, B = 18;
-  const now = Date.now(), t0 = now - HOURS * 3600e3;
-  const x = t => L + ((t - t0) / (now - t0)) * (W - L - R);
-  const y = v => T + (1 - v) * (H - T - B);
+  wrap.innerHTML = ""; legend.innerHTML = "";
 
-  // Spill zone: below this the pool rotates away from the account.
-  svg.appendChild(el("rect", { x: L, y: y(CREST), width: W - L - R,
-    height: Math.max(0, (H - B) - y(CREST)), class: "spillband" }));
-  svg.appendChild(el("line", { x1: L, x2: W - R, y1: y(CREST), y2: y(CREST), class: "spilledge" }));
-  svg.appendChild(el("text", { x: L + 5, y: y(CREST) - 4, class: "axis" }, "spill point"));
-
-  for (const v of [0, .25, .5, .75, 1]) {
-    svg.appendChild(el("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), class: "gridline" }));
-    svg.appendChild(el("text", { x: L - 6, y: y(v) + 3, class: "axis", "text-anchor": "end" },
-      Math.round(v * 100) + "%"));
-  }
-  for (let h = HOURS; h >= 0; h--) {
-    const t = now - h * 3600e3;
-    svg.appendChild(el("text", { x: x(t), y: H - 3, class: "axis", "text-anchor": "middle" },
-      h === 0 ? "now" : "-" + h + "h"));
-  }
-
-  if (!list.length) {
-    svg.appendChild(el("text", { x: (L + W - R) / 2, y: H / 2, class: "axis", "text-anchor": "middle" },
-      "Collecting. The first points appear within a minute of traffic."));
+  const windows = orderedWindows(list);
+  if (!windows.length) {
+    // One plot's worth of empty axes, not three: there is no window to name.
+    wrap.appendChild(buildFacet("", []));
     return;
   }
-  const labels = [];
-  for (const s of list) {
-    if (!s.ts || !s.ts.length) continue;
-    const colour = colourFor(s.account);
-    let d = "";
-    s.ts.forEach((t, i) => { d += (i ? " L " : "M ") + x(t).toFixed(1) + " " + y(s.headroom[i]).toFixed(1); });
-    svg.appendChild(el("path", { d, fill: "none", stroke: colour, "stroke-width": 2,
-      "stroke-linejoin": "round", "stroke-linecap": "round",
-      "stroke-dasharray": s.window === "5h" ? "" : "5 3" }));
-    // Direct label at the live end: light-mode contrast relief, and identity
-    // never rests on colour alone.
-    const lx = x(s.ts[s.ts.length - 1]), ly = y(s.headroom[s.headroom.length - 1]);
-    svg.appendChild(el("circle", { cx: lx, cy: ly, r: 3, fill: colour }));
-    labels.push({ x: Math.min(lx + 7, W - R + 6), y: ly, colour,
-                  text: clip(short(s.account), 11) + " " + s.window });
-  }
-  // Series ends cluster; nudge the labels apart so none is unreadable, and
-  // never at the cost of one rendering outside the plot (spillway#75).
-  labels.sort((a, b) => a.y - b.y);
-  const GAP = 13, MIN_GAP = 9, top = T, bottom = H - B;
-  let shown = labels;
-  if (!packLabels(shown, GAP, top, bottom)) {
-    // Doesn't fit even ideally spaced at the normal gap: tighten first...
-    const tight = Math.max(MIN_GAP, (bottom - top) / Math.max(1, shown.length - 1));
-    if (!packLabels(shown, tight, top, bottom)) {
-      // ...and if it still won't seat everyone at the floor gap, there are
-      // too many labels for the space, not too little gap between them.
-      // Drop interior series, keeping the extremes — the highest and
-      // lowest headroom are the informative ends — plus an even spread of
-      // the rest. A dropped series is still identifiable: its dot is
-      // still plotted, and the legend above already maps its colour to
-      // its account name.
-      const fit = Math.max(2, Math.floor((bottom - top) / MIN_GAP) + 1);
-      const mid = shown.slice(1, -1);
-      const step = mid.length / Math.max(1, fit - 2);
-      const kept = [shown[0]];
-      for (let i = 0; i < fit - 2; i++) kept.push(mid[Math.min(mid.length - 1, Math.round(i * step))]);
-      kept.push(shown[shown.length - 1]);
-      shown = kept;
-      packLabels(shown, MIN_GAP, top, bottom);
-    }
-  }
-  // Belt and braces: whatever the packing above intended, no label ever
-  // renders outside the plot.
-  for (const l of shown) l.y = Math.min(bottom, Math.max(top, l.y));
-  for (const l of shown) {
-    svg.appendChild(el("text", { x: l.x, y: l.y + 3, class: "lbl", fill: l.colour }, l.text));
-  }
+  for (const w of windows) wrap.appendChild(buildFacet(w, list.filter(s => s.window === w)));
+
+  // One legend above all three plots, not one each: the colour key is shared,
+  // and repeating it three times would imply it might differ.
   const seen = new Set();
   for (const s of list) {
     if (seen.has(s.account)) continue;
@@ -883,7 +923,138 @@ function drawHeadroom(list) {
     legend.innerHTML += '<span><i style="background:' + colourFor(s.account) + '"></i>' +
       esc(short(s.account)) + '</span>';
   }
-  legend.innerHTML += '<span>solid 5h &middot; dashed longer window</span>';
+}
+
+function buildFacet(win, list) {
+  const fig = document.createElement("figure");
+  fig.className = "facet";
+  const head = document.createElement("figcaption");
+  head.className = "facet-head";
+  fig.appendChild(head);
+  span("facet-win", head).textContent = win || "headroom";
+  const note = span("facet-note", head);
+
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("class", "plot");
+  svg.setAttribute("viewBox", "0 0 " + FW + " " + FH);
+  svg.setAttribute("role", "img");
+  // Read by the DOM harness to prove each plot carries only its own window,
+  // and the handle anything that wants one plot needs -- there is no longer a
+  // single #headroom to ask for.
+  svg.setAttribute("data-window", win);
+  svg.id = "headroom-" + (win || "none").replace(/[^a-z0-9]+/gi, "-");
+  svg.setAttribute("aria-label", win
+    ? "Headroom per account for the " + win + " window over the last six hours"
+    : "Headroom per account over the last six hours");
+  fig.appendChild(svg);
+  note.textContent = plotWindow(svg, win, list);
+  return fig;
+}
+
+// Draws one window's curves into svg and returns the facet's caption note.
+//
+// The y-scale is a fixed 0-1 in every facet, deliberately, and never fitted
+// to the data. Headroom IS a fraction, so 0 and 1 are absolute: a per-plot
+// scale would stretch a spent window's jitter into a dramatic slope, and
+// would make the three plots incomparable -- which is the one thing the
+// split must not cost, since reading them together is the point.
+function plotWindow(svg, win, list) {
+  const now = Date.now(), t0 = now - HOURS * 3600e3;
+  const x = t => FL + ((t - t0) / (now - t0)) * (FW - FL - FR);
+  const y = v => FT + (1 - v) * (FH - FT - FB);
+
+  // Spill zone: below this the pool rotates away from the account.
+  svg.appendChild(el("rect", { x: FL, y: y(CREST), width: FW - FL - FR,
+    height: Math.max(0, (FH - FB) - y(CREST)), class: "spillband" }));
+  svg.appendChild(el("line", { x1: FL, x2: FW - FR, y1: y(CREST), y2: y(CREST), class: "spilledge" }));
+  // Named in every facet rather than once above them: the band is drawn in
+  // each, and an unlabelled red stripe is a warning about nothing.
+  svg.appendChild(el("text", { x: FL + 4, y: y(CREST) - 4, class: "axis" }, "spill point"));
+
+  for (const v of [0, .25, .5, .75, 1]) {
+    svg.appendChild(el("line", { x1: FL, x2: FW - FR, y1: y(v), y2: y(v), class: "gridline" }));
+    svg.appendChild(el("text", { x: FL - 6, y: y(v) + 3, class: "axis", "text-anchor": "end" },
+      Math.round(v * 100) + "%"));
+  }
+  // A third of the width holds a third of the tick labels. Step so at most
+  // four are drawn, rather than letting seven overlap into a grey smear.
+  const step = Math.max(1, Math.ceil(HOURS / 3));
+  for (let h = HOURS; h >= 0; h -= step) {
+    const t = now - h * 3600e3;
+    svg.appendChild(el("text", { x: x(t), y: FH - 3, class: "axis", "text-anchor": "middle" },
+      h === 0 ? "now" : "-" + h + "h"));
+  }
+  // The last tick is "now" only if the step happened to land on zero.
+  if (HOURS % step) {
+    svg.appendChild(el("text", { x: x(now), y: FH - 3, class: "axis", "text-anchor": "middle" }, "now"));
+  }
+
+  const drawn = list.filter(s => s.ts && s.ts.length);
+  if (!drawn.length) return "collecting — the first points appear within a minute of traffic";
+
+  // Every reading at or under the spill point: eight lines lying on the floor
+  // of the plot. Draw them, because the data is the data, but say in words
+  // what the shape is -- and drop the direct labels, which would be eight
+  // names stacked on one pixel of line, carrying nothing the legend does not
+  // already carry.
+  const spent = drawn.every(s => s.headroom.every(v => v <= CREST));
+
+  const labels = [];
+  for (const s of drawn) {
+    const colour = colourFor(s.account);
+    let d = "";
+    s.ts.forEach((t, i) => { d += (i ? " L " : "M ") + x(t).toFixed(1) + " " + y(s.headroom[i]).toFixed(1); });
+    svg.appendChild(el("path", { d, stroke: colour, class: "series",
+      "data-account": s.account, "data-window": s.window }));
+    const lx = x(s.ts[s.ts.length - 1]), ly = y(s.headroom[s.headroom.length - 1]);
+    svg.appendChild(el("circle", { cx: lx, cy: ly, r: 4, fill: colour, class: "enddot" }));
+    if (!spent) labels.push({ x: FW - FR + 8, y: ly, anchor: { x: lx, y: ly }, colour,
+                              text: clip(short(s.account), 9) });
+  }
+
+  if (labels.length) {
+    // Series ends cluster; nudge the labels apart so none is unreadable, and
+    // never at the cost of one rendering outside the plot (spillway#75).
+    labels.sort((a, b) => a.y - b.y);
+    const GAP = 13, MIN_GAP = 9, top = FT, bottom = FH - FB;
+    let shown = labels;
+    if (!packLabels(shown, GAP, top, bottom)) {
+      // Doesn't fit even ideally spaced at the normal gap: tighten first...
+      const tight = Math.max(MIN_GAP, (bottom - top) / Math.max(1, shown.length - 1));
+      if (!packLabels(shown, tight, top, bottom)) {
+        // ...and if it still won't seat everyone at the floor gap, there are
+        // too many labels for the space, not too little gap between them.
+        // Drop interior series, keeping the extremes — the highest and
+        // lowest headroom are the informative ends — plus an even spread of
+        // the rest. A dropped series is still identifiable: its dot is
+        // still plotted, and the legend above already maps its colour to
+        // its account name.
+        const fit = Math.max(2, Math.floor((bottom - top) / MIN_GAP) + 1);
+        const mid = shown.slice(1, -1);
+        const st = mid.length / Math.max(1, fit - 2);
+        const kept = [shown[0]];
+        for (let i = 0; i < fit - 2; i++) kept.push(mid[Math.min(mid.length - 1, Math.round(i * st))]);
+        kept.push(shown[shown.length - 1]);
+        shown = kept;
+        packLabels(shown, MIN_GAP, top, bottom);
+      }
+    }
+    // Belt and braces: whatever the packing above intended, no label ever
+    // renders outside the plot.
+    for (const l of shown) l.y = Math.min(bottom, Math.max(top, l.y));
+    for (const l of shown) {
+      // Leader line first, so the label sits over it. A nudged label has left
+      // its series; this is what says which one it belongs to, and it carries
+      // the colour so the text does not have to.
+      svg.appendChild(el("path", { class: "lead", stroke: l.colour,
+        d: "M " + l.anchor.x.toFixed(1) + " " + l.anchor.y.toFixed(1) +
+           " L " + (l.x - 3).toFixed(1) + " " + l.y.toFixed(1) }));
+      svg.appendChild(el("text", { x: l.x, y: l.y + 3, class: "lbl" }, l.text));
+    }
+  }
+
+  if (spent) return "all " + drawn.length + " below the spill point — nothing left to draw";
+  return drawn.length + (drawn.length === 1 ? " account" : " accounts");
 }
 
 function drawActivity(buckets) {
