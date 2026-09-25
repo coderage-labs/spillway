@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/coderage-labs/spillway/compare/v0.23.0...v0.23.1) (2026-09-25)
+
+
+### Fixes
+
+* **dashboard:** stop the gutter clipping the "100%" tick ([#206](https://github.com/coderage-labs/spillway/issues/206)) ([#207](https://github.com/coderage-labs/spillway/issues/207)) ([855be05](https://github.com/coderage-labs/spillway/commit/855be0528154c3f4e1db95cb67d7c3b3a78a7dfc))
+
 ## [0.23.0](https://github.com/coderage-labs/spillway/compare/v0.22.0...v0.23.0) (2026-09-25)
 
 
