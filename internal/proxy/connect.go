@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -151,11 +152,31 @@ func (h *Handler) terminateConnect(w http.ResponseWriter, r *http.Request, host 
 	}()
 }
 
-// tunnelDialTimeout bounds how long a blind-relay dial waits on the
-// upstream before we give it up as dead. Named rather than inlined so
-// dialTunnel's tests can shrink it instead of each case sleeping 10s
-// (issue #219).
+// tunnelDialTimeout bounds how long dialTunnel spends in total, across
+// every attempt, before giving the target up as dead. It is an overall
+// budget, not a per-attempt deadline (issue #221): the constraint that
+// matters is how long the client waits, and it was already waiting up to
+// 10s for a single dial before the retry below existed. Two independent
+// 10s-per-attempt timeouts would silently double that to 20s for a client
+// that used to get its answer in 10; sharing one deadline across both
+// attempts keeps the worst case exactly what it was, and only spends time
+// on a retry that a transient failure leaves lying around inside it.
 const tunnelDialTimeout = 10 * time.Second
+
+// tunnelDialMaxAttempts allows one retry and no more. A CONNECT dial that
+// fails has written nothing upstream — dial failure means no bytes were
+// ever sent to the target, by definition — so retrying it carries no
+// idempotency risk regardless of what the tunnelled request would have
+// been (issue #221). A second retry buys little on top of the first: two
+// failures inside a shared 10s budget already used up most of the slack a
+// third attempt would need, and every extra attempt eats into the backoff
+// and time budget the retry that matters actually needs.
+const tunnelDialMaxAttempts = 2
+
+// tunnelDialBackoff is a short pause before retrying — long enough for a
+// DNS blip or a dropped SYN to clear, short enough not to meaningfully
+// dent the shared budget above.
+const tunnelDialBackoff = 200 * time.Millisecond
 
 // dialFunc matches egress.Egress.DialContext's signature, narrowed to the
 // one method tunnelConnect needs so its tests can substitute a fake dialer
@@ -171,7 +192,7 @@ func (h *Handler) tunnelConnect(w http.ResponseWriter, r *http.Request, host, po
 	// Through the same egress as everything else: a corporate proxy that
 	// only saw pooled requests, while tunnelled hosts went direct, would be
 	// worse than none.
-	up, err := dialTunnel(r.Context(), h.logger, h.egress.DialContext, host, port, tunnelDialTimeout)
+	up, err := dialTunnel(r.Context(), h.logger, h.egress.DialContext, host, port, tunnelDialTimeout, tunnelDialBackoff)
 	if err != nil {
 		// Reply before hijack so the client gets a real proxy error, not a
 		// silent drop. This still applies when the client is the one who
@@ -198,8 +219,30 @@ func (h *Handler) tunnelConnect(w http.ResponseWriter, r *http.Request, host, po
 	go relay(conn, up)
 }
 
-// dialTunnel dials the tunnel target under a bounded deadline and
-// classifies a failure before logging it (issue #219).
+// isRetryableDialErr reports whether a dial failure is plausibly transient
+// and therefore worth a second attempt (issue #221). In a day's live log,
+// the real (non-client-cancelled) failures split into 306 "lookup HOST: i/o
+// timeout", ~180 "dial tcp <IP>: i/o timeout", and 33 "lookup HOST: no such
+// host" — and api.github.com, which accounted for 44 of the timeouts,
+// succeeded on the very next attempt every single time. DNS and TCP
+// timeouts, and a refused connection, are that kind of blip: retryable.
+// "no such host" is not — there is no name to re-resolve, so nothing about
+// trying again in 200ms makes a nonexistent host start existing.
+func isRetryableDialErr(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// dialTunnel dials the tunnel target under a bounded overall budget,
+// classifies a failure before logging it (issue #219), and retries once if
+// that failure looks transient (issue #221).
 //
 // The dial context is cancelled by EITHER our own timeout OR the client
 // (parent) hanging up, and a naive implementation logs the identical WARN
@@ -216,25 +259,54 @@ func (h *Handler) tunnelConnect(w http.ResponseWriter, r *http.Request, host, po
 // context's own state does. The elapsed time is logged either way: a dial
 // that died at 0.2s because the client quit reads very differently from one
 // that burned the full timeout.
-func dialTunnel(parent context.Context, logger *slog.Logger, dial dialFunc, host, port string, timeout time.Duration) (net.Conn, error) {
+//
+// A client-cancelled dial is never retried — nobody is waiting for the
+// result, so there is nothing to retry for. Everything else that fails is
+// checked against isRetryableDialErr and, if it looks transient, retried
+// once after a short backoff, calling dial again rather than reusing
+// anything from the failed attempt: "dial tcp <IP>: i/o timeout" twice in a
+// row suggests one bad address out of the set a hostname resolves to, and a
+// fresh call gives the next attempt a chance to land on a different one.
+// Both attempts share the single deadline set up front (timeout), so the
+// retry can only ever spend time the first attempt left unused — the
+// client never waits longer than it would have for one dial (see
+// tunnelDialTimeout).
+func dialTunnel(parent context.Context, logger *slog.Logger, dial dialFunc, host, port string, timeout, backoff time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	start := time.Now()
-	up, err := dial(ctx, "tcp", net.JoinHostPort(host, port))
-	if err != nil {
-		elapsed := time.Since(start)
+	warn := func(err error, attempt int) {
+		logger.Warn("tunnel dial failed", "host", host, "port", port, "err", err, "elapsed", time.Since(start), "attempt", attempt)
+	}
+
+	for attempt := 1; ; attempt++ {
+		up, err := dial(ctx, "tcp", net.JoinHostPort(host, port))
+		if err == nil {
+			return up, nil
+		}
 		if parent.Err() != nil {
 			// The client is gone (or went away) before the dial finished —
-			// its business, not the operator's. Still surfaces as a 502
-			// (see tunnelConnect); #220 is where that reaches the request
-			// log, not here.
-			logger.Debug("tunnel dial failed", "host", host, "port", port, "err", err, "elapsed", elapsed, "cause", "client gone")
+			// its business, not the operator's, and not something a retry
+			// can do anything about. Still surfaces as a 502 (see
+			// tunnelConnect); #220 is where that reaches the request log,
+			// not here.
+			logger.Debug("tunnel dial failed", "host", host, "port", port, "err", err, "elapsed", time.Since(start), "cause", "client gone", "attempt", attempt)
 			return nil, err
 		}
-		logger.Warn("tunnel dial failed", "host", host, "port", port, "err", err, "elapsed", elapsed)
-		return nil, err
+		if attempt >= tunnelDialMaxAttempts || !isRetryableDialErr(err) {
+			warn(err, attempt)
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			// The shared budget is spent — no time left for another
+			// attempt, so this is the final answer even though it was
+			// classified as retryable.
+			warn(err, attempt)
+			return nil, err
+		case <-time.After(backoff):
+		}
 	}
-	return up, nil
 }
 
 func relay(dst, src net.Conn) {
