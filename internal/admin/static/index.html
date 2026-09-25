@@ -899,7 +899,13 @@ function orderedWindows(list) {
 // clipped to nine characters, which is about 55 units of this type, and a
 // label that runs past FW lands in the NEXT facet -- the plots are grid
 // neighbours now, so an overflowing label is somebody else's chart.
-const FW = 420, FH = 300, FL = 28, FR = 74, FT = 12, FB = 20;
+// FL is the left gutter and holds the y-tick labels, which are drawn
+// end-anchored at FL - 6. The widest is "100%": four characters of 9.5px
+// .axis, about 24 units once the wide "%" is counted. At FL = 28 that label
+// started left of zero and the facet's own overflow: hidden -- which is there
+// to stop a label bleeding into the neighbouring plot -- cut the 1 off it, so
+// every facet's top tick read "00%" (spillway#206).
+const FW = 420, FH = 300, FL = 36, FR = 74, FT = 12, FB = 20;
 
 function drawHeadroom(list) {
   const wrap = document.getElementById("headrooms");

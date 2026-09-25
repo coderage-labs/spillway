@@ -538,6 +538,20 @@ async function run() {
   ok['no plot carries a pixel width'] = plots.length === 3 &&
     plots.every(p => !p.getAttribute('width') && !/\d\s*px/.test(String(p.attrs.style || '')));
 
+  // The top y-tick is "100%", the widest label on the plot, and it is drawn
+  // end-anchored -- so it grows LEFTWARDS out of the left gutter. A facet's
+  // plot clips (deliberately: past the edge is the NEXT facet's chart), so a
+  // gutter narrower than the label silently ate the leading digit and every
+  // facet's top tick rendered as "00%" (#206). There is no layout engine
+  // here, so the width is estimated: 6 units per character at 9.5px is a fair
+  // ceiling -- the digits measure nearer 5.2 and the "%" nearer 8.
+  const AXIS_CH = 6;
+  const gutterLbls = plots.reduce((a, p) => a.concat(findAllIn(p, '.axis')), [])
+    .filter(t => t.getAttribute('text-anchor') === 'end');
+  ok['no y-axis label is clipped by the gutter it hangs in'] =
+    gutterLbls.length === 3 * 5 &&
+    gutterLbls.every(t => parseFloat(t.getAttribute('x')) - String(t.textContent).length * AXIS_CH >= 0);
+
   // Eight flat lines on the floor is a shape, not a reading. The plot says so
   // in words, keeps drawing the data, and does not stack eight direct labels
   // on one pixel of line to prove it.
