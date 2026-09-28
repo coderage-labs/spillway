@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.26.0](https://github.com/coderage-labs/spillway/compare/v0.25.1...v0.26.0) (2026-09-28)
+
+
+### Features
+
+* **notify:** one exhaustion notification per episode, per model family ([#230](https://github.com/coderage-labs/spillway/issues/230)) ([#233](https://github.com/coderage-labs/spillway/issues/233)) ([fc9f719](https://github.com/coderage-labs/spillway/commit/fc9f719500f3b715a625ce051c3bac73d112663a))
+
+
+### Fixes
+
+* **pool:** hold on a window's real reset and re-test it with a probe ([#229](https://github.com/coderage-labs/spillway/issues/229)) ([#231](https://github.com/coderage-labs/spillway/issues/231)) ([83416da](https://github.com/coderage-labs/spillway/commit/83416dae6ccbb8b8791184f057d3963edc3cd708))
+
 ## [0.25.1](https://github.com/coderage-labs/spillway/compare/v0.25.0...v0.25.1) (2026-09-25)
 
 
