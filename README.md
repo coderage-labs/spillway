@@ -194,9 +194,17 @@ login. Treat first use as a bug hunt and please file what breaks.
 | Installed with | Upgrade |
 |---|---|
 | Homebrew (macOS) | `brew upgrade --cask spillway` |
-| Scoop (Windows) | `scoop update spillway` |
-| Tarball (Linux, or any OS) | replace the binary, then `spillway service install` |
-| `go install` | re-run the `go install` above, then `spillway service install` |
+| Homebrew (Linux) | `brew upgrade --cask spillway`, then `spillway service install` |
+| Scoop (Windows) | `scoop update; scoop update spillway` |
+| Release archive (`.tar.gz`, or `.zip` on Windows) | replace the binary, then `spillway service install` |
+| `go install` | re-run the `go install` above, then `$(go env GOPATH)/bin/spillway service install` |
+
+`scoop update` on its own first refreshes the bucket, so the second command
+sees the new release rather than a stale manifest.
+
+`service install` registers the path of the binary it is run from. After a
+`go install`, run it by that full path: a Homebrew or Scoop copy earlier on
+your `PATH` would otherwise re-register the service on the old binary.
 
 On macOS and Windows the package manager restarts the background daemon onto
 the new binary for you: the cask's postflight and the Scoop manifest's
