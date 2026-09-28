@@ -298,6 +298,13 @@ func runServer(args []string) error {
 	// share one dedup map and one channel list.
 	handler.SetNotifier(notifier)
 
+	// Issue #230: recovery has to be announced even with zero held
+	// requests outstanding — nothing on the request path fires when
+	// nobody is retrying — so this runs for the life of the daemon,
+	// independently of traffic, same as the other background sweeps
+	// below.
+	go handler.WatchRecovery(context.Background())
+
 	// Keep credentials fresh regardless of traffic. EnsureFresh is a no-op
 	// until a token is within its refresh window, so this sweep is almost
 	// always a comparison; without it an account with a current quota reading
