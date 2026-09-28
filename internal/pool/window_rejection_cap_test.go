@@ -1,23 +1,23 @@
 package pool
 
 // Issue #194: windowRejected was an UNCAPPED hard exclusion that nothing
-// could re-measure.
+// could re-measure. Issue #229 then found #194's own escape — letting the
+// exclusion itself lapse after windowRejectionTTL so ordinary traffic could
+// re-test it — was spending a live held request on a 429 that was certain,
+// because the real reset was still days out (live 2026-09-28).
 //
-// Four things held at once. Selection dropped the account for the family
-// (SelectExcept's usable), so no ordinary traffic re-measured it; the probe
-// could not reach it either (probeModel is a fixed non-fable model and
-// accounts.readsSpent skips families the probe never engages); the visible
-// QuotaWindow was FORGED at Used/Limit = 1.0 and stamped "headers", so the
-// dashboard showed the exclusion restating itself as though a provider had
-// measured it; and `until` was trusted verbatim, so a bad epoch parse or a
-// far-future org-level reset pinned the family out for as long as the header
-// claimed — memory-only state, escapable only by restarting the daemon.
-//
-// These pin the three halves of the fix: the cap on the row, the TTL on the
-// exclusion, and the source marker on the forged reading. Clocks are
-// injected throughout (markWindowRejectedAt) so every assertion is an exact
-// computed time — nothing here waits, and nothing asserts an elapsed
-// duration (issues #98, #134).
+// So today: the exclusion is capped (maxExhaustedHorizon, same as
+// MarkExhausted) but otherwise lasts the REAL reset, never a shorter TTL;
+// the visible QuotaWindow is FORGED at Used/Limit = 1.0 and stamped
+// windowSourceRejected rather than "headers", so it can never be mistaken
+// for a measurement; and windowRejectionTTL now bounds how long a rejection
+// may go un-probed before Account.WindowRejectionNeedsProbeAt forces
+// accounts.needsProbe to re-test it — never a live request. These pin the
+// cap on the row, the source marker, and the exclusion now tracking the
+// same capped value as the row. Clocks are injected throughout
+// (markWindowRejectedAt) so every assertion is an exact computed time —
+// nothing here waits, and nothing asserts an elapsed duration (issues #98,
+// #134).
 
 import (
 	"testing"
@@ -61,20 +61,19 @@ func TestMarkWindowRejectedCapsAbsurdUntil(t *testing.T) {
 	}
 }
 
-// The exclusion — the half with no escape — is clamped harder still: a
-// rejection is believed for at most windowRejectionTTL before ordinary
-// traffic is allowed to re-test it, the way issue #151 expires a stale
-// overage refusal. A deadline already inside the TTL is left alone.
-func TestMarkWindowRejectedClampsExclusionToTTL(t *testing.T) {
+// The exclusion deadline is the SAME capped value as the forged row's
+// ResetAt (issue #229) — no separate, shorter windowRejectionTTL clamp. A
+// deadline already inside the horizon is left alone, same as the row.
+func TestMarkWindowRejectedExclusionUsesRealCappedReset(t *testing.T) {
 	now := time.Now().Round(0)
 	for _, tc := range []struct {
 		name  string
 		claim time.Time
 		want  time.Time
 	}{
-		{"a year out", now.Add(365 * 24 * time.Hour), now.Add(windowRejectionTTL)},
-		{"a weekly reset", now.Add(7 * 24 * time.Hour), now.Add(windowRejectionTTL)},
-		{"an hour out", now.Add(time.Hour), now.Add(windowRejectionTTL)},
+		{"a year out", now.Add(365 * 24 * time.Hour), now.Add(maxExhaustedHorizon)},
+		{"a weekly reset", now.Add(7 * 24 * time.Hour), now.Add(7 * 24 * time.Hour)},
+		{"an hour out", now.Add(time.Hour), now.Add(time.Hour)},
 		{"ten minutes out", now.Add(10 * time.Minute), now.Add(10 * time.Minute)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,63 +86,56 @@ func TestMarkWindowRejectedClampsExclusionToTTL(t *testing.T) {
 				t.Fatalf("no live rejection recorded for a claim of %v", tc.claim)
 			}
 			if !got.Equal(tc.want) {
-				t.Errorf("rejection deadline = %v, want %v (claim %v, windowRejectionTTL %v)",
-					got, tc.want, tc.claim, windowRejectionTTL)
+				t.Errorf("rejection deadline = %v, want %v (claim %v, maxExhaustedHorizon %v)",
+					got, tc.want, tc.claim, maxExhaustedHorizon)
+			}
+			// Must be the identical value the forged row carries — the two
+			// used to diverge (row: capped `until`; exclusion: capped THEN
+			// TTL'd), which is exactly the bug: EarliestWindowReset read the
+			// row's value while WindowRejectedFor read the shorter one.
+			if row := windowNamed(a.QuotaWindows(), "7d-fable"); !row.ResetAt.Equal(got) {
+				t.Errorf("exclusion deadline %v != forged row ResetAt %v — they must never diverge again", got, row.ResetAt)
 			}
 		})
 	}
 }
 
-// The headline. A family rejected with an absurd deadline becomes
-// selectable again — re-measurable by ordinary traffic — once the TTL has
-// passed, with no daemon restart. The rejection is recorded as having
-// happened TTL+1m ago, so this is the real wall clock reading a stored
-// deadline, not a test clock reaching into the selector.
-func TestRejectedFamilyIsReMeasurableWithinTheTTLWithoutRestart(t *testing.T) {
+// The headline, replacing what #194 believed and what #229's first two
+// fixes got only half right.
+//
+// WITHIN windowRejectionTTL of being recorded, a family rejected with a
+// real, far-off reset stays HARD-EXCLUDED — no ordinary request re-admitted
+// to test it — because a live rejection this fresh is unambiguously
+// justified. WindowRejectedFor (the raw "is a rejection on file and still
+// live" fact) and SelectFor (which also asks whether anything has
+// measured the window recently enough — pool.windowRejectionExcludes)
+// agree while the rejection is fresh; they can diverge once TTL passes
+// with nothing having measured it (see window_billing_fallback_test.go),
+// which is the corrected half of this fix. This test pins the UNCHANGED
+// half: still within TTL, both keep saying no.
+func TestRejectedFamilyStaysHardExcludedWithinTTL(t *testing.T) {
 	a := claudeAccountPrio("a", 0)
 	p := New([]*Account{a}, time.Now())
 
-	rejectedAt := time.Now().Add(-windowRejectionTTL - time.Minute)
-	claimed := rejectedAt.Add(365 * 24 * time.Hour)
-	p.markWindowRejectedAt(a, "7d-fable", claimed, rejectedAt)
+	realReset := time.Now().Add(9 * 24 * time.Hour) // days out — the live #229 shape
+	p.MarkWindowRejected(a, "7d-fable", realReset)
 
-	if a.WindowRejectedFor(fableModel) {
-		t.Fatalf("still excluded for fable %v after the rejection, with the claim %v: "+
-			"the exclusion outlives windowRejectionTTL (%v), so nothing re-measures this family",
-			windowRejectionTTL+time.Minute, claimed, windowRejectionTTL)
+	if !a.WindowRejectedFor(fableModel) {
+		t.Fatal("no longer excluded moments after being recorded — the rejection itself expired far too soon")
 	}
-	if got := p.SelectFor("s", fableBody(fableModel)); got == nil {
-		t.Fatal("SelectFor(fable) = nil — a lapsed rejection must let a fable request reach the account, " +
-			"since that request is the only thing that can re-measure the family")
+	if got := p.SelectFor("s", fableBody(fableModel)); got != nil {
+		t.Fatalf("SelectFor(fable) = %q, want nil — a rejection recorded moments ago "+
+			"must not be reachable by live traffic yet", got.Name)
 	}
-
-	// ...but it comes back DEPRIORITISED, not healthy. The forged row still
-	// says spent until its own (capped) reset, which is what keeps the
-	// re-test on the last-resort tier where a refusal costs nothing rather
-	// than promoting the account back to tier 1 on a number nobody
-	// measured.
-	if !a.OverThresholdForWindow("7d-fable", 1) {
-		t.Error("the forged 7d-fable row stopped reading spent when the exclusion lapsed — " +
-			"the account now looks healthy for fable on a reading nothing re-measured")
-	}
-}
-
-// Deprioritised, demonstrated: with a healthy alternative in the pool, a
-// fable request after the lapse must still prefer the healthy account. A
-// fix that cleared the forged row along with the exclusion would send fable
-// straight back to the account upstream refused.
-func TestLapsedRejectionStillLosesToAHealthyAccount(t *testing.T) {
-	rejected := claudeAccountPrio("rejected", 0) // the BETTER priority
-	clean := claudeAccountPrio("clean", 1)
-	p := New([]*Account{rejected, clean}, time.Now())
-
-	rejectedAt := time.Now().Add(-windowRejectionTTL - time.Minute)
-	p.markWindowRejectedAt(rejected, "7d-fable", rejectedAt.Add(7*24*time.Hour), rejectedAt)
-
-	got := p.SelectFor("s", fableBody(fableModel))
-	if got == nil || got.Name != "clean" {
-		t.Fatalf("SelectFor(fable) = %v, want %q — a lapsed rejection re-admits the account, "+
-			"it does not make it the preferred one", gotName(got), "clean")
+	// The other half of the fix: an outstanding rejection always counts as
+	// SPENT (issue #229's coordinator follow-up — the family probe triggers
+	// on state, not on "has this gone un-probed long enough"), so
+	// accounts.probeRejectedFamilies keeps being told to test this family
+	// on every tick ProbeIdle visits the account, not just once past some
+	// internal age gate.
+	if !a.HasSpentOrExpiredFamilyAt(p.Threshold(), time.Now()) {
+		t.Error("HasSpentOrExpiredFamilyAt = false for an account with a live rejection — nothing will " +
+			"ever re-measure this family: it is excluded from selection AND invisible to the prober")
 	}
 }
 

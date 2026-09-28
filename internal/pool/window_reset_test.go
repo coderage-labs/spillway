@@ -174,6 +174,46 @@ func TestEarliestWindowResetTakesSoonestGoverningWindowOnOneAccount(t *testing.T
 	}
 }
 
+// Issue #229's headline live scenario: window rejections that are
+// genuinely days out, and a real account-wide exhaustion that resets much
+// sooner. Before #229, EarliestWindowReset read the SAME deadline
+// WindowRejectedFor used for exclusion, which #194 clamped to
+// windowRejectionTTL (30m) — an artefact of "when may ordinary traffic
+// re-test this", not a statement about when any account could actually
+// serve again. 45 minutes is chosen deliberately past that old TTL: under
+// the pre-#229 behaviour the far-off window rejection would have reported
+// a deadline UNDER 45 minutes purely from that clamp, wrongly beating the
+// real, sooner exhaustion in hold.go's "soonest of both" comparison.
+func TestEarliestWindowResetDoesNotOutrunARealSoonerExhaustion(t *testing.T) {
+	rejected := NewAccount("rejected", SourceYAML, "t", "", 0, "")
+	rejected.Type = "claude-oauth"
+	soon := NewAccount("soon", SourceYAML, "t", "", 0, "")
+	soon.Type = "claude-oauth"
+
+	p := New([]*Account{rejected, soon}, time.Now())
+	p.MarkWindowRejected(rejected, "7d-fable", time.Now().Add(9*24*time.Hour))
+	soonAt := time.Now().Add(45 * time.Minute).Round(0)
+	p.MarkExhausted(soon, soonAt)
+
+	wreset, wok := p.EarliestWindowReset(fableBody(fableModel))
+	if !wok {
+		t.Fatal("EarliestWindowReset reported nothing")
+	}
+	ereset, eok := p.EarliestReset()
+	if !eok {
+		t.Fatal("EarliestReset reported nothing")
+	}
+	earliest := ereset
+	if wreset.Before(earliest) {
+		earliest = wreset
+	}
+	if !earliest.Equal(soonAt) {
+		t.Errorf("soonest wake = %v, want %v (the real 45-minute exhaustion) — a window rejection "+
+			"nine days out must never look sooner than a real, nearer capacity event just because "+
+			"its exclusion deadline used to be clamped to windowRejectionTTL", earliest, soonAt)
+	}
+}
+
 // Nothing rejected at all: no wake time, so the hold keeps whatever
 // EarliestReset told it rather than inventing a zero time.
 func TestEarliestWindowResetEmptyPool(t *testing.T) {

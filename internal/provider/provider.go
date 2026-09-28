@@ -142,6 +142,22 @@ type Spec struct {
 	// must never guess a narrower family (e.g. fable) for a model it does
 	// not actually recognise as belonging to it.
 	GoverningWindows func(model string) []string
+	// FamilyProbeModel returns the cheapest model that draws on the named
+	// quota window family (spillway's window name, e.g. "7d-fable"), for
+	// issue #229's family probe: ProbeModel's fixed model can measure only
+	// the account-wide families it happens to govern, so a family-scoped
+	// rejection (fable-only, the common case) is otherwise invisible to
+	// every probe spillway ever sends — the exclusion can then only be
+	// lifted by the real reset arriving, days out, or a family-scoped
+	// bounded fallback (see pool.Pool's windowRejectionExcludes).
+	// modelMap is consulted first, exactly as ProbeModel's is, so an
+	// account's own override wins.
+	//
+	// ok=false means this provider has nothing safe to probe that family
+	// with — an unrecognised window name, or a provider with no
+	// family-scoped windows at all (nil, same as GoverningWindows nil) —
+	// and callers must fall back rather than guess a model id.
+	FamilyProbeModel func(window string, modelMap map[string]string) (model string, ok bool)
 	// OverageFromHeaders reads whether the account may keep serving past its
 	// subscription quota, and be billed for it. Nil for providers with no
 	// such concept — which is not the same as "not allowed", so callers must

@@ -11,16 +11,65 @@ import (
 	"time"
 )
 
+// claudeProbeModelID is the cheapest, account-wide-only model ProbeModel
+// sends a quota probe to. Named so claudeFamilyProbeModel below can defer
+// to the identical id for the two families ("5h", "7d") this plain probe
+// already measures, rather than repeating the literal.
+const claudeProbeModelID = "claude-haiku-4-5-20251001"
+
+// claudeFableProbeModelID is the LAST-RESORT fable-governed model for
+// issue #229's family probe — used only when accounts.familyProbeModel
+// cannot find any model this account, or any other account in the pool,
+// has actually been served on (Account.LastModel) that claudeGoverningWindows
+// recognises as fable-governed. Preferring an observed model over this
+// constant is deliberate: an earlier version of this fix hard-coded a
+// GUESSED id ("claude-haiku-4-5-fable") that nothing had ever confirmed
+// against a live account, and — worse — a guessed-but-syntactically-valid
+// id still returns ok=true here, so the "nothing to probe with" safety
+// branch never engaged; the probe just 400/404'd every time, measured
+// nothing, and stranded a non-billable account until its real reset,
+// days out.
+//
+// "claude-fable-5-1": read from model_served in the live request log on
+// 2026-09-28 (16,071 requests over the prior 7 days) — a real id this pool
+// actually serves fable traffic on, not a guess. It will age as Anthropic
+// ships new model ids; that is exactly why it is the FALLBACK, not the
+// first choice.
+const claudeFableProbeModelID = "claude-fable-5-1"
+
+// claudeFamilyProbeModel implements Spec.FamilyProbeModel (issue #229).
+// "5h" and "7d" are account-wide — every request governs them, including
+// claudeProbeModelID's own — so they just defer to the plain probe model.
+// "7d-fable" needs a model claudeGoverningWindows itself would recognise as
+// fable-governed, or the "probe" would ask the wrong question and learn
+// nothing about the window it was sent to test.
+func claudeFamilyProbeModel(window string, modelMap map[string]string) (string, bool) {
+	switch window {
+	case "5h", "7d":
+		if v, ok := modelMap[claudeProbeModelID]; ok {
+			return v, true
+		}
+		return claudeProbeModelID, true
+	case "7d-fable":
+		if v, ok := modelMap[claudeFableProbeModelID]; ok {
+			return v, true
+		}
+		return claudeFableProbeModelID, true
+	}
+	return "", false
+}
+
 var claudeSpec = Spec{
 	Kind:            Claude,
 	AccountType:     "claude-oauth",
 	DefaultUpstream: "https://api.anthropic.com",
 	ProbeModel: func(m map[string]string) string {
-		if v, ok := m["claude-haiku-4-5-20251001"]; ok {
+		if v, ok := m[claudeProbeModelID]; ok {
 			return v
 		}
-		return "claude-haiku-4-5-20251001"
+		return claudeProbeModelID
 	},
+	FamilyProbeModel: claudeFamilyProbeModel,
 	Capabilities: Capabilities{
 		ThinkingDefaultOn:            false,
 		ForcedToolChoiceWithThinking: true,
