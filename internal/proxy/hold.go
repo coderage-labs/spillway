@@ -39,7 +39,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/coderage-labs/spillway/internal/notify"
 	"github.com/coderage-labs/spillway/internal/pool"
 )
 
@@ -150,11 +149,14 @@ func (h *Handler) waitForReset(r *http.Request, body []byte, deadline time.Time,
 		// §6.11: the whole point of notify mode. The request is about to be
 		// parked for possibly hours, and a log line does not reach someone
 		// who has walked away.
-		if h.notifier != nil {
-			h.notifier.Notify(notify.EventHeld, "pool-held", "spillway: pool exhausted",
-				"Holding requests until "+reset.Local().Format("15:04")+
-					" ("+wait.Round(time.Minute).String()+")")
-		}
+		//
+		// Issue #230: one notification per episode, not one per hold —
+		// reportExhaustion no-ops unless this is a genuine transition
+		// (episode opening, or its ETA slipping materially later), and
+		// names the actual family (e.g. "fable") rather than always
+		// saying "pool exhausted" when only one family is out. See
+		// episode.go.
+		h.reportExhaustion(h.pool.FamilyKey(body), reset, true)
 	}
 	log("pool exhausted — holding request until reset",
 		"path", r.URL.Path,

@@ -647,7 +647,7 @@ notify:
   channels:                # optional; empty/absent = local desktop notifications only
     - name: phone
       provider: ntfy        # os | webhook | ntfy | pushover
-      events: [exhausted, held, account-disabled]
+      events: [exhausted, held, recovered, account-disabled]
     - name: desktop
       provider: os
       events: [overage-cap]
@@ -1500,7 +1500,38 @@ Spillway always raises a local desktop notification for the events below —
 today's exact behaviour and nothing below changes it: **`notify.channels` is
 entirely opt-in.**
 
-The reason to add one: a held request has nothing else that can reach you.
+### One notification per episode, not one per request
+
+An exhaustion/hold is an *episode*, not a per-request event (issue #230):
+one notification when it starts, at most one more if the wait gets
+materially longer, and one when it clears — however many requests hold,
+retry, or wake and re-hold while it lasts. Before this, every held request
+and every final refusal notified independently, each on its own 10-minute
+coalesce window, so a genuine multi-hour exhaustion produced a ping every
+ten minutes for as long as it lasted.
+
+The episode is scoped to whichever model family is actually affected —
+`fable`'s own weekly bucket is the only one today (see
+[per-family quota](#per-family-quota-fable)) — never "the pool", unless the
+pool-wide windows are genuinely the ones out:
+
+| Situation | Notification |
+|---|---|
+| One family held, others still serving | *"Fable held until 08:14 (1h36m) — other models running"* |
+| That family's episode escalates: every family now out | *"All models held until 08:14 (1h36m)"* (one message, not a second family one) |
+| That family's capacity returns | *"Fable back"* |
+| The general windows return first, that family is still spent | *"Other models back — fable still held until 14:00"* |
+| Everything returns together | *"All models back"* (one message, not two) |
+
+A held/refused request only ever reports a **materially later** ETA again
+— more than ~15 minutes, or past `holdMax` — never one that moved earlier
+(the recovery message covers that). Recovery itself is driven by pool
+capacity, not by a request being served: it fires even with zero requests
+currently held, so an owner who has stopped retrying still hears that it's
+safe to resume — the previous behaviour gave no signal at all beyond the
+pings simply stopping.
+
+The reason to add a channel at all: a held request has nothing else that can reach you.
 HTTP gives one response per request, so a request spillway is currently
 holding cannot itself carry a message — the only way to hear about it before
 you next look at the screen is an out-of-band channel.
@@ -1510,7 +1541,7 @@ notify:
   channels:
     - name: phone
       provider: ntfy
-      events: [exhausted, held, account-disabled]
+      events: [exhausted, held, recovered, account-disabled]
     - name: desktop
       provider: os
       events: [overage-cap]
@@ -1573,8 +1604,9 @@ re-login an account you can't identify.
 
 | Event | Fires when |
 |---|---|
-| `exhausted` | Every account is spent and a request was refused |
-| `held` | The first request has been parked waiting for a reset — the leading indicator, before a queue builds |
+| `exhausted` | The general, account-wide windows have no capacity — every model family is held, not just one (issue #230). Once per "all models" episode: open, a material ETA slip, or a single family episode escalating into this one — never once per held/refused request |
+| `held` | One model family has no capacity while the general windows (and so every other family) still do — *"Fable held until …, other models running"*. Once per family episode, same coalescing as `exhausted` |
+| `recovered` | An exhaustion/hold episode's capacity came back — one family's own, the general windows' while a family stayed spent, or both together |
 | `overage-cap` | An account already billing for extra usage has hit its own limit there too |
 | `account-disabled` | An account's credential died and it dropped out of rotation |
 

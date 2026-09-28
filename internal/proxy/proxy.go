@@ -77,6 +77,9 @@ type Handler struct {
 	// notifier raises a desktop notification when the pool runs dry in
 	// notify mode (§6.11).
 	notifier *notify.Notifier
+	// episodes tracks exhaustion/recovery notification state per model
+	// family (issue #230) — see episode.go.
+	episodes *episodeTracker
 	// bodyCap bounds the buffered-retry body (§6.10, configurable).
 	bodyCap int64
 	// egress reaches upstreams directly or via a corporate proxy (§6.13).
@@ -158,9 +161,15 @@ func (h *Handler) publish(e events.Event) {
 	}
 }
 
-// exhaustedMessage builds the actionable body for the "exhausted" notify
-// event: what happened and when it clears, never which account (issue #101
-// comment — a leaked ntfy topic must not be worth reading).
+// exhaustedMessage builds a human-readable "pool exhausted" summary: what
+// happened and when it clears, never which account (issue #101 comment — a
+// leaked ntfy topic must not be worth reading).
+//
+// No longer wired into the notifier directly (issue #230 replaced that
+// call site with reportExhaustion/allHeldBody, scoped to the actual
+// episode rather than always "all accounts"); kept as its own tested unit
+// — see overage_refusal_e2e_test.go — for the overage-refusal wording
+// allHeldBody now folds in via overageRefusalNote below.
 func exhaustedMessage(p *pool.Pool) string {
 	msg := "All accounts exhausted"
 	if reset, ok := p.EarliestReset(); ok {
@@ -219,6 +228,7 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, p *pool.Pool) (*Handler
 	}
 	h := &Handler{
 		notifier: notify.New(),
+		episodes: newEpisodeTracker(),
 		bodyCap:  cap,
 		egress:   eg,
 		pool:     p,
@@ -709,10 +719,19 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 					clientMsg += " — " + overageNote
 				}
 				h.publish(events.Event{Type: reqlog.EventExhausted, Detail: "all accounts exhausted"})
-				if h.notifier != nil {
-					h.notifier.Notify(notify.EventExhausted, "pool-exhausted-all",
-						"spillway: all accounts exhausted", exhaustedMessage(h.pool))
+				// Issue #230: folded into the same per-episode notification
+				// hold.go's park uses (reportExhaustion) — this is the
+				// "final refusal" call site, reached both when
+				// exhaustedMode == "fail" (no hold ever attempted) and when
+				// a hold gave up (fail-fast on a far reset, or holdMax
+				// spent). eta may be unknown here for the same reason
+				// exhaustedMessage always tolerated it: every blocking
+				// account can be disabled rather than merely spent.
+				eta, etaKnown := h.pool.EarliestReset()
+				if weta, wok := h.pool.EarliestWindowReset(body); wok && (!etaKnown || weta.Before(eta)) {
+					eta, etaKnown = weta, true
 				}
+				h.reportExhaustion(h.pool.FamilyKey(body), eta, etaKnown)
 				writeJSON(w, http.StatusTooManyRequests,
 					`{"type":"error","error":{"type":"rate_limit_error","message":`+
 						jsonString(clientMsg)+`}}`)

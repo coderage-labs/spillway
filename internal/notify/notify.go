@@ -78,6 +78,19 @@ func New() *Notifier {
 	return n
 }
 
+// SetSendFuncForTest overrides the platform-local send hook and forces
+// Enabled true regardless of GOOS. For tests OUTSIDE this package (e.g.
+// internal/proxy's exhaustion-episode tests, issue #230) that need to
+// observe what Notify/NotifyLocal/NotifyEpisode actually sent through the
+// default, no-channels path — today's exact behaviour for anyone who has
+// never configured a channel — without depending on a real notifier being
+// present in CI, or duplicating this package's own channel machinery just
+// to capture a title/body pair.
+func (n *Notifier) SetSendFuncForTest(f func(ctx context.Context, title, body string) error) {
+	n.send = f
+	n.Enabled = true
+}
+
 // shouldSend applies the one dedup rule shared by every notification this
 // package sends, channel-routed or local-only: a key firing again inside
 // coalesce is suppressed. Returns true the first time a key is seen, and
@@ -136,6 +149,39 @@ func (n *Notifier) NotifyLocal(key, title, body string) {
 		return
 	}
 	n.sendLocal(title, body)
+}
+
+// NotifyEpisode raises a notification for one transition of an
+// exhaustion/hold/recovery episode (issue #230) — fanned out to
+// channels/local exactly like Notify, but WITHOUT the shared coalesce map.
+//
+// Every other notification in this package goes through shouldSend's flat
+// per-key window, which is right for "a burst of identical events in a
+// short time is one notification" but wrong for an episode that can
+// legitimately last hours: coalesce would either resend on its own 10-minute
+// clock (the original bug — issue #230's whole reason for existing) or, if
+// widened, suppress a second call that is a genuinely different message
+// (an escalation ten minutes after the family's own "held", say). The
+// caller (internal/proxy's episodeTracker) already decided this call IS a
+// distinct transition — open, a material ETA slip, an escalation, or a
+// recovery — before ever reaching here, so it is its own dedup and none is
+// needed a second time.
+func (n *Notifier) NotifyEpisode(event, title, body string) {
+	n.mu.Lock()
+	chans := n.channels
+	n.mu.Unlock()
+
+	if len(chans) == 0 {
+		n.sendLocal(title, body)
+		return
+	}
+	note := Notification{Event: event, Key: "episode:" + event, Title: title, Body: body}
+	for _, ch := range chans {
+		if !ch.enabled || !ch.events[event] {
+			continue
+		}
+		go n.deliver(ch, note)
+	}
 }
 
 func (n *Notifier) sendLocal(title, body string) {
