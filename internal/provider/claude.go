@@ -127,14 +127,25 @@ var claudeSpec = Spec{
 // a given response — see claudeGoverningWindows' own comment for how it
 // differs from that static guess.
 
-// overageAllowed is the set of statuses that mean extra usage will serve.
+// anthropicAllowedStatuses is the set of `-status` values that mean "this
+// still serves" — shared by every place this package reads one of
+// Anthropic's unified-ratelimit status headers (the overage status below,
+// and the per-window statuses anthropicRejectedWindows reads), so the two
+// can't drift back apart the way #234 found them already had.
 //
 // "allowed_warning" is not a near-miss for "allowed": it means allowed AND
-// past the warning threshold. Testing for equality with "allowed" read a live
-// account with working extra usage as having none — so spillway served a
-// billed request and recorded it as ordinary traffic. Membership, not
-// equality, and anything unrecognised still fails closed.
-var overageAllowed = map[string]bool{
+// past the warning threshold. Testing for equality with "allowed" read a
+// live account with working extra usage as having none — so spillway
+// served a billed request and recorded it as ordinary traffic (the overage
+// path, fixed first). Issue #234 found the identical mistake one level up:
+// anthropicRejectedWindows was still testing per-window status with
+// `!= "allowed"`, so a window merely past its warning threshold (7d at
+// 79%, still allowed) was counted as rejected alongside whichever window
+// actually caused the 429 (fable's 7d_oi) — and ScopeRejection then saw 7d
+// in the rejected set and benched the account for every model until the
+// weekly reset, days out. Membership, not equality, in both places now;
+// anything unrecognised still fails closed.
+var anthropicAllowedStatuses = map[string]bool{
 	"allowed":         true,
 	"allowed_warning": true,
 }
@@ -160,7 +171,7 @@ func anthropicOverage(h http.Header) Overage {
 		Known: true,
 		// In-use implies available whatever the status says: the provider
 		// just served a billed request, which settles the question.
-		Available:   overageAllowed[v] || inUse,
+		Available:   anthropicAllowedStatuses[v] || inUse,
 		InUse:       inUse,
 		Utilization: -1,
 		Reason:      h.Get(OverageDisabledReasonHeader),
@@ -201,15 +212,25 @@ var claudeWindows = []struct{ name, prefix string }{
 // fired so it can scope exhaustion to what that window actually governs,
 // instead of the whole account for every model).
 //
-// Checked as "!= allowed" rather than "== rejected": the measured
-// vocabulary is only {allowed, rejected} today (issue #25's comment), but
-// it is not exhaustively known, and the two ways to be wrong are not
-// equally bad. Treating an unrecognised status as a rejection costs one
-// account an undeserved rotation — every other account in the pool is
-// still tried. Treating it as transient instead means retrying the same
-// spent account three times with backoff while a healthy one sits idle,
-// which is the exact failure #25 reports; an unknown future status must
-// not be able to reproduce that. Fail toward rotation, not toward retry.
+// Checked as membership in anthropicAllowedStatuses rather than equality
+// with "rejected", and NOT as "!= allowed" either (issue #234, the same
+// correction anthropicOverage's comment above already went through once):
+// "allowed_warning" means allowed and past the warning threshold, not
+// rejected. Treating it as rejected dragged every window past its warning
+// threshold into the rejected set on any 429 — live 2026-09-28, a fable
+// 429 (7d_oi rejected) pulled 7d (allowed_warning, 79% used) in with it,
+// ScopeRejection saw 7d in that set and benched the account for every
+// model, not just fable, until the 7d reset days out.
+//
+// Anything not in anthropicAllowedStatuses still fails closed, same
+// reasoning as before this fix: the measured vocabulary is not exhaustively
+// known, and the two ways to be wrong are not equally bad. Treating an
+// unrecognised status as a rejection costs one account an undeserved
+// rotation — every other account in the pool is still tried. Treating it as
+// transient instead means retrying the same spent account three times with
+// backoff while a healthy one sits idle, which is the exact failure #25
+// reports; an unknown future status must not be able to reproduce that.
+// Fail toward rotation, not toward retry.
 //
 // An absent status header is neither: it means this request never engaged
 // that family (a Haiku request carries no 7d_oi-* at all, per #25), so it
@@ -221,7 +242,7 @@ func anthropicRejectedWindows(h http.Header) []string {
 		if v == "" {
 			continue
 		}
-		if v != "allowed" {
+		if !anthropicAllowedStatuses[v] {
 			out = append(out, w.name)
 		}
 	}
@@ -306,20 +327,24 @@ const anthropicRepresentativeClaimHeader = "anthropic-ratelimit-unified-represen
 // representativeClaimWindows translates the header's snake_case vocabulary
 // into spillway's own window names (issue #53).
 //
-// "five_hour" is the only entry here, and it is the only one that should
-// be: it is the only value anyone has actually read off a live response
-// (a fable request, where it named the 5h bucket rather than the weekly
-// fable one #24's static map would have predicted — see
-// claudeGoverningWindows). The other families almost certainly have their
-// own spellings ("seven_day"? "seven_day_opus_income"? — nobody knows),
-// but guessing them here would silently launder a guess as a measurement:
-// AnthropicRepresentativeClaim below reports anything not in this map as
-// unrecognised rather than pretending to translate it, and callers must
-// log that as "unknown", never as a mismatch — a mismatch claims to know
-// what the value should have been, and for everything but five_hour we
-// don't.
+// All three entries are measured, not guessed — issue #234 pinned the two
+// added after #53 shipped by reading live logs from 2026-09-15 through
+// 2026-09-28: "seven_day" recurs across every model family (opus-5,
+// opus-5-5, sonnet-5, haiku-4-5, fable-5-1), while "seven_day_overage_included"
+// appears only on claude-fable-5-1 (and one probe with no model). That
+// split matches claudeWindows' own "7d_oi" ("overage included") header
+// prefix for what spillway names "7d-fable" — fable's extra weekly bucket
+// on top of the account-wide 7d — so seven_day_overage_included maps to
+// "7d-fable", not to a second "7d". Anything still outside this map is
+// genuinely unmeasured, not merely unguessed: AnthropicRepresentativeClaim
+// below reports it as unrecognised rather than pretending to translate it,
+// and callers must log that as "unknown", never as a mismatch — a mismatch
+// claims to know what the value should have been, and for anything not
+// listed here we don't.
 var representativeClaimWindows = map[string]string{
-	"five_hour": "5h", // measured live, issue #53 — the only confirmed entry
+	"five_hour":                  "5h",       // measured live, issue #53
+	"seven_day":                  "7d",       // measured live, issue #234
+	"seven_day_overage_included": "7d-fable", // measured live, issue #234 — fable-5-1 only
 }
 
 // AnthropicRepresentativeClaim reads the representative-claim header and

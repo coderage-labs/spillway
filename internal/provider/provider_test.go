@@ -587,6 +587,33 @@ func TestAnthropicRepresentativeClaimTranslatesMeasuredValue(t *testing.T) {
 	}
 }
 
+// TestAnthropicRepresentativeClaimTranslatesSevenDayValues pins the two
+// entries issue #234 added after reading 13 days of live logs
+// (2026-09-15..28): "seven_day" recurs across every model family, and
+// "seven_day_overage_included" only on claude-fable-5-1, matching the
+// 7d_oi header prefix claudeWindows names "7d-fable" for. Confirms both
+// resolve — and that resolving does not itself produce an "unrecognised"
+// signal, since this map only feeds the observational logger in
+// internal/proxy/representative_claim.go, never routing.
+func TestAnthropicRepresentativeClaimTranslatesSevenDayValues(t *testing.T) {
+	tests := []struct {
+		raw        string
+		wantWindow string
+	}{
+		{"seven_day", "7d"},
+		{"seven_day_overage_included", "7d-fable"},
+	}
+	for _, tt := range tests {
+		h := http.Header{}
+		h.Set("Anthropic-Ratelimit-Unified-Representative-Claim", tt.raw)
+		raw, window, recognised := AnthropicRepresentativeClaim(h)
+		if raw != tt.raw || window != tt.wantWindow || !recognised {
+			t.Errorf("AnthropicRepresentativeClaim(%q) = (%q, %q, %v), want (%q, %q, true)",
+				tt.raw, raw, window, recognised, tt.raw, tt.wantWindow)
+		}
+	}
+}
+
 // TestAnthropicRepresentativeClaimUnrecognisedValueIsHandledGracefully: a
 // claim value this package has no translation for must come back as
 // unrecognised, not crash and not silently resolve to some window name —
@@ -662,5 +689,46 @@ func TestClaudeRejectedWindowsNamesExactlyWhatFired(t *testing.T) {
 		if len(got) != 0 {
 			t.Errorf("got %v, want no rejected windows", got)
 		}
+	})
+
+	// Issue #234, live 2026-09-28: a fable 429 (7d_oi rejected) with 7d
+	// merely past its warning threshold (still allowed) must name only the
+	// window that actually fired. Before the fix this returned [7d
+	// 7d-fable] — 7d dragged in by "!= allowed" — and ScopeRejection then
+	// benched the account for every model.
+	t.Run("7d allowed_warning is not dragged in by a fable rejection (#234)", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-7d_oi-status", "rejected")
+		h.Set("anthropic-ratelimit-unified-7d-status", "allowed_warning")
+		h.Set("anthropic-ratelimit-unified-5h-status", "allowed")
+		eq(t, rw(h), []string{"7d-fable"})
+	})
+
+	// allowed_warning alone, isolated from the mixed case above: a window
+	// past its warning threshold but not rejected must never appear in the
+	// rejected set at all.
+	t.Run("allowed_warning alone is not rejected", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-7d-status", "allowed_warning")
+		got := rw(h)
+		if len(got) != 0 {
+			t.Errorf("got %v, want no rejected windows — allowed_warning still serves", got)
+		}
+	})
+
+	// No regression: 7d actually rejected (not just warned) must still
+	// name 7d, so ScopeRejection still benches the account account-wide.
+	t.Run("7d actually rejected still names 7d (no regression)", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-7d-status", "rejected")
+		eq(t, rw(h), []string{"7d"})
+	})
+
+	// Fail-closed is unchanged by widening the allowed set: a status this
+	// package has never seen still counts as rejected.
+	t.Run("unknown status value still fails closed", func(t *testing.T) {
+		h := http.Header{}
+		h.Set("anthropic-ratelimit-unified-7d-status", "some_future_status")
+		eq(t, rw(h), []string{"7d"})
 	})
 }

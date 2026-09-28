@@ -131,6 +131,62 @@ func mixed429(w http.ResponseWriter) {
 	fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error","message":"quota exceeded"}}`)
 }
 
+// fable429With7dWarning is issue #234's exact live scenario: fable's own
+// weekly bucket (7d_oi) is rejected, 5h is clean, and 7d — a DIFFERENT,
+// account-wide window — is merely past its warning threshold (still
+// "allowed_warning", not rejected). Unlike fable429 above, this exercises
+// the bug #234 fixes: fable429's plain "allowed" on 7d already passed
+// under the old "!= allowed" check, so it could not have caught this.
+func fable429With7dWarning(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+	w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed_warning")
+	w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
+	w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", fmt.Sprint(time.Now().Add(48*time.Hour).Unix()))
+	w.WriteHeader(http.StatusTooManyRequests)
+	fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error","message":"fable weekly quota exceeded"}}`)
+}
+
+// TestFable429WithSevenDayWarningDoesNotExhaustAccountWide is issue #234's
+// regression guard, end to end through the real HTTP path: a window merely
+// past its warning threshold (7d allowed_warning) must not be swept into
+// the rejected set by a fable-only 429, and must not scope the account
+// wide. Before the fix, anthropicRejectedWindows read allowed_warning as
+// "!= allowed" and returned [7d 7d-fable]; ScopeRejection then saw 7d — an
+// account-wide window — in that set and benched the whole account until
+// the 7d reset, days out, for every model, not just fable.
+func TestFable429WithSevenDayWarningDoesNotExhaustAccountWide(t *testing.T) {
+	rig := newRig(t, [2]http.HandlerFunc{
+		func(w http.ResponseWriter, r *http.Request) { fable429With7dWarning(w) },
+		func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"ok":true}`) },
+	})
+	acct0, acct1 := rig.pool.Accounts()[0], rig.pool.Accounts()[1]
+	acct0.SetPriority(0)
+	acct1.SetPriority(1)
+
+	resp := postMessages(t, rig.front.URL, fableReqBody)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (rotated to the healthy account)", resp.StatusCode)
+	}
+
+	if acct0.State() == pool.StateExhausted {
+		t.Fatalf("account-0 must not be StateExhausted — 7d was only allowed_warning, not rejected (issue #234)")
+	}
+
+	// A fresh Sonnet session must still be able to select account-0: 7d
+	// being merely warned must not have scoped the rejection account-wide.
+	got := rig.pool.SelectFor("fresh-sonnet-session-234", []byte(sonnetReqBody("fresh-sonnet-session-234")))
+	if got == nil {
+		t.Fatal("SelectFor(sonnet) = nil, want account-0 (unaffected by the fable-only rejection)")
+	}
+	if got.Name != acct0.Name {
+		t.Fatalf("SelectFor(sonnet) = %q, want %q — a 7d allowed_warning must not have benched it account-wide",
+			got.Name, acct0.Name)
+	}
+	rig.pool.Done(got)
+}
+
 // A mixed rejection (account-wide AND family together) must still
 // exhaust the account (5h is account-wide), bounded to the SHORT 5h
 // reset — not the fable window's 1000h-out one — and must also leave a
