@@ -105,7 +105,35 @@ func ProbeIdle(ctx context.Context, p *pool.Pool, client *http.Client, defaultUp
 	staleAfter time.Duration, logger *slog.Logger) {
 	poolAllows := p.AllowOverage()
 	for _, a := range p.Accounts() {
-		if a.State() == pool.StateDisabled || !needsProbe(a, poolAllows, staleAfter) {
+		if a.State() == pool.StateDisabled {
+			continue
+		}
+		// needsProbe's ordinary staleness check looks at the newest
+		// FetchedAt across every window on the account, and a busy account
+		// still serving Sonnet/Opus keeps that recent through ordinary
+		// traffic alone — nothing about a spent-or-expired "7d-fable"
+		// bucket ever makes it look stale by that measure, since its own
+		// row only moves when something re-marks or re-measures THAT
+		// window specifically. Without this OR, such an account's family
+		// window could go un-probed indefinitely: the exact "permanently
+		// excluded because nobody re-measures it" failure #194 was written
+		// to prevent (issue #229's coordinator follow-up).
+		//
+		// p.FamilyProbeDue, not the plain "is it spent" check: a second,
+		// production-live review found that firing this the INSTANT a
+		// window is spent — with no age floor — left no guaranteed margin
+		// against the scheduled ticker's own independent phase, so a probe
+		// meant to land before windowRejectionExcludes' fallback opened
+		// the door could just as easily lose that race. FamilyProbeDue
+		// only forces a visit once half the effective TTL has passed,
+		// which — combined with that fallback's own widening — guarantees
+		// at least one tick lands in time regardless of phase. See both
+		// functions' comments (internal/pool/family.go) for the full
+		// argument. Evaluated fresh every tick — this is not a second
+		// timer, only a second reason THIS tick's existing needsProbe
+		// check may decide to visit the account.
+		due := needsProbe(a, poolAllows, staleAfter) || p.FamilyProbeDue(a, time.Now())
+		if !due {
 			continue
 		}
 		// An idle account's token expires with nothing to notice: no request
@@ -118,12 +146,12 @@ func ProbeIdle(ctx context.Context, p *pool.Pool, client *http.Client, defaultUp
 		if a.State() == pool.StateDisabled {
 			continue
 		}
-		err := probeOne(ctx, p, a, client, defaultUpstream, staleAfter)
+		err := probeOne(ctx, p, a, client, defaultUpstream, staleAfter, false, logger)
 		if errors.Is(err, errProbeUnauthorized) {
 			// The stored token was superseded (another holder refreshed it).
 			// Recover once and retry before giving up.
 			if rerr := p.Recover(ctx, a); rerr == nil {
-				err = probeOne(ctx, p, a, client, defaultUpstream, staleAfter)
+				err = probeOne(ctx, p, a, client, defaultUpstream, staleAfter, false, logger)
 			}
 		}
 		if err != nil {
@@ -174,9 +202,18 @@ func wouldBill(a *pool.Account, poolAllows bool, now time.Time) bool {
 // was reachable before quota windows were retained across readings and is the
 // ordinary case now that they are.
 func readsSpent(a *pool.Account, now time.Time) bool {
+	return readsSpentForModel(a, probeModel(a), now)
+}
+
+// readsSpentForModel is readsSpent generalised over WHICH model's own probe
+// is being asked about (issue #229's family probe): a fable probe risks
+// billing a spent "7d-fable" bucket exactly the way the ordinary probe
+// risks billing a spent "5h"/"7d" one, and probeRejectedFamilies needs the
+// identical guard, scoped to the family model it is about to send.
+func readsSpentForModel(a *pool.Account, model string, now time.Time) bool {
 	governing := map[string]bool{}
 	if gw := provider.For(a.Type).GoverningWindows; gw != nil {
-		for _, name := range gw(probeModel(a)) {
+		for _, name := range gw(model) {
 			governing[name] = true
 		}
 	}
@@ -366,6 +403,12 @@ func needsProbeAt(a *pool.Account, poolAllows bool, staleAfter time.Duration, no
 			return false
 		}
 	}
+	// Issue #229's family-probe forcing (a busy account whose OTHER windows
+	// look perfectly fresh must still be visited when a family window is
+	// spent or expired) is done by ProbeIdle's own caller, one level up —
+	// see its call site — rather than here: it needs the pool's switch
+	// threshold, which this function is not otherwise handed, and adding it
+	// only for this would change every one of this function's many callers.
 	// A rejected re-probe (issue #90) sets NextProbeAt to enforce its own
 	// growing backoff, separately from — and possibly longer than —
 	// staleAfter; check it before the staleness comparison below so a
@@ -414,17 +457,10 @@ func needsProbeAt(a *pool.Account, poolAllows bool, staleAfter time.Duration, no
 // recovery before writing the account off.
 var errProbeUnauthorized = errors.New("probe unauthorized")
 
-// probeOne sends one probe request. reprobeBackoff is the base spacing
-// (issue #90) used only when the account was already exhausted going in
-// and this probe is rejected again — the same value as ProbeIdle's own
-// staleAfter, so a rejected re-probe is never spaced closer than the
-// ordinary probe cadence.
-func probeOne(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.Client, defaultUpstream string, reprobeBackoff time.Duration) error {
-	upstream := a.Upstream
-	if upstream == "" {
-		upstream = defaultUpstream
-	}
-	model := probeModel(a)
+// sendProbeRequest performs the one HTTP round trip every probe in this
+// package makes: the ordinary cheap one below and issue #229's family probe
+// (probeRejectedFamilies) alike, which differ only in which model they name.
+func sendProbeRequest(ctx context.Context, a *pool.Account, client *http.Client, upstream, model string) (status int, header http.Header, body []byte, err error) {
 	reqBody := fmt.Sprintf(probeBody, model)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -432,12 +468,44 @@ func probeOne(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.C
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(upstream, "/")+"/v1/messages", bytes.NewReader([]byte(reqBody)))
 	if err != nil {
-		return err
+		return 0, nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 	req.Header.Set("Authorization", "Bearer "+a.Token())
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, probeClassifyCap))
+	return resp.StatusCode, resp.Header, respBody, nil
+}
+
+// probeOne sends one probe request. reprobeBackoff is the base spacing
+// (issue #90) used only when the account was already exhausted going in
+// and this probe is rejected again — the same value as ProbeIdle's own
+// staleAfter, so a rejected re-probe is never spaced closer than the
+// ordinary probe cadence.
+//
+// force and logger are used only for issue #229's family probe below,
+// which this now also runs — on the same tick, right after the ordinary
+// probe's own outcome handling. force is ProbeNow's money override (#152),
+// threaded down so a forced "check now" can also force the family probe's
+// identical billing refusal; every other caller (the scheduled sweep, the
+// canary) always passes false. Errors from every OTHER call in this
+// function still propagate to the caller exactly as before; a failed
+// family probe never does, for the same reason a failed ordinary probe
+// here never fails the canary or the sweep it came from — it says nothing
+// about whether the account can serve real traffic.
+func probeOne(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.Client, defaultUpstream string, reprobeBackoff time.Duration, force bool, logger *slog.Logger) error {
+	upstream := a.Upstream
+	if upstream == "" {
+		upstream = defaultUpstream
+	}
+	model := probeModel(a)
 
 	// Captured before the request: this probe's own RecordQuota call below
 	// updates the account's windows, and reading state only afterward could
@@ -445,30 +513,183 @@ func probeOne(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.C
 	// fine".
 	wasExhausted := a.State() == pool.StateExhausted
 
-	resp, err := client.Do(req)
+	status, header, respBody, err := sendProbeRequest(ctx, a, client, upstream, model)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, probeClassifyCap))
 
-	p.RecordQuota(a, resp.Header, time.Now())
+	p.RecordQuota(a, header, time.Now())
+	// Issue #229: whatever RecordQuota just wrote might be the first fresh
+	// evidence a rejected window has had since it was marked — a manual
+	// free reset (#228), an ad-hoc provider-side reset (#135), or simply the
+	// rare response that does carry a reading for a family this probe
+	// doesn't normally engage. Judged from the reading itself, never from
+	// resp.StatusCode: this probe's own model usually does not govern the
+	// rejected family at all, so a healthy status here is not evidence for
+	// it either way. A no-op whenever nothing changed.
+	p.ClearRecoveredWindowRejections(a)
 	// The probe really did serve this model, so the status line has something
 	// truthful to show before the first real request.
-	if resp.StatusCode < 400 {
+	if status < 400 {
 		a.SetLastModel(model)
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
+	if status == http.StatusUnauthorized {
 		return errProbeUnauthorized
 	}
-	if resp.StatusCode >= 400 && len(a.QuotaWindows()) == 0 {
-		return fmt.Errorf("probe returned %d with no quota headers", resp.StatusCode)
+	if status >= 400 && len(a.QuotaWindows()) == 0 {
+		return fmt.Errorf("probe returned %d with no quota headers", status)
 	}
 
 	if wasExhausted {
-		reprobeOutcome(p, a, provider.For(a.Type), resp.StatusCode, resp.Header, respBody, reprobeBackoff)
+		reprobeOutcome(p, a, provider.For(a.Type), status, header, respBody, reprobeBackoff)
 	}
+
+	// Issue #229's family probe: THIS is what can actually measure a
+	// family-scoped rejection (fable-only, the common case) — the ordinary
+	// probe above never can, since its model never governs that family.
+	// Run on every tick that reached this point, which needsProbeAt already
+	// ensures includes every tick a rejection is due (WindowRejectionNeedsProbeAt),
+	// regardless of why this particular probeOne call happened.
+	probeRejectedFamilies(ctx, p, a, client, upstream, force, logger)
 	return nil
+}
+
+// familyGoverned reports whether model is governed by window, per a's own
+// provider — the identical classification GoverningWindows already
+// applies everywhere else, reused here rather than re-implemented so a
+// model this function calls "fable-governed" can never disagree with what
+// selection itself would call it.
+func familyGoverned(a *pool.Account, model, window string) bool {
+	gw := provider.For(a.Type).GoverningWindows
+	if gw == nil || model == "" {
+		return false
+	}
+	for _, n := range gw(model) {
+		if n == window {
+			return true
+		}
+	}
+	return false
+}
+
+// familyProbeModel resolves the model to probe window with (issue #229's
+// family probe) — corrected after a live-daemon review found the first
+// version's fallback constant (provider.Spec.FamilyProbeModel) was an
+// INVENTED id, unconfirmed against any real account. Worse, an
+// invented-but-syntactically-valid id still returns ok=true from that
+// function, so the "nothing to probe with" safety branch never engaged:
+// the probe just 400/404'd on the unknown model, measured nothing, and —
+// because nothing else recognised that as a failure — a non-billable
+// account sat excluded until its real reset arrived days later, the exact
+// stranding this whole fix exists to prevent.
+//
+// So the fallback constant is now genuinely a LAST resort. Preferred,
+// in order:
+//
+//  1. This account's own last-served model (Account.LastModel), if it is
+//     governed by window. The provider already accepted that exact id for
+//     this exact account — nothing about it can be wrong.
+//  2. Any OTHER account in the pool, of the same provider type, whose
+//     last-served model is governed by window. Same provider behaviour,
+//     a different account, still a real, confirmed id.
+//  3. provider.Spec.FamilyProbeModel's own fallback constant, only when
+//     nothing in the pool has ever actually served this family.
+//
+// ok=false only when even the fallback constant's provider has nothing
+// registered for this window (nil FamilyProbeModel, or an unrecognised
+// window name) — accounts.probeRejectedFamilies skips sending anything in
+// that case, and pool.Pool's windowRejectionExcludes bounded fallback
+// (the row simply never gets refreshed) is what keeps the account from
+// being stranded instead.
+func familyProbeModel(p *pool.Pool, a *pool.Account, window string) (string, bool) {
+	if m := a.LastModel(); familyGoverned(a, m, window) {
+		return m, true
+	}
+	for _, other := range p.Accounts() {
+		if other.Type != a.Type {
+			continue // a different provider's model id says nothing about this one
+		}
+		if m := other.LastModel(); familyGoverned(a, m, window) {
+			return m, true
+		}
+	}
+	fp := provider.For(a.Type).FamilyProbeModel
+	if fp == nil {
+		return "", false
+	}
+	return fp(window, a.ModelMap)
+}
+
+// familyProbeBillable reports whether sending a's family probe for model
+// would risk billing it — the same question wouldBill asks for the
+// ordinary probe, scoped to whichever windows THIS model actually draws
+// on. CanOverage true and every governing window the model draws on
+// reading fully spent means the provider would SERVE (and charge) the
+// probe rather than refuse it — never send that probe (§6.21).
+func familyProbeBillable(a *pool.Account, model string, poolAllows bool, now time.Time) bool {
+	if !a.CanOverage(poolAllows) {
+		return false // the provider refuses instead of charging: free
+	}
+	return readsSpentForModel(a, model, now)
+}
+
+// probeRejectedFamilies sends one additional, family-scoped probe for each
+// of a's family-scoped windows currently SPENT or EXPIRED (issue #229,
+// refined by a production-live review of the first version of this fix,
+// which triggered on "a windowRejected entry exists" — too narrow, since a
+// family can go stale (expired) without ever having been formally
+// 429-rejected). See Account.familySpentOrExpiredAt for the exact
+// definitions. A HEALTHY family window is never probed here: spending real
+// fable quota on a fable-governed model to re-confirm a fact already on
+// file is the same mistake §6.21 forbids for money, just paid in quota
+// instead.
+//
+// A family-scoped rejection (fable-only, the common case) is invisible to
+// the ordinary probe above, since that probe's model never governs the
+// rejected family — that is the whole bug this closes. Called from both
+// probeOne (the scheduled sweep and the canary) and ProbeNow (the
+// dashboard's "check now", #192), so a manual check after a free reset
+// clears a rejection exactly as promptly as the ordinary sweep eventually
+// would — and, since it is reached only via probeOne, it runs at that same
+// cadence and never on a schedule of its own (no second timer).
+//
+// Skipped entirely, per window, when either:
+//
+//   - this provider has nothing to probe that family with
+//     (familyProbeModel ok=false) — nothing safe to send. Left to
+//     pool.Pool's windowRejectionExcludes bounded fallback instead.
+//   - familyProbeBillable is true and force is false — CanOverage is on
+//     for this account and the family's own window still reads spent, so
+//     the provider would SERVE (and bill) the probe rather than refuse it,
+//     and #229's family probe must never risk that (§6.21, "a probe must
+//     never be a purchase"). force (ProbeNow's own money override, #152)
+//     is the one thing that unlocks this, exactly as it unlocks the
+//     ordinary probe's identical refusal — never the scheduled sweep,
+//     which always passes force=false.
+//
+// Errors are logged and swallowed: a family probe failing says nothing
+// about whether the account can serve real traffic, same as the ordinary
+// probe.
+func probeRejectedFamilies(ctx context.Context, p *pool.Pool, a *pool.Account, client *http.Client, upstream string, force bool, logger *slog.Logger) {
+	now := time.Now()
+	poolAllows := p.AllowOverage()
+	for _, name := range a.SpentOrExpiredFamiliesAt(p.Threshold(), now) {
+		model, ok := familyProbeModel(p, a, name)
+		if !ok {
+			continue
+		}
+		if !force && familyProbeBillable(a, model, poolAllows, now) {
+			continue
+		}
+		status, header, _, err := sendProbeRequest(ctx, a, client, upstream, model)
+		if err != nil {
+			logger.Warn("family quota probe failed", "account", a.Name, "window", name, "err", err)
+			continue
+		}
+		p.RecordQuota(a, header, time.Now())
+		p.ClearRecoveredWindowRejections(a)
+		logger.Info("family quota probe", "account", a.Name, "window", name, "model", model, "status", status)
+	}
 }
 
 // resetFor mirrors internal/proxy/proxy.go's quotaReset: the provider

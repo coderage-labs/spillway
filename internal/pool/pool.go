@@ -116,13 +116,27 @@ type Account struct {
 	// governs — including when the account is the only one in the pool —
 	// rather than merely deprioritise it.
 	//
-	// The deadline stored here is NOT the one the provider claimed. It is
-	// clamped by maxExhaustedHorizon and then by windowRejectionTTL
-	// (issue #194), because an exclusion is the one reading nothing can
-	// re-measure: selection sends no traffic for that family, and the probe
-	// cannot reach it. Past the TTL the account is merely deprioritised for
-	// the family — by the forged QuotaWindow, which keeps its own, longer
-	// (capped) reset — so an ordinary request can go and find out.
+	// The deadline stored here is NOT the one the provider claimed; it is
+	// clamped by maxExhaustedHorizon (issue #90), the same cap MarkExhausted
+	// gets, so a bad epoch parse or a far-future org-level cap cannot pin
+	// the exclusion out for longer than that. It is the REAL reset, not a
+	// short re-test TTL (issue #229's correction to #194): #194 clamped this
+	// to windowRejectionTTL as well, on the theory that letting the
+	// exclusion lapse after 30 minutes was itself the re-test escape hatch —
+	// live traffic observed 2026-09-28 showed that theory was wrong. Once
+	// the TTL lapsed, the account fell back to tier 2 (over threshold, not
+	// billing) and the very next HELD REQUEST became the "re-test": every
+	// ~30 minutes it was sent upstream, 429'd for certain (the real reset
+	// was still days out), and MarkWindowRejected recorded the refusal again
+	// — spending the user's own parked request on a test that could only
+	// ever fail. The exclusion now lasts as long as the reset genuinely
+	// does; what changed is WHO re-tests it. windowRejectionTTL still
+	// exists, but now bounds how long a rejected window may go un-probed
+	// before accounts.needsProbe forces a free re-test on the ordinary probe
+	// cadence (Account.WindowRejectionNeedsProbeAt) — never on a live
+	// request — and ClearRecoveredWindowRejections is what a probe's own
+	// fresh reading uses to lift the exclusion early, the moment evidence
+	// actually says the window has headroom.
 	windowRejected map[string]time.Time
 	// probeBackoff is the current spacing enforced between exhausted-account
 	// re-probes (issue #90): zero until the first re-probe is rejected
@@ -332,6 +346,23 @@ type Pool struct {
 	// behind a pool, and exactly what the flag's documentation says to the
 	// user's face. Guarded by mu, same as switchThreshold above.
 	hideOverageFromClient bool
+	// probeEvery is the period of the scheduled quota-probe ticker that is
+	// ACTUALLY RUNNING (issue #229): windowRejectionExcludes' bounded
+	// fallback and FamilyProbeDue must both reason about the same cadence
+	// the prober really has, and pool has no other way to know it.
+	//
+	// Set by SetProbeEvery from the place that starts the ticker, never from
+	// config on Apply. The ticker is created once at startup and is not
+	// re-created when config reloads, so a live probeInterval edit changes
+	// the config value but not the real cadence; mirroring config here would
+	// let the two drift, and a pool that believes it is probed every 30m
+	// while the ticker still runs every 2h re-opens the very gap this field
+	// exists to close. Zero means no scheduled probing at all (probeOnStart:
+	// false, or probeInterval: 0), in which case
+	// effectiveWindowRejectionTTLLocked does not widen the fallback: nothing
+	// will revisit the account, so there is no tick to leave a margin for.
+	// Guarded by mu.
+	probeEvery time.Duration
 	// holds are the requests currently parked waiting for a reset, guarded
 	// by mu. See hold.go.
 	holds map[*hold]struct{}
@@ -353,6 +384,15 @@ func New(accounts []*Account, now time.Time) *Pool {
 	return &Pool{accounts: accounts, sticky: map[string]string{},
 		sessionProvider: map[string]string{}, switchThreshold: 0.98,
 		capGen: newCapacityWake()}
+}
+
+// SetProbeEvery records the running scheduled-probe ticker's period (see
+// the probeEvery field). Called once, by whatever starts the ticker; zero,
+// or never calling it, means no scheduled probing.
+func (p *Pool) SetProbeEvery(d time.Duration) {
+	p.mu.Lock()
+	p.probeEvery = d
+	p.mu.Unlock()
 }
 
 // Threshold is the used-fraction at or above which an account is rotated
@@ -458,6 +498,14 @@ func (p *Pool) EarliestReset() (time.Time, bool) {
 // past the moment the quota actually came back. This is the deadline it was
 // missing.
 //
+// What it reports is the REAL, capped reset — a.windowRejected's value —
+// not a fixed re-test TTL (issue #229): live 2026-09-28, every rejected
+// window's deadline had been clamped to windowRejectionTTL (30m), so a
+// request waiting on a reset that was actually days out kept waking every
+// 30 minutes, re-selecting, and parking again, hours before the quota it
+// was really waiting on ever came back. See MarkWindowRejected's comment
+// for why the exclusion itself no longer uses that shorter TTL either.
+//
 // Deliberately a separate method rather than a widening of EarliestReset:
 // that one is also read by the exhausted notification and the dashboard's
 // NextReset, both of which mean "the pool as a whole is spent until", a
@@ -538,6 +586,7 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 	// as an unrecognised model to every provider's GoverningWindows, which
 	// resolves it to the general windows rather than guessing narrower.
 	model := modelOf(body)
+	now := time.Now()
 
 	usable := func(a *Account) bool {
 		if skip[a.Name] {
@@ -554,7 +603,12 @@ func (p *Pool) SelectExcept(session string, body []byte, skip map[string]bool) *
 		// sticky paths: a window upstream has already refused for certain
 		// must not be handed this request again just because it is the
 		// pinned/sticky/only account, or because nothing billable remains.
-		if a.WindowRejectedFor(model) {
+		//
+		// windowRejectionExcludes, not the plain WindowRejectedFor: issue
+		// #229's family probe is what is meant to lift this for good, and it
+		// can bound this fully only when it can actually run for free — see
+		// that method's own comment for the one bounded exception.
+		if p.windowRejectionExcludes(a, model, now) {
 			return false
 		}
 		return CanServe(a, body) == nil
@@ -708,58 +762,84 @@ func capExhaustionAt(until, now time.Time) time.Time {
 	return until
 }
 
-// windowRejectionTTL bounds how long a confirmed per-window rejection keeps
-// EXCLUDING a family before ordinary traffic is allowed to re-test it
-// (issue #194).
+// windowRejectionTTL used to bound how long a confirmed per-window rejection
+// kept EXCLUDING a family before ordinary traffic was allowed to re-test it
+// (issue #194). Issue #229 found that re-test itself was the bug: live
+// 2026-09-28, holding requests woke on this 30-minute timer, found the
+// account back in tier 2 (over threshold, not billing), and got sent
+// upstream — 429'ing for certain, since the real reset was days out — once
+// per held request per TTL. The account's own exclusion is correct to hold
+// for the whole real reset; what was wrong is spending a user's parked
+// request to confirm that every half hour.
 //
-// The exclusion needs an expiry for the same reason issue #151's overage
-// refusal does, and the argument is the same one line for line: the reading
-// suppresses the only request that could ever replace it. A rejected window
-// is dropped by SelectExcept's usable(), so no traffic for that family
-// reaches the account; the probe cannot reach it either, because probeModel
-// is a fixed non-fable model and accounts.readsSpent skips families the
-// probe never engages. So "do not send fable here" is a statement only
-// sending fable there can correct, and until this it was believed for
-// exactly as long as a parsed header claimed — with a daemon restart, which
-// drops the memory-only map, the only way out.
+// So this no longer bounds the EXCLUSION at all — that is markWindowRejectedAt's
+// capped `until`, same as MarkExhausted, for as long as the reset genuinely
+// lasts. windowRejectionTTL now bounds something narrower: how long a
+// rejected window may sit un-probed before Account.WindowRejectionNeedsProbeAt
+// forces accounts.needsProbe to re-test it on the ordinary probe cadence —
+// the prober, never a live request. That re-test is free by construction:
+// the probe's own model never governs the rejected family (readsSpent skips
+// families the probe doesn't engage), so forcing it can never trigger a
+// charge. ClearRecoveredWindowRejections is what actually lifts the
+// exclusion, the moment a probe's own fresh reading — never its bare HTTP
+// status — shows the window has headroom again; until that happens (or the
+// real reset arrives on its own), the account stays excluded, which is what
+// stops the stale-negative pattern (#135, #151, #152, #190, #194) without
+// reintroducing #229's live-traffic re-test.
 //
-// The assumption it drops is the one #135 and #152 already demolished
-// twice: that a window can only refill at the moment its own header
-// predicted. #135 measured a 7d falling to 0.0 with its reported reset
-// still thirty-one hours ahead, and Anthropic ran an ad-hoc reset for every
-// user on 2026-09-04. A confirmed 429 is stronger evidence than a stored
-// utilization reading, which is why this expires the EXCLUSION only and
-// leaves the forged row (below) saying "spent" until its real reset: after
-// the TTL the account is demoted, not healthy.
-//
-// Thirty minutes, matching overageRefusalTTL deliberately rather than
-// #152's 6-24h ration, because the two re-tests cost different things and
-// this one is the cheap kind:
-//
-//   - #152 BUYS a request to re-measure a spent window, so it is rationed
-//     to about one a day.
-//   - Re-testing a window rejection is free in the case that matters. The
-//     forged row keeps the account over threshold for that family, so tier 1
-//     skips it and tier 2 admits it only when p.wouldBill says the request
-//     cannot be charged — CanOverage false, the default. The provider then
-//     answers the re-test with a 429 that costs nothing and carries fresh
-//     quota headers, and MarkWindowRejected records it again, restarting
-//     this TTL. So a genuinely spent family is re-tested at most once per
-//     account per TTL, not hammered.
-//   - Where extra usage IS permitted the account reaches only tier 3, the
-//     money tier, which is the tier the operator explicitly opted into and
-//     which is reached only when every free option is spent. That is the
-//     same bounded risk #151 documented and accepted, not a new one: the
-//     identical request would have been served there the moment the real
-//     `until` arrived.
-//
-// Thirty minutes also matches the default probe cadence — the pool's own
-// rhythm for "go and look again" — and bounds a wrong exclusion at half an
-// hour against the days one could previously last. A constant rather than a
-// setting for the same reason overageRefusalTTL is one: nothing about the
-// number decides whether money is spent, only how quickly a stale refusal
-// is noticed.
+// Thirty minutes, unchanged from #194: it matches the default probe cadence
+// — the pool's own rhythm for "go and look again" — so a rejected window is
+// picked up by the very next ordinary probe tick rather than waiting out
+// some longer, separate schedule.
 const windowRejectionTTL = 30 * time.Minute
+
+// effectiveWindowRejectionTTLLocked is windowRejectionTTL, widened when
+// needed so the scheduled probe ticker always gets a fair shot at
+// measuring a rejected family before windowRejectionExcludes' fallback
+// re-admits it (issue #229's coordinator follow-up: a live review found
+// probeEvery and windowRejectionTTL both defaulting to 30m left NO margin
+// — the ticker's phase is independent of when any rejection happened, so a
+// probe meant to land before the deadline could just as easily land a
+// hair after it, letting exactly the live-traffic re-test #229 exists to
+// prevent slip through once every cycle).
+//
+// Widened to 2×probeEvery whenever that is larger than the raw TTL. The
+// reasoning is a pigeonhole argument: Account.FamilyProbeDue starts
+// forcing a visit once a rejection's age reaches HALF of this (effective)
+// TTL, so the "must measure it by" deadline and the "start trying" mark
+// bracket an interval of width effectiveTTL/2. Because effectiveTTL is at
+// least 2×probeEvery, that width is at least probeEvery — and an interval
+// at least as wide as the ticker's own period is guaranteed to contain one
+// of its ticks, however the ticker's phase happens to line up. Below
+// 2×probeEvery (a fast ticker, or the raw TTL already being generous) the
+// raw constant already provides that margin on its own, so it is left
+// alone rather than narrowed.
+//
+// probeEvery <= 0 is config's Pool.ProbeInterval: 0 — startup-only
+// probing, no ticker at all. Widening then would only extend the
+// exclusion for a probe that will never come; the raw TTL is what was
+// already documented for this case ("re-admit at TTL, since nothing else
+// will re-test") and stays exactly that.
+//
+// Assumes p.mu is held (mirrors threshold()'s own locked/unlocked pair
+// immediately below it in this file).
+func (p *Pool) effectiveWindowRejectionTTLLocked() time.Duration {
+	if p.probeEvery <= 0 {
+		return windowRejectionTTL
+	}
+	if widened := 2 * p.probeEvery; widened > windowRejectionTTL {
+		return widened
+	}
+	return windowRejectionTTL
+}
+
+// EffectiveWindowRejectionTTL is effectiveWindowRejectionTTLLocked for
+// callers outside the package (accounts.ProbeIdle's forcing check).
+func (p *Pool) EffectiveWindowRejectionTTL() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.effectiveWindowRejectionTTLLocked()
+}
 
 // MarkExhausted marks an account out of quota until the given time (§6.1:
 // quota-429 rotates; the account is skipped until its window resets),
@@ -833,6 +913,60 @@ func (p *Pool) ClearExhausted(a *Account) {
 	}
 }
 
+// ClearRecoveredWindowRejections deletes any windowRejected entry whose
+// window a just-recorded measurement shows has headroom again, and wakes
+// any held request that was waiting on it (issue #229's third fix).
+//
+// This is the ONLY thing that can lift a window exclusion early now that it
+// lasts the real, capped reset rather than windowRejectionTTL (see
+// MarkWindowRejected's comment) — without it, a manual free reset (#228) or
+// an ad-hoc provider-side reset (#135) would sit invisible behind the
+// exclusion until the originally-claimed deadline arrived on its own, the
+// same stale-negative shape #90's ClearExhausted already fixed for
+// account-wide exhaustion.
+//
+// Judged from the window's CURRENT reading, never from a probe's bare HTTP
+// status: probeModel is a fixed, non-fable model, so a 200 on it is not
+// evidence about "7d-fable" specifically — most probes will not have
+// touched that window's reading at all, and this must be a no-op for every
+// one of them. Only a window whose Source is no longer windowSourceRejected
+// (i.e. something actually overwrote the forged row with a measurement) AND
+// which reads under its limit counts as recovered; a fresh measurement that
+// still reads spent, or no fresh measurement at all, changes nothing.
+//
+// Callers pass whatever account a probe (or the dashboard's "check now",
+// #192) just ran against; a no-op for an account with no live rejections.
+func (p *Pool) ClearRecoveredWindowRejections(a *Account) {
+	now := time.Now()
+	a.mu.Lock()
+	var cleared bool
+	for name, until := range a.windowRejected {
+		if !until.After(now) {
+			// Already expired on its own; tidy the map entry while here, but
+			// this was never excluding anything, so it's not a "recovery".
+			delete(a.windowRejected, name)
+			continue
+		}
+		for i := range a.windows {
+			w := &a.windows[i]
+			if w.Name != name {
+				continue
+			}
+			if w.Source != windowSourceRejected && w.currentAt(now) && w.Limit > 0 && w.Used/w.Limit < 1 {
+				delete(a.windowRejected, name)
+				cleared = true
+			}
+			break
+		}
+	}
+	a.mu.Unlock()
+	if cleared {
+		// Same lock order as ClearExhausted above: never signal while a.mu
+		// is held, since SelectExcept takes p.mu then an account's a.mu.
+		p.SignalCapacity()
+	}
+}
+
 // MarkWindowRejected records that upstream has refused window `name` until
 // `until` (issue #54's correction to #24): a hard, confirmed exclusion for
 // whatever model that window governs, deliberately NOT touching a.state —
@@ -854,26 +988,32 @@ func (p *Pool) ClearExhausted(a *Account) {
 // exclusion restating itself indistinguishable from evidence for it on the
 // one surface a user checks to decide whether the exclusion is right.
 //
-// `until` is clamped twice, and the two clamps bound different things:
+// `until` is clamped once, by capExhaustionAt: maxExhaustedHorizon is #90's
+// cap on a claimed reset, and this path never got it before #194 — a bad
+// epoch parse or an org-level cap reported far past when it lifts would
+// otherwise leave a synthetic "100% used, refills in eleven months" row
+// deprioritising the family and refusing pins (providerWouldBill), and
+// EXCLUDING it (see below), for as long as the header claimed.
 //
-//   - capExhaustionAt bounds the ROW. maxExhaustedHorizon is #90's cap on a
-//     claimed reset, and this path never got it: a bad epoch parse or an
-//     org-level cap reported far past when it lifts would otherwise leave a
-//     synthetic "100% used, refills in eleven months" row deprioritising the
-//     family and refusing pins (providerWouldBill) for as long as the header
-//     claimed.
-//   - windowRejectionTTL bounds the EXCLUSION, which is the half with no
-//     escape: nothing re-measures a family selection refuses to route to.
+// The SAME capped `until` now governs both halves that #194 had drawn a
+// distinction between:
 //
-// So the row can outlive the map entry, by design and by a bounded amount.
-// That is not #135's bug returning — there the row outlived it *forever*,
-// because windows did not expire at all, and QuotaWindow.currentAt now
-// retires this one on its own ResetAt. It is the #24/#54 distinction doing
-// its job: once the TTL lapses the account stops being EXCLUDED for the
-// family and goes back to being merely DEPRIORITISED for it, so a re-test
-// happens on the last-resort tier where a refusal costs nothing, instead of
-// the account springing back to tier 1 and looking healthy on a number
-// nobody re-measured.
+//   - the forged QuotaWindow's ResetAt (deprioritisation, OverThresholdFor)
+//   - the windowRejected map entry (hard EXCLUSION, WindowRejectedFor)
+//
+// #194 clamped the second one harder still, to windowRejectionTTL, so a
+// rejection stopped hard-excluding after 30 minutes and fell back to mere
+// deprioritisation — reachable again on tier 2, which #194 expected to cost
+// nothing because tier 2 already excludes anything that would bill. It does
+// cost something: tier 2 is reached by real, held traffic, and a rejection
+// with a genuinely distant reset 429s there for certain, every TTL, on the
+// user's own parked request (issue #229, live 2026-09-28). So the exclusion
+// here now lasts exactly as long as the deprioritisation does — the real,
+// capped reset — and windowRejectionTTL moves to a different job: bounding
+// how long this can go un-probed (see its own comment) before
+// accounts.needsProbe forces a free re-test, and ClearRecoveredWindowRejections
+// is what actually lifts the exclusion once a probe's own reading confirms
+// it, rather than a live request's 429 doing the confirming.
 func (p *Pool) MarkWindowRejected(a *Account, name string, until time.Time) {
 	p.markWindowRejectedAt(a, name, until, time.Now())
 }
@@ -891,17 +1031,16 @@ const windowSourceRejected = "rejected"
 // waiting (issues #98, #134).
 func (p *Pool) markWindowRejectedAt(a *Account, name string, until, now time.Time) {
 	until = capExhaustionAt(until, now)
-	deadline := until
-	if ttl := now.Add(windowRejectionTTL); deadline.After(ttl) {
-		deadline = ttl
-	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.windowRejected == nil {
 		a.windowRejected = map[string]time.Time{}
 	}
-	a.windowRejected[name] = deadline
+	// The real, capped reset — not windowRejectionTTL — is the exclusion
+	// deadline (issue #229; see MarkWindowRejected's comment for why this
+	// stopped being two different values).
+	a.windowRejected[name] = until
 
 	for i := range a.windows {
 		if a.windows[i].Name == name {
@@ -1714,6 +1853,14 @@ func (a *Account) CanOverageAtForTest(poolAllows bool, now time.Time) bool {
 // backoff that started in the past without sleeping through it.
 func (p *Pool) MarkReprobeRejectedAtForTest(a *Account, until time.Time, baseInterval time.Duration, now time.Time) {
 	p.markReprobeRejectedAt(a, until, baseInterval, now)
+}
+
+// MarkWindowRejectedAtForTest exposes MarkWindowRejected's injected clock, so
+// a test can build the state a rejection recorded hours ago would have left
+// — the only way to exercise issue #229's "this rejection has gone
+// un-probed past windowRejectionTTL" without sleeping through it.
+func (p *Pool) MarkWindowRejectedAtForTest(a *Account, name string, until, now time.Time) {
+	p.markWindowRejectedAt(a, name, until, now)
 }
 
 // AccountSettings is the subset of one account's config that the dashboard

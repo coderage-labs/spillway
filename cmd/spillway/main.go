@@ -329,6 +329,12 @@ func runServer(args []string) error {
 			if probeEvery <= 0 {
 				return
 			}
+			// The pool reasons about window-rejection timing against the
+			// cadence of THIS ticker (issue #229), which is fixed here at
+			// startup and not re-created on config reload — so it is told
+			// the running period once, here, rather than the config value
+			// on every Apply.
+			p.SetProbeEvery(probeEvery)
 			// Then keep standby accounts current. An account that is serving
 			// gets fresh headers for free and is skipped by the staleness
 			// check, so this costs one request per idle account per tick.
@@ -768,6 +774,13 @@ func buildPoolFrom(cfg *config.Config, cfgPath string, src accounts.Source, stor
 		AllowOverage:          cfg.Pool.AllowOverage,
 		StickyAcrossFamily:    cfg.Pool.StickyAcrossFamily,
 		HideOverageFromClient: cfg.Pool.HideOverageFromClient,
+		// Issue #229's coordinator follow-up on timing: the pool needs the
+		// scheduled probe's own cadence to widen windowRejectionExcludes'
+		// bounded fallback and Account.FamilyProbeDue's trigger by the
+		// same amount — cfg.PoolProbeInterval() is the one place that
+		// cadence is already parsed (0 = startup-only), so this is the
+		// same accessor main.go's own probe ticker below uses, not a
+		// second copy that could drift from it.
 	})
 	p.SetTokenManager(mgr)
 	usable := 0
@@ -805,7 +818,11 @@ func poolSettings(nc *config.Config) pool.Settings {
 		AllowOverage:          nc.Pool.AllowOverage,
 		StickyAcrossFamily:    nc.Pool.StickyAcrossFamily,
 		HideOverageFromClient: nc.Pool.HideOverageFromClient,
-		Accounts:              accts,
+		// See buildPool's identical field for why (issue #229's coordinator
+		// follow-up on timing). nc is always the full reloaded config here,
+		// never a partial diff, so there is no case where this should be
+		// left at its old value instead of nc's current one.
+		Accounts: accts,
 	}
 }
 

@@ -29,17 +29,37 @@ package accounts
 // bill and offers --force (#139). Where the probe is free, which is the
 // common case, it just runs.
 //
-// What it also does not touch is windowRejected (#54, TTL'd by #194). A
-// rejection is a confirmed provider refusal for one model family, and #195
-// concluded a probe cannot usefully re-ask it: the probe always asks for a
-// fixed non-fable model, so it never engages the rejected family and comes
-// back with no evidence about it either way. Clearing the entry would put
-// the account back on tier 1 for that family on no new information, where
-// the next real request meets the same refusal. #194 already gave it a
-// bounded way back — after 30 minutes the account is merely deprioritised
-// for the family and an ordinary request re-tests it on the last-resort
-// tier, where a refusal costs nothing. This button cannot improve on that,
-// so it leaves it alone.
+// windowRejected (#54, corrected by #194) is a different story, and #229
+// changed what happens to it here twice.
+//
+// First pass: #194's exclusion used to lapse on its own after
+// windowRejectionTTL, at which point an ordinary request became the
+// re-test; #229 found that this cost a real, held request a certain 429
+// every TTL, because the rejection's actual reset was still days out. The
+// exclusion now lasts that real reset (see pool.MarkWindowRejected's
+// comment), so the only way back before it, short of the reset itself
+// arriving, is evidence — probeOne now calls
+// pool.ClearRecoveredWindowRejections after every probe (this one
+// included), which looks at what the response actually measured for the
+// rejected window, never at whether THIS probe's own model happened to
+// succeed.
+//
+// Second pass, from a production-live review of the first: #195's premise
+// — a probe cannot usefully re-ask a rejection, because it always asks for
+// a fixed non-fable model — is exactly the gap that made the first pass
+// insufficient on its own. Judged against a live daemon, the ordinary probe
+// genuinely never wrote a "7d-fable" row, so ClearRecoveredWindowRejections
+// never had anything to clear and a fable rejection sat excluded for its
+// full (now much longer) real reset regardless. probeOne now ALSO runs
+// probeRejectedFamilies — a second, family-scoped probe, using a model
+// that family actually governs (provider.Spec.FamilyProbeModel), for every
+// window rejection WindowRejectionNeedsProbeAt says has gone un-measured
+// too long. force, threaded down from here, is what lets a forced "check
+// now" also bypass THAT probe's own identical §6.21 money refusal — never
+// the scheduled sweep, which always passes false. Most calls still carry
+// no evidence either way and are a no-op; the one that does (a manual free
+// reset, #228, or an ad-hoc provider reset, #135) is exactly the case a
+// restart used to be the only way to notice.
 
 import (
 	"context"
@@ -112,12 +132,12 @@ func ProbeNow(ctx context.Context, p *pool.Pool, client *http.Client, defaultUps
 		return false, fmt.Errorf("account %q was disabled while refreshing its credential", name)
 	}
 
-	perr := probeOne(ctx, p, a, client, defaultUpstream, staleAfter)
+	perr := probeOne(ctx, p, a, client, defaultUpstream, staleAfter, force, logger)
 	if errors.Is(perr, errProbeUnauthorized) {
 		// The stored token was superseded by another holder. Recover once
 		// and retry, exactly as ProbeIdle does.
 		if rerr := p.Recover(ctx, a); rerr == nil {
-			perr = probeOne(ctx, p, a, client, defaultUpstream, staleAfter)
+			perr = probeOne(ctx, p, a, client, defaultUpstream, staleAfter, force, logger)
 		}
 	}
 	if perr != nil {

@@ -119,13 +119,16 @@ func (a *Account) overThresholdForWindowAt(name string, frac float64, now time.T
 // takes the existing hold-then-429 path, the same as when every account is
 // StateExhausted.
 //
-// The deadline it applies is MarkWindowRejected's clamped one, not the
-// provider's claim (issue #194): a hard exclusion suppresses the only
-// traffic that could ever correct it, so it is believed for at most
-// windowRejectionTTL. Past that the account is still DEPRIORITISED for the
-// family by the forged QuotaWindow — OverThresholdFor, which reads the
-// row's own longer (capped) reset — so the re-test lands on the last-resort
-// tier rather than the account springing back to tier 1.
+// The deadline it applies is MarkWindowRejected's clamped one — capped by
+// maxExhaustedHorizon, the same as MarkExhausted, but no longer bounded to
+// windowRejectionTTL (issue #229's correction to #194): #194 believed the
+// exclusion for at most that TTL and let selection fall back to mere
+// deprioritisation past it, which sounded free but wasn't — tier 2 is real
+// traffic, and it 429'd on a genuinely-rejected family for certain, every
+// TTL, spending a live held request each time (2026-09-28). The exclusion
+// now lasts as long as the rejection genuinely does; only
+// ClearRecoveredWindowRejections (a probe's own fresh reading) or the real
+// reset arriving can end it early.
 //
 // nil GoverningWindows (Kimi: no family-scoped provider) has nothing to
 // check — that provider's rejections go through pool.MarkExhausted's
@@ -197,4 +200,226 @@ func (a *Account) earliestWindowRejectionFor(model string, now time.Time) (time.
 		}
 	}
 	return earliest, ok
+}
+
+// windowRejectionAgeAt reports how long it has been since window name was
+// last measured or re-marked at all — whichever happened most recently —
+// for windowRejectionExcludes' bounded fallback below: a rejection reverts
+// to #194's original, softer exclusion shape once this age passes
+// windowRejectionTTL, rather than staying hard-excluded for the full real
+// reset with nothing ever able to clear it. This is deliberately blind to
+// WHY the age grew past the TTL — a billable account whose probe was never
+// sent, a probe that 400'd on an unrecognised model, a network error, a
+// 200 with no header for this window — every one of those leaves the row
+// untouched, and every one of them must eventually re-admit the account
+// rather than exclude it forever (issue #229's coordinator follow-up).
+// ok=false when nothing has ever been recorded for that name.
+//
+// Note this is a DIFFERENT question from accounts.probeRejectedFamilies'
+// own trigger (Account.SpentOrExpiredFamiliesAt), which is state-based
+// (spent or expired) rather than age-based, and runs on every probe tick
+// regardless of how long a rejection has stood — the two mechanisms serve
+// different callers with different needs, and must not be confused for
+// one another.
+//
+// Deliberately not restricted to the forged row specifically (Source ==
+// windowSourceRejected): a family probe that measures real, fresh headers
+// showing the window STILL spent overwrites the row with Source "headers"
+// but must not go quiet forever after — it still needs to be re-tried
+// again after another windowRejectionTTL, the same as before that
+// measurement arrived.
+func (a *Account) windowRejectionAgeAt(name string, now time.Time) (age time.Duration, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.windows {
+		if a.windows[i].Name == name {
+			return now.Sub(a.windows[i].FetchedAt), true
+		}
+	}
+	return 0, false
+}
+
+// familyWindowNames lists this account's provider's FAMILY-scoped window
+// names — every window name this account has ever recorded a reading for
+// that is NOT one of GoverningWindows("")'s general, account-wide windows
+// ("5h"/"7d" for Claude). "7d-fable" is the only one today; derived from
+// the account's own recorded window names rather than hard-coded, so a
+// future family needs no edit here, only in the provider package.
+//
+// nil GoverningWindows (Kimi: no family-scoped provider) has nothing to
+// narrow by, so this is empty — that provider's quota is all
+// account-wide, exactly as WindowRejectedFor already treats it.
+func (a *Account) familyWindowNames() []string {
+	gw := provider.For(a.Type).GoverningWindows
+	if gw == nil {
+		return nil
+	}
+	general := make(map[string]bool)
+	for _, n := range gw("") {
+		general[n] = true
+	}
+	var out []string
+	for _, w := range a.QuotaWindows() {
+		if !general[w.Name] {
+			out = append(out, w.Name)
+		}
+	}
+	return out
+}
+
+// familySpentOrExpiredAt reports whether family-scoped window name is
+// currently SPENT or EXPIRED, per the coordinator's follow-up to issue
+// #229 (a production-live review of the first family-probe design, which
+// keyed the probe on "a windowRejected entry exists" — too narrow, since a
+// family can go stale without ever having been formally 429-rejected):
+//
+//   - SPENT: an outstanding window rejection for it (WindowRejectedUntil),
+//     OR its latest reading is at/above frac (OverThresholdForWindow) —
+//     the same "spent" the dashboard's FableSpent already reports.
+//   - EXPIRED: its recorded reset has passed with no fresh reading since
+//     (QuotaWindow.Expired, issue #135's currentAt) — spillway genuinely
+//     does not know whether it refilled.
+//
+// Neither (HEALTHY) must return false: probing a healthy fable window with
+// a fable-governed model would spend real fable quota to learn a fact
+// already on file, which is the "a probe must never be a purchase in
+// spirit" mistake even where it can't literally bill.
+func (a *Account) familySpentOrExpiredAt(name string, frac float64, now time.Time) bool {
+	if _, ok := a.WindowRejectedUntil(name); ok {
+		return true
+	}
+	if a.overThresholdForWindowAt(name, frac, now) {
+		return true
+	}
+	for _, w := range a.QuotaWindows() {
+		if w.Name == name {
+			return w.Expired
+		}
+	}
+	return false
+}
+
+// SpentOrExpiredFamiliesAt lists this account's family-scoped windows
+// currently spent or expired (issue #229's coordinator follow-up) — the
+// ones accounts.probeRejectedFamilies must probe (subject to its own
+// billing guard) and the ones that force accounts.ProbeIdle/needsProbe to
+// visit this account at all, regardless of how fresh its OTHER windows
+// look through ordinary traffic (a busy account still serving Sonnet/Opus
+// would otherwise never be asked to check a family nothing about its
+// general staleness reflects).
+func (a *Account) SpentOrExpiredFamiliesAt(frac float64, now time.Time) []string {
+	var out []string
+	for _, name := range a.familyWindowNames() {
+		if a.familySpentOrExpiredAt(name, frac, now) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// HasSpentOrExpiredFamilyAt is SpentOrExpiredFamiliesAt narrowed to "is
+// this list non-empty", for accounts.ProbeIdle's forcing check.
+func (a *Account) HasSpentOrExpiredFamilyAt(frac float64, now time.Time) bool {
+	return len(a.SpentOrExpiredFamiliesAt(frac, now)) > 0
+}
+
+// windowRejectionExcludes is usable()'s per-window exclusion test — the
+// same question WindowRejectedFor answers, MINUS one bounded fallback a
+// production-live review of issue #229 required (and a second review,
+// after that first fallback, found half-broken — see below).
+//
+// accounts.probeRejectedFamilies is what is meant to eventually lift a
+// rejection for good, by measuring the family with a model that actually
+// governs it. But that measurement can fail to arrive for any number of
+// reasons: the account has extra usage enabled and the window still reads
+// spent, so sending the probe would risk billing it (§6.21) and
+// probeRejectedFamilies correctly refuses to send it at all; the model it
+// chose 400s or 404s as unrecognised; the request errors on the network;
+// or the response simply carries no header for this window. Every one of
+// those is "could not measure", and NONE of them may extend a hard
+// exclusion indefinitely — an account whose family probe never succeeds
+// would otherwise stay excluded for the FULL real reset (days,
+// potentially), the exact stale-negative shape issue #194 was written to
+// escape, just laundered through a different cause each time.
+//
+// So the rule is not "exclude unless the probe is known to be unsafe" (an
+// earlier version of this function, which asked a StaticQuestion —
+// familyProbeUnsafe, since removed — about billing and model availability
+// only, and so kept excluding right through a probe that was SENT but
+// silently failed to measure anything). It is simpler and catches every
+// cause at once: has ANYTHING refreshed this window's own row —
+// windowRejectionAgeAt, which moves on every write to it, forged or
+// measured, spent or healthy — within the EFFECTIVE TTL
+// (effectiveWindowRejectionTTLLocked, widened past the raw constant when
+// the scheduled probe ticker is slower — a third review found the raw
+// 30-minute constant left zero margin against a 30-minute default ticker
+// phase, so a probe meant to land before this deadline could lose that
+// race by the width of one tick)? If yes, the exclusion holds; either the
+// rejection is fresh, or a probe genuinely re-confirmed the family is
+// still spent (issue #229's coordinator follow-up, required test (c)). If
+// no — nothing has touched this row in the full effective TTL, for
+// whatever reason — this reverts to #194's original,
+// softer shape: the exclusion itself lapses, leaving only the forged row's
+// deprioritisation (OverThresholdFor) to protect the family, so a real
+// request can go and find out. That is the SAME bounded risk #151/#194
+// already accepted for an account whose owner explicitly opted into
+// paying — now extended, deliberately, to every other way a measurement
+// can fail to arrive.
+//
+// Takes now explicitly and assumes p.mu is already held (its only caller,
+// usable() inside SelectExcept, both holds the lock and has a clock to
+// hand down) — issues #98/#134's injected-clock convention, and the only
+// way effectiveWindowRejectionTTLLocked's own mu precondition can be
+// satisfied here.
+func (p *Pool) windowRejectionExcludes(a *Account, model string, now time.Time) bool {
+	gw := provider.For(a.Type).GoverningWindows
+	if gw == nil {
+		return false
+	}
+	ttl := p.effectiveWindowRejectionTTLLocked()
+	for _, name := range gw(model) {
+		// The specific window's own rejection state — not WindowRejectedFor,
+		// which takes a MODEL and re-derives its own governing set; passing
+		// a window NAME through that would wrongly pull in its siblings
+		// (claudeGoverningWindows("7d-fable") also returns "5h" and "7d").
+		if _, ok := a.WindowRejectedUntil(name); !ok {
+			continue
+		}
+		if age, ok := a.windowRejectionAgeAt(name, now); ok && age >= ttl {
+			continue // bounded fallback: nothing has measured this window in the effective TTL, for any reason
+		}
+		return true
+	}
+	return false
+}
+
+// FamilyProbeDue reports whether any of a's family-scoped windows is
+// spent or expired (Account.familySpentOrExpiredAt) AND has gone at least
+// HALF the effective windowRejectionTTL without a fresh measurement
+// (issue #229's coordinator follow-up on timing). accounts.ProbeIdle ORs
+// this into its own needsProbe check to decide whether to visit an
+// account this tick, regardless of how fresh its other windows look.
+//
+// Half, not the full effective TTL, is what leaves effectiveWindowRejectionTTLLocked's
+// margin actually usable: see that function's comment for the pigeonhole
+// argument — triggering any later than the halfway point can lose the
+// race to the ticker's own phase, which is exactly the bug this closes.
+//
+// A manual "check now" (accounts.ProbeNow) does NOT go through this check
+// at all — it calls probeOne directly, bypassing needsProbe and every
+// scheduling heuristic on purpose (see probe_now.go), so a user-initiated
+// probe is never held back by this gate either.
+func (p *Pool) FamilyProbeDue(a *Account, now time.Time) bool {
+	threshold := p.Threshold()
+	half := p.EffectiveWindowRejectionTTL() / 2
+	for _, name := range a.familyWindowNames() {
+		if !a.familySpentOrExpiredAt(name, threshold, now) {
+			continue
+		}
+		age, ok := a.windowRejectionAgeAt(name, now)
+		if !ok || age >= half {
+			return true
+		}
+	}
+	return false
 }

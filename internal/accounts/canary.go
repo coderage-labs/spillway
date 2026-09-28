@@ -75,7 +75,7 @@ func (c *Canary) Run(ctx context.Context) []CanaryResult {
 			continue
 		}
 		res := CanaryResult{Account: a.Name}
-		err := probeOne(ctx, c.Pool, a, c.Client, c.Upstream, c.reprobeBaseInterval())
+		err := probeOne(ctx, c.Pool, a, c.Client, c.Upstream, c.reprobeBaseInterval(), false, c.Logger)
 		switch {
 		case err == nil:
 			// Healthy; nothing to say.

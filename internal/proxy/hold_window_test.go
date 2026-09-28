@@ -278,6 +278,87 @@ func TestFableRejectionStillLeavesSonnetServing(t *testing.T) {
 	}
 }
 
+// Required test 2 (issue #229): a window rejection WELL WITHIN
+// windowRejectionTTL must not send the held request upstream.
+// windowHoldRig's upstream fails the test outright if it is ever hit, so
+// this is an end-to-end guard against the original live bug — the account
+// falling back to tier 2 the instant #194's shorter clamp lapsed, and the
+// parked request itself becoming the re-test, 429ing for certain because
+// the real reset was still days out.
+//
+// rejectedAt is placed 5 minutes ago — comfortably inside windowRejectionTTL
+// (30m, unexported) — with a real reset nine days out. The bounded
+// fallback (window_billing_fallback_test.go, package pool) only engages
+// once NOTHING has measured the window for a FULL windowRejectionTTL; this
+// test is deliberately inside that grace period, where hard exclusion must
+// still hold unconditionally.
+func TestHoldNeverSendsLiveTrafficWithinWindowRejectionTTL(t *testing.T) {
+	h, p := windowHoldRig(t, 1, "240h")
+	front := httptest.NewServer(h)
+	t.Cleanup(front.Close)
+
+	a := p.Accounts()[0]
+	rejectedAt := time.Now().Add(-5 * time.Minute)
+	p.MarkWindowRejectedAtForTest(a, "7d-fable", time.Now().Add(9*24*time.Hour), rejectedAt)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := holdPost(t, front, fableReqBody)
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+
+	waitForHolds(t, p, 1)
+
+	select {
+	case <-done:
+		t.Fatal("the held request already completed — a rejection still well within its TTL let it " +
+			"reach the account and get answered (429 or otherwise) instead of staying parked")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if n, _ := p.Holds(); n != 1 {
+		t.Errorf("holds = %d, want 1 — the request must still be parked", n)
+	}
+}
+
+// The corrected other half, from a production-live review of the first
+// version of this fix: once windowRejectionTTL has passed with NOTHING
+// having measured the window — no successful family probe, for any
+// reason — the account must be RE-ADMITTED rather than stranded forever
+// (issue #229's coordinator follow-up; pinned at the pool level in
+// window_billing_fallback_test.go's TestNonBillableAccountAlsoFallsBackWhenNeverMeasured).
+// This is the end-to-end proof that a held request actually gets served
+// through that fallback instead of parking for the full nine-day real
+// reset.
+func TestHoldEventuallyReachesAccountWhenFamilyNeverMeasuresIt(t *testing.T) {
+	front, p := holdRig(t, "hold", "240h", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"ok":true}`)
+	})
+
+	a := p.Accounts()[0]
+	// 45 minutes ago — comfortably past pool's unexported windowRejectionTTL
+	// (30m) — with nothing having measured the window since.
+	rejectedAt := time.Now().Add(-45 * time.Minute)
+	p.MarkWindowRejectedAtForTest(a, "7d-fable", time.Now().Add(9*24*time.Hour), rejectedAt)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(front.URL+"/v1/messages", "application/json", strings.NewReader(fableReqBody))
+	if err != nil {
+		t.Fatalf("request failed: %v — a rejection nothing ever measured must eventually be re-admitted, "+
+			"not park for the full nine-day real reset", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — the fallback should have re-admitted the account", resp.StatusCode)
+	}
+}
+
 // The hold's client-cancellation check (#142/#143) must still work when the
 // wake time came from a window rejection rather than an exhaustion: the
 // deadline is an hour out, so only the cancel can end this.
@@ -366,17 +447,27 @@ func TestWindowRejectionHoldReportsTheRejectionDeadline(t *testing.T) {
 // to one and not the other would show up here as a request sleeping for a
 // year while selection had already re-admitted the account.
 //
+// holdMax is 240h (ten days) here, not the 2h used by this file's other
+// tests: issue #229 corrected what this deadline IS. It used to be clamped
+// a second time to windowRejectionTTL (30m), which is why a 2h budget used
+// to be plenty to observe it parking. Now the hold's wake time is the real,
+// capped reset — maxExhaustedHorizon out, up to nine days — so the budget
+// has to cover that or waitForReset fails fast (#55) before ever parking,
+// which is exactly what a regression back to the pre-#229 shape would also
+// do, just for the opposite reason (the wake time would be far SHORTER than
+// what this test now expects).
+//
 // Asserted as a computed time against the claim, never as an elapsed
 // duration (issues #98, #134): nothing here waits.
 func TestWindowRejectionHoldReportsTheClampedDeadline(t *testing.T) {
-	h, p := windowHoldRig(t, 1, "2h")
+	h, p := windowHoldRig(t, 1, "240h")
 	claimed := time.Now().Add(365 * 24 * time.Hour) // a bad epoch parse
 	p.MarkWindowRejected(p.Accounts()[0], "7d-fable", claimed)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
-	go h.waitForReset(req, []byte(fableReqBody), time.Now().Add(2*time.Hour), p.CapacitySignal())
+	go h.waitForReset(req, []byte(fableReqBody), time.Now().Add(240*time.Hour), p.CapacitySignal())
 
 	var reported time.Time
 	deadline := time.Now().Add(3 * time.Second)
@@ -392,9 +483,17 @@ func TestWindowRejectionHoldReportsTheClampedDeadline(t *testing.T) {
 			"wake time is beyond holdMax, so waitForReset fails fast (hold.go's resetSlack branch) "+
 			"instead of waiting out the clamped deadline it should have had", claimed)
 	}
-	// windowRejectionTTL is 30m and unexported; one hour is the loosest
-	// bound that still fails every unclamped value.
-	if ceiling := time.Now().Add(time.Hour); reported.After(ceiling) {
+	// The floor: issue #229's whole point is that this is NOT
+	// windowRejectionTTL (30m) or anything close to it — a bad-epoch claim
+	// must still park for most of maxExhaustedHorizon (9 days), not the
+	// re-test cadence.
+	if floor := time.Now().Add(8 * 24 * time.Hour); reported.Before(floor) {
+		t.Errorf("hold parks until %v, before %v — the year-out claim was clamped down to something "+
+			"close to windowRejectionTTL again, which is #229's bug: a held request would wake "+
+			"every ~30m against a reset that is really days out", reported, floor)
+	}
+	// The ceiling: still capped, not the literal year-out claim.
+	if ceiling := time.Now().Add(10 * 24 * time.Hour); reported.After(ceiling) {
 		t.Errorf("hold parks until %v, past %v — the year-out claim %v was taken at face value, "+
 			"so the request sleeps out its whole budget on a deadline nothing will ever re-measure",
 			reported, ceiling, claimed)
