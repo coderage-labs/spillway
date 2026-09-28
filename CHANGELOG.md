@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.1](https://github.com/coderage-labs/spillway/compare/v0.26.0...v0.26.1) (2026-09-28)
+
+
+### Fixes
+
+* **provider:** a window at allowed_warning is still allowed ([#234](https://github.com/coderage-labs/spillway/issues/234)) ([#236](https://github.com/coderage-labs/spillway/issues/236)) ([1597883](https://github.com/coderage-labs/spillway/commit/159788348ffb053d46a0a91afb56f8c0a07ec76e))
+
 ## [0.26.0](https://github.com/coderage-labs/spillway/compare/v0.25.1...v0.26.0) (2026-09-28)
 
 
