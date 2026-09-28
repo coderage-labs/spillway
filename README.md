@@ -189,6 +189,44 @@ Still exercised by nobody: the logon trigger actually firing at a logon (a CI
 runner never logs in), toast notifications, and the browser hand-off during
 login. Treat first use as a bug hunt and please file what breaks.
 
+## Upgrade
+
+| Installed with | Upgrade |
+|---|---|
+| Homebrew (macOS) | `brew upgrade --cask spillway` |
+| Scoop (Windows) | `scoop update spillway` |
+| Tarball (Linux, or any OS) | replace the binary, then `spillway service install` |
+| `go install` | re-run the `go install` above, then `spillway service install` |
+
+On macOS and Windows the package manager restarts the background daemon onto
+the new binary for you: the cask's postflight and the Scoop manifest's
+post-install both re-run `spillway service install`, and only if the service
+is already installed, so an upgrade never registers one you did not ask for.
+Nothing does that on Linux — the Homebrew cask's postflight is macOS-only — so
+run `spillway service install` yourself, which restarts the systemd unit. It is
+safe to run over a service that is already installed; that is the upgrade path
+it is built for.
+
+Check it took:
+
+```sh
+spillway version   # the new tag
+spillway status    # the daemon answering
+```
+
+What an upgrade keeps and drops:
+
+- **Kept:** config, accounts and their credentials, the request log and quota
+  history. They live in the config directory and the OS credential store, not
+  next to the binary, and no upgrade path touches them.
+- **Dropped:** requests in flight at the moment of the restart, including any
+  being held for a reset. The client sees the connection close; Claude Code
+  normally retries it by itself. If you have requests held and would rather
+  not interrupt them, upgrade after they clear.
+- Clients already running keep working — they talk to the same address — but a
+  change that affects how `spillway run` launches a client (its environment,
+  e.g. `API_TIMEOUT_MS`) only reaches sessions started after the upgrade.
+
 ## Quickstart
 
 ```sh
