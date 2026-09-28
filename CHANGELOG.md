@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.2](https://github.com/coderage-labs/spillway/compare/v0.26.1...v0.26.2) (2026-09-28)
+
+
+### Documentation
+
+* fix the upgrade table ([#240](https://github.com/coderage-labs/spillway/issues/240)) ([77d5d20](https://github.com/coderage-labs/spillway/commit/77d5d207c97473e2edba66575df228942514c9df))
+* how to upgrade, per install method ([#238](https://github.com/coderage-labs/spillway/issues/238)) ([9abe21b](https://github.com/coderage-labs/spillway/commit/9abe21bd0df867f966283ad02a8557a517e41860))
+
 ## [0.26.1](https://github.com/coderage-labs/spillway/compare/v0.26.0...v0.26.1) (2026-09-28)
 
 
