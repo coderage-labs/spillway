@@ -245,6 +245,19 @@ spillway run                   # spawns claude, routed through the pool
 
 Then open the dashboard at <http://127.0.0.1:7657/>.
 
+Claude seats in different organisations can share the same email address.
+Add each under a distinct name (for example, `arena-work` and `arena-personal`),
+selecting the corresponding organisation in each browser login. Spillway
+identifies Claude seats by user UUID **and organisation UUID**; logging in to
+the same seat under another name is still rejected. `spillway accounts` shows
+the organisation name and UUID.
+
+Entries saved by older versions have no organisation UUID. Re-authenticate the
+existing name once, selecting its original organisation, before adding the
+second one. If the profile cannot be fetched, login stops without saving the
+credentials; if it omits the organisation UUID, the duplicate check stays
+conservative and treats the same user UUID as a possible duplicate.
+
 `spillway login claude <name>` opens a browser and takes the code back over a
 loopback callback on `localhost:54545` — nothing to copy. If that port cannot
 be bound (a second login already running, or a headless box), it falls back to

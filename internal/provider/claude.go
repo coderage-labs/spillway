@@ -60,9 +60,10 @@ func claudeFamilyProbeModel(window string, modelMap map[string]string) (string, 
 }
 
 var claudeSpec = Spec{
-	Kind:            Claude,
-	AccountType:     "claude-oauth",
-	DefaultUpstream: "https://api.anthropic.com",
+	Kind:              Claude,
+	AccountType:       "claude-oauth",
+	OrgScopedIdentity: true,
+	DefaultUpstream:   "https://api.anthropic.com",
 	ProbeModel: func(m map[string]string) string {
 		if v, ok := m[claudeProbeModelID]; ok {
 			return v

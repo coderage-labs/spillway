@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+
+	"github.com/coderage-labs/spillway/internal/provider"
 )
 
 // UpsertAccount adds or replaces (by name) an account's metadata in the
@@ -49,11 +51,8 @@ func UpsertAccountWithPriority(path string, acct AccountConfig, priority *int) (
 	// extra account, rotates onto a tank backed by the same quota it just
 	// left, and — worst — runs two refreshers against one credential, which
 	// is how a live token got killed early in this project.
-	if dup := findByUUID(cfg.Accounts, acct.AccountUUID); dup != "" {
-		return 0, fmt.Errorf("that is the same provider account as %q (account uuid %s)\n"+
-			"  to re-authenticate it:  spillway login claude %s\n"+
-			"  to replace it:          spillway accounts remove %s",
-			dup, acct.AccountUUID, dup, dup)
+	if dup := findByIdentity(cfg.Accounts, acct); dup != nil {
+		return 0, duplicateIdentityError(*dup, acct)
 	}
 	switch {
 	case priority != nil:
@@ -127,34 +126,62 @@ func ListAccountConfigs(path string) ([]AccountConfig, error) {
 	return cfg.Accounts, nil
 }
 
-// FindAccountByUUID reports the existing account with this provider account
-// uuid, or "". Exported so login can refuse a duplicate BEFORE writing token
-// material: UpsertAccount rejects it too, but by then the secret is already
-// in the keychain under a name no config will ever reference again.
-func FindAccountByUUID(path, uuid string) (string, error) {
-	if uuid == "" {
-		return "", nil
-	}
+// CheckAccountIdentity checks a login before any credentials are overwritten.
+// Re-authentication may change identity, so compare the merged entry against
+// every other name, not just the first entry sharing its user UUID.
+func CheckAccountIdentity(path string, acct AccountConfig) error {
 	cfg, err := readOrDefaults(path)
 	if err != nil {
-		return "", err
+		return err
 	}
-	return findByUUID(cfg.Accounts, uuid), nil
-}
-
-// findByUUID returns the name of an existing account with this provider
-// account uuid, or "". An empty uuid matches nothing: providers that do not
-// report one (kimi) must not all collide with each other.
-func findByUUID(accts []AccountConfig, uuid string) string {
-	if uuid == "" {
-		return ""
-	}
-	for _, a := range accts {
-		if a.AccountUUID == uuid {
-			return a.Name
+	for _, existing := range cfg.Accounts {
+		if existing.Name == acct.Name {
+			acct = mergeLoginUpdate(existing, acct)
+			break
 		}
 	}
-	return ""
+	for _, existing := range cfg.Accounts {
+		if existing.Name != acct.Name && sameIdentity(existing, acct) {
+			return duplicateIdentityError(existing, acct)
+		}
+	}
+	return nil
+}
+
+// An unknown organisation cannot prove that two Claude grants are distinct.
+// Keep the legacy duplicate guard until re-login records both org UUIDs.
+func sameIdentity(a, b AccountConfig) bool {
+	if a.Type != b.Type || a.AccountUUID == "" || a.AccountUUID != b.AccountUUID {
+		return false
+	}
+	return !provider.For(a.Type).OrgScopedIdentity || a.OrgUUID == "" || b.OrgUUID == "" || a.OrgUUID == b.OrgUUID
+}
+
+func findByIdentity(accts []AccountConfig, acct AccountConfig) *AccountConfig {
+	for i := range accts {
+		if sameIdentity(accts[i], acct) {
+			return &accts[i]
+		}
+	}
+	return nil
+}
+
+func duplicateIdentityError(existing, incoming AccountConfig) error {
+	if provider.For(incoming.Type).OrgScopedIdentity && existing.OrgUUID == "" {
+		return fmt.Errorf("same provider account UUID as %q (account uuid %s), but organisation identity is missing\n"+
+			"  re-authenticate the existing entry, selecting its original organisation: spillway login claude %s\n"+
+			"  then retry the new name, selecting the other organisation\n"+
+			"  to replace it: spillway accounts remove %s",
+			existing.Name, incoming.AccountUUID, existing.Name, existing.Name)
+	}
+	if provider.For(incoming.Type).OrgScopedIdentity && incoming.OrgUUID == "" {
+		return fmt.Errorf("same provider account UUID as %q (account uuid %s), but the new login did not report an organisation UUID; credentials were not saved — retry login selecting the intended organisation",
+			existing.Name, incoming.AccountUUID)
+	}
+	return fmt.Errorf("that is the same provider account as %q (account uuid %s, org uuid %s)\n"+
+		"  to re-authenticate it:  spillway login claude %s\n"+
+		"  to replace it:          spillway accounts remove %s",
+		existing.Name, incoming.AccountUUID, incoming.OrgUUID, existing.Name, existing.Name)
 }
 
 func readOrDefaults(path string) (*Config, error) {
@@ -239,6 +266,12 @@ func mergeLoginUpdate(existing, acct AccountConfig) AccountConfig {
 	// correct for all of them. Only credential-shaped fields (token
 	// material, and now Source) need an exception.
 	merged.Source = ""
+	// An identity update must not inherit the previous grant's organisation
+	// when its profile did not report one (or reported no display name).
+	if acct.AccountUUID != "" {
+		merged.OrgUUID = acct.OrgUUID
+		merged.OrgName = acct.OrgName
+	}
 	return merged
 }
 
