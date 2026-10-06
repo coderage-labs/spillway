@@ -13,7 +13,7 @@ import (
 func TestListAccounts(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Accounts = []config.AccountConfig{
-		{Name: "work", Type: "claude-oauth", ExpiresAt: 4102444800000, AccountUUID: "uuid-1"},
+		{Name: "work", Type: "claude-oauth", ExpiresAt: 4102444800000, AccountUUID: "uuid-1", OrgUUID: "work-org", OrgName: "Arena"},
 		{Name: "old", Type: "claude-oauth", ExpiresAt: 1},
 		{Name: "local", Type: "claude-oauth", Source: "keychain"},
 		{Name: "ghost", Type: "claude-oauth"},
@@ -30,7 +30,7 @@ func TestListAccounts(t *testing.T) {
 	for _, r := range rows {
 		byName[r.Name] = r
 	}
-	if r := byName["work"]; r.Status != "ok" || r.Secrets != "present" || r.UUID != "uuid-1" {
+	if r := byName["work"]; r.Status != "ok" || r.Secrets != "present" || r.UUID != "uuid-1" || r.OrgUUID != "work-org" || r.OrgName != "Arena" {
 		t.Errorf("work = %+v", r)
 	}
 	if r := byName["old"]; r.Status != "expired" {

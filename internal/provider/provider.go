@@ -84,6 +84,9 @@ type Spec struct {
 	Kind Kind
 	// AccountType is the value used in config's accounts[].type.
 	AccountType string
+	// OrgScopedIdentity means a user can have independent subscription seats
+	// in different organisations. Both org UUIDs must be known to distinguish them.
+	OrgScopedIdentity bool
 	// DefaultUpstream when an account does not name one.
 	DefaultUpstream string
 	// ProbeModel is the cheapest model to send a quota probe to. modelMap is

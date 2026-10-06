@@ -41,6 +41,8 @@ type AccountConfig struct {
 	RefreshToken string            `yaml:"refreshToken,omitempty"`
 	ExpiresAt    int64             `yaml:"expiresAt,omitempty"` // epoch milliseconds
 	AccountUUID  string            `yaml:"accountUuid,omitempty"`
+	OrgUUID      string            `yaml:"orgUuid,omitempty"`
+	OrgName      string            `yaml:"orgName,omitempty"`
 	Upstream     string            `yaml:"upstream,omitempty"` // defaults per provider
 	ModelMap     map[string]string `yaml:"modelMap,omitempty"` // incoming model id → provider model id
 }
@@ -468,7 +470,6 @@ func (c *Config) Validate() error {
 	// would rotate between tanks backed by the same quota, and — the reason
 	// this is an error rather than a warning — refresh the same credential
 	// from two places, which is how a live token was lost early on.
-	byUUID := map[string]string{}
 	for i, a := range c.Accounts {
 		where := fmt.Sprintf("accounts[%d] (%q)", i, a.Name)
 		if a.Name == "" {
@@ -478,13 +479,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%s: duplicate account name", where)
 		}
 		seen[a.Name] = true
-		if a.AccountUUID != "" {
-			if prev, ok := byUUID[a.AccountUUID]; ok {
-				return fmt.Errorf("%s: same provider account as %q (accountUuid %s) — "+
-					"remove one with `spillway accounts remove %s`",
-					where, prev, a.AccountUUID, a.Name)
-			}
-			byUUID[a.AccountUUID] = a.Name
+		if dup := findByIdentity(c.Accounts[:i], a); dup != nil {
+			return fmt.Errorf("%s: %w", where, duplicateIdentityError(*dup, a))
 		}
 		if !provider.Known(a.Type) {
 			return fmt.Errorf("%s: type %q must be one of %s", where, a.Type,

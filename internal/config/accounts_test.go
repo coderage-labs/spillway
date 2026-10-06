@@ -233,6 +233,8 @@ var loginOwnedFields = map[string]bool{
 	"Type":        true,
 	"ExpiresAt":   true,
 	"AccountUUID": true,
+	"OrgUUID":     true,
+	"OrgName":     true,
 }
 
 // clearedOnLoginFields are AccountConfig fields mergeLoginUpdate deliberately
@@ -475,5 +477,97 @@ func TestUpsertAccountClearsKeychainSourceOnRelogin(t *testing.T) {
 	// #50's behaviour must not regress alongside this fix.
 	if got.Label != "personal" || got.Priority != 2 {
 		t.Errorf("user settings lost: label=%q priority=%d", got.Label, got.Priority)
+	}
+}
+
+func TestOrganisationIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		firstOrg, nextOrg string
+		wantDuplicate     bool
+	}{
+		{"different organisations", "work-org", "personal-org", false},
+		{"same organisation", "work-org", "work-org", true},
+		{"legacy existing entry", "", "personal-org", true},
+		{"missing incoming organisation", "work-org", "", true},
+		{"both unknown", "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "spillway.yaml")
+			first := AccountConfig{Name: "work", Type: "claude-oauth", AccountUUID: "same-user", OrgUUID: tc.firstOrg, OrgName: "Work"}
+			next := AccountConfig{Name: "personal", Type: "claude-oauth", AccountUUID: "same-user", OrgUUID: tc.nextOrg, OrgName: "Personal"}
+			if err := UpsertAccount(path, first); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckAccountIdentity(path, next); (err != nil) != tc.wantDuplicate {
+				t.Fatalf("preflight = %v, want duplicate %v", err, tc.wantDuplicate)
+			}
+			if err := UpsertAccount(path, next); (err != nil) != tc.wantDuplicate {
+				t.Fatalf("upsert = %v, want duplicate %v", err, tc.wantDuplicate)
+			}
+			cfg := Defaults()
+			cfg.Accounts = []AccountConfig{first, next}
+			if err := cfg.Validate(); (err != nil) != tc.wantDuplicate {
+				t.Fatalf("validate = %v, want duplicate %v", err, tc.wantDuplicate)
+			}
+			if !tc.wantDuplicate {
+				loaded, err := LoadFrom(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(loaded.Accounts) != 2 || loaded.Accounts[1].OrgUUID != tc.nextOrg || loaded.Accounts[1].OrgName != "Personal" {
+					t.Fatalf("organisation metadata lost: %+v", loaded.Accounts)
+				}
+			}
+		})
+	}
+}
+
+func TestOrganisationIdentityLegacyMigrationAndReauth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spillway.yaml")
+	work := AccountConfig{Name: "work", Type: "claude-oauth", AccountUUID: "same-user"}
+	if err := UpsertAccount(path, work); err != nil {
+		t.Fatal(err)
+	}
+	personal := AccountConfig{Name: "personal", Type: "claude-oauth", AccountUUID: "same-user", OrgUUID: "personal-org"}
+	if err := CheckAccountIdentity(path, personal); err == nil || !strings.Contains(err.Error(), "original organisation") {
+		t.Fatalf("want migration instructions, got %v", err)
+	}
+	work.OrgUUID = "work-org"
+	if err := CheckAccountIdentity(path, work); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertAccount(path, work); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAccountIdentity(path, personal); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertAccount(path, personal); err != nil {
+		t.Fatal(err)
+	}
+	// The first matching UUID is the re-login's own name. Checking only
+	// that first match would miss the duplicate personal organisation.
+	work.OrgUUID = "personal-org"
+	if err := CheckAccountIdentity(path, work); err == nil {
+		t.Fatal("re-auth preflight allowed overwriting work with the personal grant")
+	}
+	if err := UpsertAccount(path, work); err == nil {
+		t.Fatal("re-auth upsert allowed the duplicate organisation")
+	}
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Accounts[0].OrgUUID != "work-org" {
+		t.Fatal("failed re-auth changed the saved identity")
+	}
+}
+
+func TestReloginDoesNotKeepStaleOrganisation(t *testing.T) {
+	original := AccountConfig{Name: "work", Type: "claude-oauth", AccountUUID: "user", OrgUUID: "old-org", OrgName: "Old"}
+	merged := mergeLoginUpdate(original, AccountConfig{Name: "work", Type: "claude-oauth", AccountUUID: "user"})
+	if merged.OrgUUID != "" || merged.OrgName != "" {
+		t.Fatalf("incomplete profile inherited stale organisation: %+v", merged)
 	}
 }

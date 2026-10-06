@@ -117,20 +117,23 @@ func runLoginClaude(args []string) error {
 
 	profile, err := accounts.FetchProfile(ctx, nil, "", tokens.AccessToken)
 	if err != nil {
-		// Profile failure is not fatal: tokens work without a uuid (the
-		// rewrite just stays off) — but say so.
-		fmt.Fprintf(os.Stderr, "warning: profile fetch failed (%v) — account_uuid rewrite disabled for %s\n", err, name)
-		profile = &accounts.Profile{}
+		// Without identity we cannot distinguish a second organisation from
+		// a duplicate, or safely overwrite an existing entry's credential.
+		return fmt.Errorf("cannot verify the authenticated account; credentials were not saved: %w", err)
+	}
+	if profile.AccountUUID == "" {
+		return fmt.Errorf("OAuth profile is missing the account UUID; credentials were not saved")
 	}
 
 	// Refuse a duplicate before the secret is written, not after. Upsert
 	// rejects it either way, but writing first leaves token material in the
 	// keychain under a name no config will ever reference again.
-	if dup, derr := config.FindAccountByUUID(cfgPath, profile.AccountUUID); derr == nil && dup != "" && dup != name {
-		return fmt.Errorf("that is the same provider account as %q (account uuid %s)\n"+
-			"  to re-authenticate it:  spillway login claude %s\n"+
-			"  to replace it:          spillway accounts remove %s",
-			dup, profile.AccountUUID, dup, dup)
+	identity := config.AccountConfig{
+		Name: name, Type: "claude-oauth", AccountUUID: profile.AccountUUID,
+		OrgUUID: profile.OrgUUID, OrgName: profile.OrgName,
+	}
+	if err := config.CheckAccountIdentity(cfgPath, identity); err != nil {
+		return err
 	}
 
 	store := openSecrets()
@@ -150,6 +153,8 @@ func runLoginClaude(args []string) error {
 			Type:        "claude-oauth",
 			ExpiresAt:   tokens.ExpiresAt,
 			AccountUUID: profile.AccountUUID,
+			OrgUUID:     profile.OrgUUID,
+			OrgName:     profile.OrgName,
 		},
 		Priority: prio,
 		Add: accountAddPayload{
@@ -280,6 +285,8 @@ type accountRow struct {
 	Source    string
 	ExpiresAt int64
 	UUID      string
+	OrgUUID   string
+	OrgName   string
 	Secrets   string // "present" / "missing" / "keychain"
 	Status    string // ok / expired / no-secrets
 	// Overage is the account's allowOverage setting: nil follows the pool.
@@ -302,7 +309,7 @@ func listAccounts(cfg *config.Config, store secrets.Store, live liveClaude, now 
 	for _, a := range cfg.Accounts {
 		row := accountRow{
 			Name: a.Name, Type: a.Type, Source: a.Source,
-			ExpiresAt: a.ExpiresAt, UUID: a.AccountUUID,
+			ExpiresAt: a.ExpiresAt, UUID: a.AccountUUID, OrgUUID: a.OrgUUID, OrgName: a.OrgName,
 			Overage: a.AllowOverage, Priority: a.Priority,
 		}
 		if a.Source == "keychain" {
@@ -400,7 +407,7 @@ func runAccounts(args []string) error {
 		fmt.Println("no accounts — run `spillway login claude <name>`")
 		return nil
 	}
-	t := newTable("account", "type", "status", "secrets", "expires", "priority", "extra usage", "uuid")
+	t := newTable("account", "type", "status", "secrets", "expires", "priority", "extra usage", "uuid", "organisation")
 	t.rightAlign(5)
 	for _, r := range rows {
 		expiry := "never"
@@ -420,7 +427,14 @@ func runAccounts(args []string) error {
 				overage = "ON (billable)"
 			}
 		}
-		t.add(r.Name, r.Type, r.Status, r.Secrets, expiry, strconv.Itoa(r.Priority), overage, uuid)
+		org := r.OrgName
+		if r.OrgUUID != "" {
+			org = strings.TrimSpace(org + " (" + r.OrgUUID + ")")
+		}
+		if org == "" {
+			org = "—"
+		}
+		t.add(r.Name, r.Type, r.Status, r.Secrets, expiry, strconv.Itoa(r.Priority), overage, uuid, org)
 	}
 	t.render(os.Stdout)
 	return nil
