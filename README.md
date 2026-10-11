@@ -1583,9 +1583,10 @@ pool-wide windows are genuinely the ones out:
 | Everything returns together | *"All models back"* (one message, not two) |
 
 A held/refused request only ever reports a **materially later** ETA again
-— more than ~15 minutes, or past `holdMax` — never one that moved earlier
-(the recovery message covers that). Recovery itself is driven by pool
-capacity, not by a request being served: it fires even with zero requests
+— more than ~15 minutes, or crossing from within `holdMax` to beyond it.
+An unchanged ETA beyond `holdMax` does not trigger another alert, nor does
+one that moved earlier (the recovery message covers that). Recovery itself
+is driven by pool capacity, not by a request being served: it fires even with zero requests
 currently held, so an owner who has stopped retrying still hears that it's
 safe to resume — the previous behaviour gave no signal at all beyond the
 pings simply stopping.

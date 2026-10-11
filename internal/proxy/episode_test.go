@@ -17,6 +17,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -131,6 +132,85 @@ func TestEpisodeOneStartNotificationForManyHolds(t *testing.T) {
 	assertNoMoreSent(t, rec, 1)
 	if !strings.Contains(rec.all()[0], "Fable held") {
 		t.Errorf("message = %q, want a fable-held start", rec.all()[0])
+	}
+}
+
+func TestEpisodeBeyondHoldBudgetSendsOneNtfyAlert(t *testing.T) {
+	a := claudeAcct("a")
+	h, p, _ := episodeRig(t, "1h", a)
+	rec := &sentRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec.add(r.Header.Get("Title"), string(body))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	n := notify.New()
+	warnings := n.SetChannels([]notify.ChannelSpec{{Name: "phone", Provider: "ntfy",
+		Events: []string{notify.EventExhausted}}}, func(string) (notify.Destination, error) {
+		return notify.Destination{URL: server.URL, Topic: "test"}, nil
+	})
+	if len(warnings) != 0 {
+		t.Fatal(warnings)
+	}
+	h.SetNotifier(n)
+	eta := time.Now().Add(4 * time.Hour)
+	p.MarkExhausted(a, eta)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.reportExhaustion("", eta, true)
+		}()
+	}
+	wg.Wait()
+	waitForSent(t, rec, 1)
+	assertNoMoreSent(t, rec, 1)
+}
+
+func TestEpisodeHoldBudgetCrossingNotifiesOnce(t *testing.T) {
+	for _, family := range []string{"", fableFamily} {
+		t.Run("family="+family, func(t *testing.T) {
+			a := claudeAcct("a")
+			h, p, rec := episodeRig(t, "1h", a)
+			mark := func(eta time.Time) {
+				if family == "" {
+					p.MarkExhausted(a, eta)
+				} else {
+					p.MarkWindowRejected(a, family, eta)
+				}
+			}
+			eta := time.Now().Add(55 * time.Minute)
+			mark(eta)
+			h.reportExhaustion(family, eta, true)
+			waitForSent(t, rec, 1)
+
+			// A small slip crosses the hold budget, so it deserves one alert.
+			eta = eta.Add(10 * time.Minute)
+			mark(eta)
+			for i := 0; i < 5; i++ {
+				h.reportExhaustion(family, eta, true)
+			}
+			waitForSent(t, rec, 2)
+			assertNoMoreSent(t, rec, 2)
+
+			// Still beyond the budget, but earlier: no escalation.
+			earlier := eta.Add(-time.Minute)
+			mark(earlier)
+			h.reportExhaustion(family, earlier, true)
+			assertNoMoreSent(t, rec, 2)
+
+			// A further material slip remains actionable even beyond the budget.
+			eta = eta.Add(20 * time.Minute)
+			mark(eta)
+			for i := 0; i < 5; i++ {
+				h.reportExhaustion(family, eta, true)
+			}
+			waitForSent(t, rec, 3)
+			assertNoMoreSent(t, rec, 3)
+		})
 	}
 }
 
