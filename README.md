@@ -62,7 +62,7 @@ Read this before running it:
 
 | | |
 |---|---|
-| **Go 1.25.13+** | `go.mod` sets that floor. Go 1.21+ also works — it reads the floor and downloads the right toolchain itself, unless you have set `GOTOOLCHAIN=local`. 1.25.13 specifically because earlier 1.25 patches carry `crypto/tls` and `net/http` CVEs, and this binary terminates TLS and holds OAuth tokens. |
+| **Go 1.26.0+** | `go.mod` sets that floor for the patched HTTP/2 dependency. Go 1.21+ also works — it reads the floor and downloads the right toolchain itself, unless you have set `GOTOOLCHAIN=local`. Release builds use the current stable Go toolchain. |
 | **git** | to clone. |
 
 Nothing else: no cgo, no npm, no build step for the UI. The SQLite driver is
