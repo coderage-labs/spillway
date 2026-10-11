@@ -86,9 +86,10 @@ func newEpisodeTracker() *episodeTracker {
 //     "episode start"), whatever the ETA is (even unknown).
 //   - Already open: only a MATERIAL slip re-notifies — more than
 //     etaSlipThreshold later than what was last notified, or now past
-//     holdMax (the point at which a freshly-starting hold would fail fast
-//     rather than wait, per hold.go's own reset-vs-deadline check — a
-//     slip that crosses that line is a materially different situation
+//     holdMax when the last notified ETA was within it (the point at which
+//     a freshly-starting hold would fail fast rather than wait, per
+//     hold.go's own reset-vs-deadline check — a slip that crosses that
+//     line is a materially different situation
 //     even when it's under the flat threshold). An unknown ETA never
 //     counts as a slip in either direction — there's nothing to compare —
 //     and neither does one moving EARLIER: that's good news the recovery
@@ -106,7 +107,11 @@ func shouldNotifyLocked(holdMax time.Duration, s *episodeState, eta time.Time, e
 	if !etaKnown || !s.etaKnown {
 		return false
 	}
-	if eta.Sub(s.eta) > etaSlipThreshold || eta.After(time.Now().Add(holdMax)) {
+	// Compare both ETAs against the same budget boundary. Merely remaining
+	// beyond it is not a transition, even when more requests arrive.
+	deadline := time.Now().Add(holdMax)
+	crossesBudget := eta.After(deadline) && !s.eta.After(deadline)
+	if eta.Sub(s.eta) > etaSlipThreshold || crossesBudget {
 		s.eta = eta
 		return true
 	}
