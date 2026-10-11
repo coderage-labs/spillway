@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.26.3](https://github.com/coderage-labs/spillway/compare/v0.26.2...v0.26.3) (2026-10-11)
+
+
+### Fixes
+
+* **deps:** patch HTTP/2 vulnerabilities in golang.org/x/net ([4b537c4](https://github.com/coderage-labs/spillway/commit/4b537c4a0a248adf8f5cc706bcb5ca7870ee4f5c))
+* **proxy:** suppress repeated exhaustion alerts beyond the hold budget ([b8d11aa](https://github.com/coderage-labs/spillway/commit/b8d11aac43023301cbfe56ee40225db24cd52431))
+* **proxy:** suppress repeated exhaustion alerts beyond the hold budget ([655b684](https://github.com/coderage-labs/spillway/commit/655b6841f81c3c4048773698443094e2029d99a3))
+
 ## [0.26.2](https://github.com/coderage-labs/spillway/compare/v0.26.1...v0.26.2) (2026-10-06)
 
 
