@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/coderage-labs/spillway/compare/v0.26.3...v0.27.0) (2026-10-15)
+
+
+### Features
+
+* add spillway env for Claude Desktop's Code tab ([#248](https://github.com/coderage-labs/spillway/issues/248)) ([#249](https://github.com/coderage-labs/spillway/issues/249)) ([15e9757](https://github.com/coderage-labs/spillway/commit/15e975770571a3fc9d568d0bdc5fd328edd76198))
+
 ## [0.26.3](https://github.com/coderage-labs/spillway/compare/v0.26.2...v0.26.3) (2026-10-11)
 
 
