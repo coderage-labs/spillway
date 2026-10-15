@@ -315,13 +315,21 @@ daemon first (`spillway server`, or `spillway service install`), then:
 spillway env
 ```
 
-1. In Desktop, open the Code tab, then the environment dropdown in the prompt
-   box. Hover **Local** and click the gear icon.
-2. Paste the `spillway env` output into the editor.
-3. Restart Desktop.
-4. Check with `/status` in the pane, and `spillway status` for the request.
+1. In Desktop's Code tab, open the environment dropdown in the prompt box
+   (it reads **This computer**) and choose **New environment**.
+2. On the **Local** tab, name it (say, `Spillway`), then open
+   **Environment variables**.
+3. Paste the `spillway env` output, click **Done**, then
+   **Create environment**.
+4. Pick **Spillway** from the dropdown for any session you want pooled.
+   Sessions on **This computer** still go direct.
+5. Send something, then check `spillway status` for the request.
 
-<!-- screenshots: docs/images/desktop-env-*.png (gear path, editor, /status) -->
+<p align="center">
+  <img src="docs/images/desktop-env-1-dropdown.png" alt="Claude Desktop's Code tab environment dropdown: Local, This computer, Cloud, and New environment" width="320">
+  <img src="docs/images/desktop-env-2-new.png" alt="New environment dialog on the Local tab, named Spillway, with an Environment variables row" width="420">
+  <img src="docs/images/desktop-env-3-variables.png" alt="Environment variables editor holding the spillway env output in .env format" width="420">
+</p>
 
 The values are printed unquoted, because the editor takes them literally. The
 CA path contains a space (`Application Support` on macOS) and works as is.
@@ -329,8 +337,8 @@ CA path contains a space (`Application Support` on macOS) and works as is.
 CA minted anywhere else wouldn't match the one the daemon serves.
 
 - **Remote Control is kept**, as with `run`.
-- **The variables also reach Desktop's preview and dev servers**, not just the
-  Claude process, since they apply to the whole local environment.
+- **The variables also reach that environment's preview and dev servers**, not
+  just the Claude process.
 - **Re-run and re-paste** if the CA is regenerated or the proxy port changes.
   Desktop stores what you paste encrypted, so spillway can't update it for you.
 - **Base-URL mode doesn't work here.** Desktop pins `ANTHROPIC_BASE_URL`
