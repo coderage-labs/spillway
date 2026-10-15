@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -183,5 +184,101 @@ func TestSpawnCLIFakeClaude(t *testing.T) {
 		if strings.Contains(string(out), banned) {
 			t.Errorf("child env contains banned var %q", banned)
 		}
+	}
+}
+
+func keyOf(kv string) string { k, _, _ := strings.Cut(kv, "="); return k }
+
+func TestSpillwayEnvVarSet(t *testing.T) {
+	cfg := config.Defaults()
+	got := spillwayEnv(&cfg, "/x y/ca.pem", "")
+	var keys []string
+	for _, kv := range got {
+		keys = append(keys, keyOf(kv))
+	}
+	want := []string{"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS"}
+	if cfg.PoolHoldMax() > 0 {
+		want = append(want, "API_TIMEOUT_MS")
+	}
+	if strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Errorf("keys = %v, want %v", keys, want)
+	}
+	if got[3] != "NODE_EXTRA_CA_CERTS=/x y/ca.pem" {
+		t.Errorf("CA var = %q", got[3])
+	}
+}
+
+func TestSpillwayEnvBundleAndTimeout(t *testing.T) {
+	cfg := config.Defaults()
+	got := spillwayEnv(&cfg, "/ca.pem", "/b.pem")
+	joined := "\n" + strings.Join(got, "\n") + "\n"
+	for _, w := range []string{"\nSSL_CERT_FILE=/b.pem\n", "\nREQUESTS_CA_BUNDLE=/b.pem\n", "\nCURL_CA_BUNDLE=/b.pem\n"} {
+		if !strings.Contains(joined, w) {
+			t.Errorf("missing %q", w)
+		}
+	}
+	if hm := cfg.PoolHoldMax(); hm > 0 {
+		want := "API_TIMEOUT_MS=" + strconv.FormatInt(hm.Milliseconds()+60_000, 10)
+		if got[len(got)-1] != want {
+			t.Errorf("last = %q, want %q", got[len(got)-1], want)
+		}
+	}
+}
+
+func TestPrintEnvUnquotedWithBundleToggle(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "Application Support", "spillway")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pem := filepath.Join(dir, "spillway-ca.pem")
+	if err := os.WriteFile(pem, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Defaults()
+
+	var b strings.Builder
+	if err := printEnv(&b, &cfg, pem); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "NODE_EXTRA_CA_CERTS="+pem+"\n") {
+		t.Errorf("CA line missing/quoted:\n%s", out)
+	}
+	if strings.ContainsAny(out, `"'`) {
+		t.Errorf("output has quotes:\n%s", out)
+	}
+	if strings.Contains(out, "SSL_CERT_FILE") {
+		t.Errorf("bundle vars present without bundle:\n%s", out)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "spillway-ca-bundle.pem"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b.Reset()
+	if err := printEnv(&b, &cfg, pem); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"SSL_CERT_FILE=", "REQUESTS_CA_BUNDLE=", "CURL_CA_BUNDLE="} {
+		if !strings.Contains(b.String(), k) {
+			t.Errorf("missing %s with bundle present", k)
+		}
+	}
+}
+
+func TestPrintEnvMissingCAErrorsWithoutCreating(t *testing.T) {
+	dir := t.TempDir()
+	pem := filepath.Join(dir, "spillway-ca.pem")
+	cfg := config.Defaults()
+	var b strings.Builder
+	err := printEnv(&b, &cfg, pem)
+	if err == nil || !strings.Contains(err.Error(), "start the daemon first") {
+		t.Fatalf("err = %v", err)
+	}
+	if b.Len() != 0 {
+		t.Errorf("printed output on error: %q", b.String())
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Errorf("env created files: %v", entries)
 	}
 }

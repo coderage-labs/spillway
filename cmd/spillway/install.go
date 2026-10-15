@@ -140,6 +140,9 @@ func runInstall(args []string) error {
 	if len(failed) > 0 {
 		return fmt.Errorf("%s incomplete: %s", action, strings.Join(failed, ", "))
 	}
+	if action == "install" {
+		fmt.Println("Using Claude Desktop's Code tab? Run `spillway env` and paste the output into its local environment editor (see README).")
+	}
 	return nil
 }
 
