@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/coderage-labs/spillway/compare/v0.27.0...v0.27.1) (2026-10-15)
+
+
+### Documentation
+
+* Claude Desktop setup matches the real UI, with screenshots ([#248](https://github.com/coderage-labs/spillway/issues/248)) ([#252](https://github.com/coderage-labs/spillway/issues/252)) ([719dce6](https://github.com/coderage-labs/spillway/commit/719dce648d315e4ef5a00b0ad9dad0292c07266e))
+
 ## [0.27.0](https://github.com/coderage-labs/spillway/compare/v0.26.3...v0.27.0) (2026-10-15)
 
 
