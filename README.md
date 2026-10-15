@@ -269,6 +269,7 @@ that works over SSH.
 | Command | What it does |
 |---|---|
 | `spillway install [--force]` | Service + status line + plugin, in one go; `uninstall` reverses it |
+| `spillway env` | Print the proxy variables `run` injects, one unquoted `KEY=value` per line, for [Claude Desktop's Code tab](#claude-desktop-code-tab). Read-only: errors if the CA doesn't exist yet rather than minting one |
 | `spillway server` | Run the daemon (proxy + admin listener) |
 | `spillway run [-- <claude args>]` | Spawn `claude` wired to the proxy; refuses if the daemon is down |
 | `spillway status [--json]` | Compact pool summary in the terminal; `--json` for state, accounts and recent requests |
@@ -304,6 +305,36 @@ launching, not from inside anything the client runs.
 **Remote Control needs MITM mode.** `claude --remote-control` refuses to start
 when `ANTHROPIC_BASE_URL` points anywhere but `api.anthropic.com`, so the
 base-URL route cannot carry it. Use `run`.
+
+#### Claude Desktop (Code tab)
+
+Desktop's Code tab can run through the pool too, in MITM mode. Start the
+daemon first (`spillway server`, or `spillway service install`), then:
+
+```sh
+spillway env
+```
+
+1. In Desktop, open the Code tab, then the environment dropdown in the prompt
+   box. Hover **Local** and click the gear icon.
+2. Paste the `spillway env` output into the editor.
+3. Restart Desktop.
+4. Check with `/status` in the pane, and `spillway status` for the request.
+
+<!-- screenshots: docs/images/desktop-env-*.png (gear path, editor, /status) -->
+
+The values are printed unquoted, because the editor takes them literally. The
+CA path contains a space (`Application Support` on macOS) and works as is.
+`env` never mints a CA, which is why it needs the daemon to have run once: a
+CA minted anywhere else wouldn't match the one the daemon serves.
+
+- **Remote Control is kept**, as with `run`.
+- **The variables also reach Desktop's preview and dev servers**, not just the
+  Claude process, since they apply to the whole local environment.
+- **Re-run and re-paste** if the CA is regenerated or the proxy port changes.
+  Desktop stores what you paste encrypted, so spillway can't update it for you.
+- **Base-URL mode doesn't work here.** Desktop pins `ANTHROPIC_BASE_URL`
+  itself, so overriding it has no effect.
 
 ### Status line
 

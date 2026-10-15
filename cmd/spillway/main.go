@@ -85,6 +85,8 @@ func main() {
 		err = runServer(os.Args[2:])
 	case "run":
 		err = runClaude(os.Args[2:])
+	case "env":
+		err = runPrintEnv(os.Stdout)
 	case "switch":
 		err = runSwitch(os.Args[2:])
 	case "probe":
@@ -141,6 +143,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, strings.Join([]string{
 		"usage: spillway server",
 		"       spillway run [-- <claude args>]",
+		"       spillway env                                 print the proxy env vars, for Claude Desktop's Code tab",
 		"       spillway install [--force] [--plugin-source <path|owner/repo>]",
 		"                                                   service + status line + plugin, in one go",
 		"       spillway uninstall                          undo it",

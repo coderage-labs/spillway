@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/coderage-labs/spillway/internal/accounts"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -51,20 +52,9 @@ var stripEnv = []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AU
 // obtain this platform's system roots — none of the three are set: see the
 // package doc on mitm.EnsureCABundle for why that is the safe choice.
 func runEnv(cfg *config.Config, pemPath, bundlePath string) []string {
-	proxy := "http://" + net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))
-	env := append(os.Environ(),
-		"HTTPS_PROXY="+proxy,
-		"HTTP_PROXY="+proxy,
-		"NO_PROXY=localhost,127.0.0.1,::1",
-		"NODE_EXTRA_CA_CERTS="+pemPath,
-	)
-	if bundlePath != "" {
-		env = append(env,
-			"SSL_CERT_FILE="+bundlePath,
-			"REQUESTS_CA_BUNDLE="+bundlePath,
-			"CURL_CA_BUNDLE="+bundlePath,
-		)
-	}
+	env := os.Environ()
+	spill := spillwayEnv(cfg, pemPath, bundlePath)
+	env = append(env, withoutKey(spill, "API_TIMEOUT_MS")...)
 	for _, k := range stripEnv {
 		env = slices.DeleteFunc(env, func(e string) bool {
 			return strings.HasPrefix(e, k+"=")
@@ -73,17 +63,81 @@ func runEnv(cfg *config.Config, pemPath, bundlePath string) []string {
 	// Claude Code must wait out a pool-exhaustion hold for its first
 	// response byte: raise its timeout past holdMax (+60s margin). Never
 	// LOWER an existing value.
-	if holdMax := cfg.PoolHoldMax(); holdMax > 0 {
-		want := holdMax.Milliseconds() + 60_000
-		existing, _ := strconv.ParseInt(os.Getenv("API_TIMEOUT_MS"), 10, 64)
-		if existing < want {
-			env = slices.DeleteFunc(env, func(e string) bool {
-				return strings.HasPrefix(e, "API_TIMEOUT_MS=")
-			})
-			env = append(env, "API_TIMEOUT_MS="+strconv.FormatInt(want, 10))
+	for _, kv := range spill {
+		if v, ok := strings.CutPrefix(kv, "API_TIMEOUT_MS="); ok {
+			want, _ := strconv.ParseInt(v, 10, 64)
+			existing, _ := strconv.ParseInt(os.Getenv("API_TIMEOUT_MS"), 10, 64)
+			if existing < want {
+				env = slices.DeleteFunc(env, func(e string) bool {
+					return strings.HasPrefix(e, "API_TIMEOUT_MS=")
+				})
+				env = append(env, kv)
+			}
 		}
 	}
 	return env
+}
+
+func withoutKey(kvs []string, key string) []string {
+	return slices.DeleteFunc(slices.Clone(kvs), func(e string) bool {
+		return strings.HasPrefix(e, key+"=")
+	})
+}
+
+// spillwayEnv returns ONLY the variables spillway contributes, as KEY=value
+// strings in a stable order. Shared by runEnv (spawned CLI) and `spillway
+// env` (pasted into Claude Desktop) so the two cannot drift. API_TIMEOUT_MS
+// is last and present only when holdMax > 0; it is the raw wanted value —
+// runEnv additionally refuses to lower an inherited one.
+func spillwayEnv(cfg *config.Config, pemPath, bundlePath string) []string {
+	proxy := "http://" + net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))
+	env := []string{
+		"HTTPS_PROXY=" + proxy,
+		"HTTP_PROXY=" + proxy,
+		"NO_PROXY=localhost,127.0.0.1,::1",
+		"NODE_EXTRA_CA_CERTS=" + pemPath,
+	}
+	if bundlePath != "" {
+		env = append(env,
+			"SSL_CERT_FILE="+bundlePath,
+			"REQUESTS_CA_BUNDLE="+bundlePath,
+			"CURL_CA_BUNDLE="+bundlePath,
+		)
+	}
+	if holdMax := cfg.PoolHoldMax(); holdMax > 0 {
+		env = append(env, "API_TIMEOUT_MS="+strconv.FormatInt(holdMax.Milliseconds()+60_000, 10))
+	}
+	return env
+}
+
+// runPrintEnv implements `spillway env`: print spillway's variables, one
+// unquoted KEY=value per line, for pasting into Claude Desktop's local
+// environment editor. Never mints a CA, never writes a file, never touches
+// the keychain or the daemon.
+func runPrintEnv(w io.Writer) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	pemPath, err := caPEMPath()
+	if err != nil {
+		return err
+	}
+	return printEnv(w, cfg, pemPath)
+}
+
+func printEnv(w io.Writer, cfg *config.Config, pemPath string) error {
+	if _, err := os.Stat(pemPath); err != nil {
+		return fmt.Errorf("MITM CA not found at %s — start the daemon first (`spillway server` or `spillway service install`); a CA minted here would not match the one the daemon serves", pemPath)
+	}
+	bundlePath := mitm.BundlePath(pemPath)
+	if _, err := os.Stat(bundlePath); err != nil {
+		bundlePath = ""
+	}
+	for _, kv := range spillwayEnv(cfg, pemPath, bundlePath) {
+		fmt.Fprintln(w, kv)
+	}
+	return nil
 }
 
 // probeListening refuses to launch when the proxy isn't up — a direct

@@ -82,6 +82,10 @@ func combineBundle(rootsPEM, caCertPEM []byte) []byte {
 	return buf.Bytes()
 }
 
+// BundlePath is where EnsureCABundle writes the combined bundle for pemPath.
+// Pure path derivation: touches nothing on disk.
+func BundlePath(pemPath string) string { return bundlePathFor(pemPath) }
+
 // bundlePathFor derives the combined-bundle path from the CA pem path, the
 // same way chainPath derives the leaf-manifest path: beside pemPath,
 // "spillway-ca.pem" -> "spillway-ca-bundle.pem".
