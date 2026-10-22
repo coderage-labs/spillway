@@ -176,11 +176,13 @@ func TestCacheStatsKeepsAnAccountWithEveryRowPruned(t *testing.T) {
 	}
 }
 
-// Open prunes once, so a daemon that only ever sees short restarts still
-// gets pruned (the same reasoning #104 applied to quota_samples), and a
-// database that has never been pruned is bounded the first time an upgraded
-// binary opens it — without the lifetime totals moving.
-func TestOpenPrunesRowsOlderThanRequestRetention(t *testing.T) {
+// Issue #259: Open no longer prunes (that was part of a ~2 minute refused-
+// connection window); Maintain does, in the background after bind. Until it
+// has run, old rows are still in the table, and the lifetime totals are
+// already exact because Open seeded them — a prune only moves counters
+// between requests and request_totals, so the sum cannot change before,
+// during or after it.
+func TestOpenDoesNotPruneButMaintainDoesAndTotalsNeverMove(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "r.db")
 	now := time.Now().Truncate(time.Millisecond)
 
@@ -191,6 +193,7 @@ func TestOpenPrunesRowsOlderThanRequestRetention(t *testing.T) {
 	recordAt(t, l, now.Add(-40*24*time.Hour), "work", 100, 200, 300, 400)
 	recordAt(t, l, now.Add(-15*24*time.Hour), "work", 10, 20, 30, 40)
 	recordAt(t, l, now.Add(-time.Hour), "work", 1, 2, 3, 4)
+	insertRawSample(t, l, now.Add(-30*24*time.Hour), "gone", "5h", 1, 0.9, now.Add(-29*24*time.Hour))
 	want := statsFor(t, l, "work")
 	if err := l.Close(); err != nil {
 		t.Fatal(err)
@@ -202,16 +205,43 @@ func TestOpenPrunesRowsOlderThanRequestRetention(t *testing.T) {
 	}
 	defer up.Close()
 
-	entries, err := up.Recent(1000)
+	rowCount := func() int {
+		var n int
+		if err := up.db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := rowCount(); n != 3 {
+		t.Fatalf("Open pruned: %d rows, want all 3 until Maintain runs", n)
+	}
+	// Before Maintain: totals already exact.
+	if got := statsFor(t, up, "work"); got != want {
+		t.Errorf("totals before Maintain = %+v, want %+v", got, want)
+	}
+
+	reqs, quota, err := up.Maintain(now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("Recent returned %d rows after an Open-time prune, want 1 (only the recent row)",
-			len(entries))
+	if reqs != 2 || quota != 1 {
+		t.Errorf("Maintain pruned %d requests / %d samples, want 2 / 1", reqs, quota)
+	}
+	if n := rowCount(); n != 1 {
+		t.Fatalf("%d rows after Maintain, want 1 (only the recent row)", n)
 	}
 	if got := statsFor(t, up, "work"); got != want {
-		t.Errorf("lifetime totals moved across an Open-time prune: %+v, want %+v", got, want)
+		t.Errorf("lifetime totals moved across Maintain: %+v, want %+v", got, want)
+	}
+	// A restart after Maintain re-seeds from table + rollup to the same figure.
+	up.Close()
+	again, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if got := statsFor(t, again, "work"); got != want {
+		t.Errorf("totals after restart = %+v, want %+v", got, want)
 	}
 }
 

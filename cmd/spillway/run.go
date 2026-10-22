@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coderage-labs/spillway/internal/admin"
 	"github.com/coderage-labs/spillway/internal/config"
 	"github.com/coderage-labs/spillway/internal/mitm"
 )
@@ -152,27 +153,124 @@ func probeListening(cfg *config.Config) error {
 	return nil
 }
 
+// runWaitTimeout bounds how long `spillway run` waits for the daemon, across
+// both "not listening yet" (launchd has not started it in the first seconds
+// after login) and "listening but still initialising" (#259). Three minutes
+// covers the slowest measured login-time init (~2 min) with margin, while
+// staying inside the daemon's own 5-minute init deadline.
+const runWaitTimeout = 3 * time.Minute
+
+// readyProbe is what waitReady observes. Split out so tests can drive it.
+type readyProbe struct {
+	// listening reports whether the proxy port accepts a connection.
+	listening func() error
+	// status reads /api/state's "status" ("" from a daemon older than #259).
+	status func() (string, error)
+}
+
+// daemonProbe builds the production probe: a TCP dial of the proxy port and
+// the admin client every other CLI command uses (unix socket, token file).
+func daemonProbe(cfg *config.Config) readyProbe {
+	return readyProbe{
+		listening: func() error { return probeListening(cfg) },
+		status: func() (string, error) {
+			api, err := dialAdmin()
+			if err != nil {
+				return "", err
+			}
+			var st struct {
+				Status string `json:"status"`
+			}
+			if err := api.get("/api/state", &st); err != nil {
+				return "", err
+			}
+			return st.Status, nil
+		},
+	}
+}
+
+// waitReady blocks until the daemon is listening AND reports ready.
+//
+// Since #259 the port binds before the daemon's CA step, so "listening" no
+// longer means the CA on disk is final. Touching the CA before ready would
+// mint one the daemon then regenerates, and claude would load a stale
+// NODE_EXTRA_CA_CERTS anchor (the #66 stranding). It also tolerates the
+// daemon not being up at all yet, which is the normal state in the first
+// seconds after login. Stops at ctx cancellation (Ctrl-C) or timeout; the
+// timeout error is the usual "not listening" refusal when that is the state.
+func waitReady(ctx context.Context, p readyProbe, errOut io.Writer, timeout, interval time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	lastMsg := ""
+	say := func(m string) {
+		if m != lastMsg {
+			fmt.Fprintln(errOut, "spillway: "+m)
+			lastMsg = m
+		}
+	}
+	var lastErr error
+	for {
+		if lerr := p.listening(); lerr != nil {
+			lastErr = lerr
+			say("waiting for spillway to start…")
+		} else {
+			status, err := p.status()
+			switch {
+			case err == nil && (status == "" || status == admin.StatusReady):
+				return nil
+			case err == nil:
+				lastErr = fmt.Errorf("spillway is still starting (status %q)", status)
+				say("waiting for spillway to finish starting…")
+			case errors.Is(err, ErrAdminUnreachable):
+				// Admin binds before the proxy, so this is a daemon mid-restart.
+				lastErr = err
+				say("waiting for spillway to start…")
+			default:
+				return err // a real answer (e.g. 401): waiting will not fix it
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("gave up waiting %s: %w", timeout.Round(time.Second), lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("interrupted while waiting for spillway: %w", ctx.Err())
+		case <-time.After(interval):
+		}
+	}
+}
+
+// prepareCA waits for the daemon to be ready, and only then reads (or, if
+// somehow absent, creates) the CA pem the spawned CLI will trust.
+func prepareCA(ctx context.Context, p readyProbe, pemPath string, errOut io.Writer, timeout, interval time.Duration) (*mitm.CA, error) {
+	if err := waitReady(ctx, p, errOut, timeout, interval); err != nil {
+		return nil, err
+	}
+	ca, err := mitm.EnsureCA(pemPath, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ensure MITM CA: %w", err)
+	}
+	return ca, nil
+}
+
 // runClaude implements `spillway run`: spawn claude under the MITM proxy.
 func runClaude(args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	if err := probeListening(cfg); err != nil {
-		return err
-	}
-
 	pemPath, err := caPEMPath()
 	if err != nil {
 		return err
 	}
-	// probeListening above already requires the daemon (which mints the
-	// real chain for its actual host set) to be up, so this call only
-	// ever needs to confirm the pem it's about to hand the spawned CLI via
-	// NODE_EXTRA_CA_CERTS actually exists — no hosts of its own to demand.
-	ca, err := mitm.EnsureCA(pemPath, nil, nil)
+	// Wait for the daemon to be listening AND ready before touching the CA:
+	// it mints the real chain for its actual host set as its last init step,
+	// and a CA read earlier would be one it then replaces (see waitReady).
+	// Ctrl-C stops the wait; spawnCLI installs its own handler afterwards.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ca, err := prepareCA(ctx, daemonProbe(cfg), pemPath, os.Stderr, runWaitTimeout, time.Second)
+	stop()
 	if err != nil {
-		return fmt.Errorf("ensure MITM CA: %w", err)
+		return err
 	}
 	// Best-effort (issue #64): a combined system-roots + spillway-CA bundle
 	// for non-Node subprocesses. bundlePath is "" when this platform's

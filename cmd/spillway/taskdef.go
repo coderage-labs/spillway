@@ -55,6 +55,7 @@ func taskXML(binPath, logPath string) (string, error) {
 			StartWhenAvailable         bool   `xml:"StartWhenAvailable"`
 			Hidden                     bool   `xml:"Hidden"`
 			ExecutionTimeLimit         string `xml:"ExecutionTimeLimit"`
+			Priority                   int    `xml:"Priority"`
 			RestartOnFailure           struct {
 				Interval string `xml:"Interval"`
 				Count    int    `xml:"Count"`
@@ -85,6 +86,10 @@ func taskXML(binPath, logPath string) (string, error) {
 	// PT0S = no limit. The default is 72 hours, after which the scheduler
 	// would kill a perfectly healthy daemon.
 	doc.Settings.ExecutionTimeLimit = "PT0S"
+	// Issue #259: a task with no Priority runs at 7, below normal — the
+	// Task Scheduler's version of launchd's ProcessType Background, which was
+	// starving the daemon's own startup. 5 is the Normal class.
+	doc.Settings.Priority = 5
 	// The nearest thing to launchd's KeepAlive.
 	doc.Settings.RestartOnFailure.Interval = "PT1M"
 	doc.Settings.RestartOnFailure.Count = 3

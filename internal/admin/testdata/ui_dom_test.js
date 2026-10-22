@@ -454,7 +454,7 @@ global.localStorage = {
 // setInterval) — except buildSettings, which a test re-runs with a payload
 // the fixture cannot express. Published explicitly rather than by relaxing
 // the page's own strictness.
-eval(js + '\n;global.__page = { buildSettings, loadTankFilter };');
+eval(js + '\n;global.__page = { buildSettings, loadTankFilter, renderHold };');
 
 // Results live out here, and every exit path prints them. A throw used to
 // take the whole run with it, so a missing element crashed the harness
@@ -1374,6 +1374,19 @@ async function run() {
       !displayRule('\\.tank') && !displayRule('\\.panel') && !displayRule('\\.empty') && !displayRule('#tanks-empty');
 
     ACCOUNTS.pop();
+  }
+
+  // Issue #259: /api/state says "starting" while the daemon initialises. The
+  // page must say so, tolerate the zeroed rest, and clear the banner when ready.
+  {
+    const hold = document.getElementById('hold');
+    __page.renderHold({ status: 'starting', usable: 0, total: 0 });
+    ok['#259 a starting daemon shows the banner'] = hold.hidden === false &&
+      /starting/.test(JSON.stringify(hold.children.map(c => c.textContent)));
+    __page.renderHold({ status: 'ready', usable: 1, total: 1 });
+    ok['#259 a ready daemon clears the banner'] = hold.hidden === true;
+    __page.renderHold(null);
+    ok['#259 a failed state fetch leaves the banner hidden'] = hold.hidden === true;
   }
 
   ok['the harness ran to completion'] = true;

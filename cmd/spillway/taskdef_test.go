@@ -28,6 +28,7 @@ func TestTaskXMLIsValidAndComplete(t *testing.T) {
 		// The scheduler's default is a 72-hour limit, after which it kills a
 		// perfectly healthy daemon.
 		"<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+		"<Priority>5</Priority>",
 		// A laptop on battery still wants its proxy.
 		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
 		"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",

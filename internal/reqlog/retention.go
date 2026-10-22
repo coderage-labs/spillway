@@ -48,25 +48,24 @@ import (
 // them into request_totals before deleting anything.
 const RequestRetention = 14 * 24 * time.Hour
 
-// initRequestRetention creates the rollup table and prunes once, at every
-// open. Pruning here rather than only on a timer is the same reasoning
-// #104 applied to quota_samples: a daemon that only ever sees short-lived
-// restarts (the Homebrew cask restarts the service on every upgrade, issue
-// #34) would otherwise never prune at all.
+// initRequestRetention creates the rollup table. It does NOT prune: since
+// issue #259 the prune is Maintain's job, run in the background after the
+// daemon has bound its listeners, because on a large database under login-time
+// I/O contention it was a large part of a ~2 minute refused-connection window.
+// A daemon that only ever sees short-lived restarts (the Homebrew cask
+// restarts the service on every upgrade, issue #34) still prunes, because
+// Maintain runs once per process start, not once an hour.
 func (l *Log) initRequestRetention() error {
 	// One row per account, holding the summed counters of every request row
 	// that retention has since deleted. account is the PRIMARY KEY so the
 	// upsert in PruneRequests has something to conflict on.
-	if _, err := l.db.Exec(`CREATE TABLE IF NOT EXISTS request_totals (
+	_, err := l.db.Exec(`CREATE TABLE IF NOT EXISTS request_totals (
 		account TEXT PRIMARY KEY,
 		input_tokens INTEGER NOT NULL DEFAULT 0,
 		output_tokens INTEGER NOT NULL DEFAULT 0,
 		cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
 		cache_read_input_tokens INTEGER NOT NULL DEFAULT 0
-	)`); err != nil {
-		return err
-	}
-	_, err := l.PruneRequests(time.Now().Add(-RequestRetention))
+	)`)
 	return err
 }
 

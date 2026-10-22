@@ -185,6 +185,9 @@ type slHold struct {
 }
 
 type slState struct {
+	// Status is "starting" while the daemon is initialising (#259); the
+	// accounts endpoint 503s then, which is not "unreachable".
+	Status    string     `json:"status"`
 	Holding   *slHold    `json:"holding"`
 	Usable    int        `json:"usable"`
 	Total     int        `json:"total"`
@@ -438,7 +441,7 @@ func runStatusline(args []string) error {
 		if top := fitSession(p, sess, cols); top != "" {
 			fmt.Print(top + "\n")
 		}
-		fmt.Print(unreachable(p))
+		fmt.Print(failureMarker(p, st))
 		return nil
 	}
 	if len(list) == 0 {
@@ -456,6 +459,19 @@ func runStatusline(args []string) error {
 // account and the bars would be. Recognisably spillway, recognisably
 // without data, and dim so it never competes with the prompt.
 func unreachable(p palette) string { return p.dim("⛁ —") }
+
+// starting is the glyph for a daemon that answered but is still initialising
+// (#259): reachable, just not ready, so distinct from unreachable.
+func starting(p palette) string { return p.dim("⛁ starting") }
+
+// failureMarker picks the marker for a status line whose accounts fetch
+// failed: "starting" if /api/state said so, otherwise unreachable.
+func failureMarker(p palette, st slState) string {
+	if st.Status == "starting" {
+		return starting(p)
+	}
+	return unreachable(p)
+}
 
 // poolTrim enumerates the reductions the pool row may apply, lowest value
 // first. The order is the one agreed in #183: the spent count, then the
