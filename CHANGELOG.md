@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/coderage-labs/spillway/compare/v0.28.1...v0.29.0) (2026-10-22)
+
+
+### Features
+
+* **daemon:** bind listeners first, initialise after ([#259](https://github.com/coderage-labs/spillway/issues/259)) ([#260](https://github.com/coderage-labs/spillway/issues/260)) ([e412ce2](https://github.com/coderage-labs/spillway/commit/e412ce2249b2c8d13ce9ac80f0bf02ba036fdb0c))
+
 ## [0.28.1](https://github.com/coderage-labs/spillway/compare/v0.28.0...v0.28.1) (2026-10-22)
 
 
