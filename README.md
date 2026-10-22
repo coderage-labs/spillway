@@ -1760,14 +1760,16 @@ not supply one, and fails closed if it is required but missing.
   (default All).
   - **Attention** — needs you, not time: parked (disabled), a rejected
     refresh token, or an auth failure.
-  - **Available** — routing would pick it for at least one model family
-    right now. An account spent on fable but fine for Opus is Available (its
-    fable gauge already shows fable is out).
-  - **Spent** — neither: healthy, but it cannot serve any family until a
-    refill.
+  - **Spent** — exactly the tanks labelled spent or dry: the 5h or 7d
+    window is at or below the spill point, or the provider has refused it.
+    Such a tank can still serve as a last resort (the spill point is a
+    preference), but it is not where routing wants to send work.
+  - **Available** — the rest: above the spill point on 5h and 7d. An account
+    spent only on fable is Available (its fable gauge already shows fable is
+    out).
 - `GET /api/accounts` — state, `bucket` (`available` / `spent` /
-  `attention`, the filter classes above, computed from the pool's own routing
-  predicates, not from percentages), quota windows (each flagged
+  `attention`, the filter classes above, computed server-side from the same
+  predicates as `overThreshold` and routing), quota windows (each flagged
   `expired: true` once its reset has passed with no fresh reading since),
   in-flight, last model served
 - `GET /api/requests?limit=N` — recent requests

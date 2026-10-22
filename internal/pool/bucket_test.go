@@ -24,6 +24,12 @@ func TestBucketOf(t *testing.T) {
 			p.MarkWindowRejected(a, "7d-fable", until)
 			p.MarkWindowRejected(a, "5h", until)
 		}, BucketSpent},
+		{"general window below the spill point is spent, though not refused", func(p *Pool, a *Account) {
+			a.SetQuotaWindows([]QuotaWindow{{Name: "7d", Limit: 1, Used: 0.99, Source: "headers", FetchedAt: now}})
+		}, BucketSpent},
+		{"fable-only below the spill point stays available", func(p *Pool, a *Account) {
+			a.SetQuotaWindows([]QuotaWindow{{Name: "7d-fable", Limit: 1, Used: 0.99, Source: "headers", FetchedAt: now}})
+		}, BucketAvailable},
 		{"exhausted is spent", func(p *Pool, a *Account) {
 			p.MarkExhausted(a, until)
 		}, BucketSpent},
