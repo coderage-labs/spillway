@@ -235,6 +235,56 @@ What an upgrade keeps and drops:
   change that affects how `spillway run` launches a client (its environment,
   e.g. `API_TIMEOUT_MS`) only reaches sessions started after the upgrade.
 
+## Startup
+
+The daemon **binds both listeners first**, straight after loading the config
+and opening its log, and only then reads the secret store, opens the request
+log, seeds quota state and mints the MITM CA. A client therefore never gets
+"connection refused" while the daemon is up, even when login-time contention
+makes that initialisation take a minute or two (issue #259: a daemon that
+bound only after ~2 minutes failed a terminal that resumes Claude sessions on
+launch).
+
+Until initialisation finishes:
+
+- **Proxy port:** every request — inference, passthrough and `CONNECT` alike —
+  is *held*, not refused, and released the moment the daemon is ready. A held
+  request waits for at most `pool.holdMax` (5 minutes if that is `0`), then
+  gets a `503` with `Retry-After`; if the client goes away first the hold is
+  dropped. They are all held, rather than the non-pooled ones passing straight
+  through, because whether a host is intercepted depends on the account set
+  and the CA, which do not exist yet.
+- **Admin port:** `GET /api/state` answers `{"status":"starting", …}` (every
+  other field is zero and means nothing). Every other endpoint, and the
+  dashboard page, answers `503` with `Retry-After`. Once ready, `/api/state`
+  reports `"status":"ready"`. Treat anything other than `ready` as "retry".
+  Clients that read `/api/state` — the status line, `spillway status` — show
+  their usual "no answer yet" until it flips.
+
+The request log's retention work (the 14-day prune of `requests` and
+`quota_samples`) runs in a background goroutine after startup instead of
+inside `Open`. Lifetime cache totals are unaffected: they are seeded in `Open`,
+before that goroutine starts, and a prune only moves counters from `requests`
+into `request_totals` without changing their sum. Row-level views (the
+activity chart, prefix-drift) may include rows older than 14 days until it
+finishes, which is seconds on a normal database.
+
+Each startup step is logged at INFO as `startup phase` with its own `elapsed`
+and the total `sinceStart` — `config`, `log open`, `bind`, `secrets`, `pool`
+(the per-account keychain reads), `reqlog open`, `quota seed`, `CA` and
+`ready` — plus one line for the time the process existed *before* `main` (exec,
+Gatekeeper, I/O throttling), read from the OS. A daemon that is bound but still
+initialising warns every 30 seconds with the phase it is in.
+
+On macOS the launchd agent runs with `ProcessType` **Standard**. It used to be
+`Background`, which throttles CPU and I/O — precisely what made the keychain
+reads and the SQLite open crawl at login. `spillway service install` rewrites
+the plist every time, so an upgraded install picks this up when the cask's
+postflight (or you) re-run it. Linux's systemd user unit sets no `Nice` or
+`IOSchedulingClass`, so there was nothing to change there. On Windows the
+Scheduled Task now sets `Priority` 5 (Normal) rather than inheriting the
+scheduler's default of 7 (below normal).
+
 ## Quickstart
 
 ```sh
@@ -1779,6 +1829,8 @@ not supply one, and fails closed if it is required but missing.
   part of the request prefix changed between consecutive requests in a
   session, and the cache-token volume that went with it (see "Prefix
   instability" below)
+- `GET /api/state`'s `status` is `starting` while the daemon is still
+  initialising and `ready` once it serves (see "Startup").
 - `GET /api/events` — SSE stream of rotation/quota events
 - `POST /api/pin` `{"account":"…","force":false}` / `DELETE /api/pin` — pin
   selection to one account, or release it. `409` is a refusal `force` can
@@ -1868,7 +1920,8 @@ permits four mutations and this adds none.
 
 The same database's `quota_samples` table — the headroom history behind the
 dashboard's chart and startup quota seeding — is pruned to the last **14
-days**, both once at every startup and on an hourly timer thereafter. The
+days**, once in the background shortly after every startup (never in front of the
+listeners — see "Startup") and on an hourly timer thereafter. The
 dashboard's own history view tops out at 7 days (`?hours=168`), so this keeps
 a full 2x margin past the longest thing that reads it. Nothing pruned this
 table before; on one real installation it grew to 57,617 rows (40 MB)

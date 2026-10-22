@@ -97,15 +97,10 @@ func (l *Log) initQuota() error {
 		ON quota_samples (account, window, ts)`); err != nil {
 		return err
 	}
-	// Bound the table itself, not just the index that makes scanning it
-	// fast — see QuotaRetention. Run at every open, not only on a timer, so
-	// a database that only ever sees short-lived restarts (the Homebrew
-	// cask restarts the service on every upgrade, issue #34) still gets
-	// pruned regularly.
-	if _, err = l.db.Exec(`DELETE FROM quota_samples WHERE ts < ?`,
-		time.Now().Add(-QuotaRetention).UnixMilli()); err != nil {
-		return err
-	}
+	// The retention DELETE that used to sit here moved to Maintain (issue
+	// #259): it ran before the listeners bound, on every start. The index
+	// above, and the two cheap renames below (which SeedQuota's reading of
+	// window names depends on), stay.
 	// Kimi's 7-day window used to be recorded as "weekly", before window
 	// names were normalised onto Claude's 5h/7d vocabulary. The name is part
 	// of the row, so without this the same window draws as two series that

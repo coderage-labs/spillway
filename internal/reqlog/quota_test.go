@@ -622,7 +622,7 @@ func TestPruneQuotaDeletesOnlyRowsOlderThanCutoff(t *testing.T) {
 	}
 }
 
-// initQuota prunes on every Open, not only on main's periodic ticker — a
+// Maintain (run once per process start, issue #259), not only main's periodic ticker, prunes — a
 // database that only ever sees short-lived restarts must still shrink. This
 // must not take the seed's own most-recent sample with it: a sample well
 // within QuotaRetention (and within its own reset) has to survive an Open.
@@ -643,11 +643,15 @@ func TestOpenPruneDoesNotDeleteASampleSeedingStillNeeds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l2, err := Open(path) // re-runs initQuota's prune
+	l2, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l2.Close()
+	// Issue #259: Open no longer prunes; the daemon runs Maintain after bind.
+	if _, _, err := l2.Maintain(now); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := l2.LatestQuotaSamples(context.Background())
 	if err != nil {

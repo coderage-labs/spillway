@@ -1753,6 +1753,22 @@ function until(iso) {
 
 function renderHold(st) {
   const el = document.getElementById("hold");
+  // Issue #259: the daemon binds before it has finished initialising, and
+  // says so. Every other endpoint is 503 until then (the fetches below already
+  // map that to "no data"), so say why the page is empty rather than leave it
+  // looking broken. Any status other than "ready" (or none, from an older
+  // daemon) is treated the same way: not ready yet, the next poll retries.
+  if (st && st.status && st.status !== "ready") {
+    el.innerHTML = "";
+    const head = document.createElement("strong");
+    head.textContent = "spillway is starting";
+    const sub = document.createElement("span");
+    sub.textContent = "loading accounts and history \u2014 this page will fill in by itself";
+    el.appendChild(head);
+    el.appendChild(sub);
+    el.hidden = false;
+    return;
+  }
   if (!st || !st.holding || !st.holding.count) { el.hidden = true; return; }
   const n = st.holding.count;
   el.innerHTML = "";

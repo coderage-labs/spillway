@@ -63,6 +63,13 @@ func legacyErrLog() (string, error) {
 
 // plistXML renders the launchd agent. KeepAlive restarts the daemon if it
 // dies; RunAtLoad starts it at login.
+//
+// ProcessType is Standard, not Background (issue #259). Background gets
+// throttled CPU and I/O, which is exactly what made the keychain reads and
+// the SQLite open crawl while everything else started at login — and spillway
+// serves interactive traffic, so it is not background work. serviceInstall
+// rewrites the plist unconditionally, so an upgraded install picks this up the
+// next time `spillway service install` runs (the Homebrew cask does this).
 func plistXML(binPath, daemonLog, launchdLog string) string {
 	esc := func(s string) string {
 		r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
@@ -86,7 +93,7 @@ func plistXML(binPath, daemonLog, launchdLog string) string {
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Standard</string>
   <key>StandardOutPath</key><string>` + esc(launchdLog) + `</string>
   <key>StandardErrorPath</key><string>` + esc(launchdLog) + `</string>
 </dict>

@@ -280,10 +280,10 @@ func Open(path string) (*Log, error) {
 	// startup path rather than lazily on the first call: a lazy seed would
 	// put the 0.7s back into whichever /api/accounts request happened to
 	// come first after a restart, which is precisely the call that was
-	// blanking the status line. It is bounded by RequestRetention (the
-	// prune above has already run), it lands before either listener binds,
-	// and it is small beside the index build and the prune Open already
-	// does there.
+	// blanking the status line. It is a single covering-index scan, and since
+	// issue #259 it is the only sizeable thing left here: the prune moved to
+	// Maintain (run after bind), and is safe to run later because it moves
+	// counters without changing their sum — see Maintain.
 	if err := l.seedTotals(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("seed request totals: %w", err)
@@ -297,6 +297,38 @@ func Open(path string) (*Log, error) {
 		return nil, err
 	}
 	return l, nil
+}
+
+// Maintain runs the retention work Open used to do inline (issue #259): the
+// requests prune (rolling its counters into request_totals in the same
+// transaction) and the quota_samples retention delete. The daemon calls it in
+// a goroutine once the listeners are bound, so a large database no longer
+// delays accepting connections.
+//
+// Correctness of what reads these tables in the meantime:
+//   - Lifetime cache totals: Open still seeds them (seedTotals) BEFORE
+//     returning, and Maintain only starts after Open returns, so the two never
+//     overlap. A prune moves counters from requests into request_totals
+//     without changing their sum, so the seeded in-memory totals are exact
+//     before, during and after it (seeding over the not-yet-pruned table just
+//     scans somewhat more rows on the first start after an upgrade).
+//   - Row-level views (PrefixDrift, RotationCost, the activity histogram) and
+//     quota history may include rows older than retention until Maintain
+//     finishes; they are all bounded by a time window at query time.
+//   - Concurrent Record calls wait on the SQLite write lock (busy_timeout 5s)
+//     while the prune transaction commits.
+//
+// It returns the first error but always attempts both steps.
+func (l *Log) Maintain(now time.Time) (requests, quota int64, err error) {
+	requests, rerr := l.PruneRequests(now.Add(-RequestRetention))
+	quota, qerr := l.PruneQuota(now.Add(-QuotaRetention))
+	if rerr != nil {
+		return requests, quota, fmt.Errorf("prune requests: %w", rerr)
+	}
+	if qerr != nil {
+		return requests, quota, fmt.Errorf("prune quota samples: %w", qerr)
+	}
+	return requests, quota, nil
 }
 
 // Close closes the database.

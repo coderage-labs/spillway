@@ -200,3 +200,52 @@ func TestServiceInstallUsesSelfPath(t *testing.T) {
 		}
 	}
 }
+
+// Issue #259: Background gets throttled CPU and I/O, which is what made the
+// keychain reads and the SQLite open crawl at login. spillway serves
+// interactive traffic.
+func TestPlistProcessTypeIsStandard(t *testing.T) {
+	x := plistXML("/usr/local/bin/spillway", "/tmp/daemon.log", "/tmp/launchd.log")
+	if got := plistString(t, x, "ProcessType"); got != "Standard" {
+		t.Errorf("ProcessType = %q, want Standard", got)
+	}
+	if strings.Contains(x, "Background") {
+		t.Error("plist still mentions Background")
+	}
+}
+
+// An upgraded install has a plist on disk saying Background. `service
+// install` (what the Homebrew cask runs on upgrade) must replace it. HOME is
+// a temp dir and launchctl is faked, so neither the real LaunchAgents folder
+// nor launchd is touched.
+func TestServiceInstallRewritesAnExistingBackgroundPlist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	fakeLaunchctl(t, func(...string) (string, error) { return "", nil })
+
+	plist, err := servicePlistPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(plist, home) {
+		t.Fatalf("plist path %q is outside the temp HOME — refusing to write", plist)
+	}
+	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := `<plist><dict><key>ProcessType</key><string>Background</string></dict></plist>`
+	if err := os.WriteFile(plist, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := serviceInstall(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(plist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plistString(t, string(b), "ProcessType"); got != "Standard" {
+		t.Errorf("after install ProcessType = %q, want Standard (the old plist was not rewritten)", got)
+	}
+}

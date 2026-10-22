@@ -24,6 +24,11 @@ type holdJSON struct {
 
 // stateJSON is the /api/state response.
 type stateJSON struct {
+	// Status is "starting" while the daemon is still initialising (issue
+	// #259: the listeners bind first, before the pool exists — every other
+	// field is then its zero value and means nothing) and "ready" once it
+	// serves. Clients must treat any other value as "not ready, retry".
+	Status string `json:"status"`
 	// Holding is present only while something is actually parked.
 	Holding *holdJSON `json:"holding,omitempty"`
 	// Usable is the number of accounts the selector will pick from
@@ -106,7 +111,7 @@ type unpooledJSON struct {
 }
 
 func (s *Server) state() stateJSON {
-	var st stateJSON
+	st := stateJSON{Status: StatusReady}
 	st.Pinned = s.pool.Pinned()
 	for _, a := range s.pool.Accounts() {
 		st.Total++

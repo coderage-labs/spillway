@@ -165,7 +165,14 @@ func usage() {
 	}, "\n"))
 }
 
+// serverSecrets opens the secret store for the daemon. A variable so a test can
+// substitute a slow, in-memory store (issue #259's slow-init test) without
+// ever touching the user's keychain.
+var serverSecrets = openSecrets
+
 func runServer(args []string) error {
+	ph := newStartupPhases()
+	ph.begin("config")
 	// --config before anything reads it. The service definitions pass this
 	// when they were installed against a non-default config: without it a
 	// `SPILLWAY_CONFIG=/x spillway service install` produced a service that
@@ -180,6 +187,8 @@ func runServer(args []string) error {
 	if err != nil {
 		return err
 	}
+	ph.done("config")
+	ph.begin("log open")
 
 	// --log-file exists for the Windows Scheduled Task, which cannot
 	// redirect a stream itself. It used to get one by running the daemon
@@ -216,6 +225,10 @@ func runServer(args []string) error {
 	logLevel.Set(parseLevel(cfg.Log.Level))
 	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: logLevel}))
 
+	ph.attach(logger)
+	ph.done("log open")
+	go logProcessStartGap(logger)
+
 	// Issue #104: a silent hang anywhere between here and the two
 	// ListenAndServe/Serve calls below used to look, from outside, exactly
 	// like a healthy daemon — launchd reports the job running, and nothing
@@ -228,12 +241,91 @@ func runServer(args []string) error {
 	go func() { bindWG.Wait(); close(listenersBound) }()
 	go startupWatchdog(logger, listenersBound, startupWatchdogTimeout)
 
-	store := openSecrets()
-	// Scrub any inline tokens from an older config into the keychain (§5).
+	// Issue #259: BIND FIRST. Both listeners open here, straight after
+	// config and log setup, and serve a startup handler until init below
+	// finishes: the proxy holds every request (proxy.Gate), the admin port
+	// answers /api/state with status "starting". Nothing slow — the keychain
+	// reads, the request log, the quota seed — is allowed in front of this,
+	// so a client never sees connection refused while the daemon is up.
+	ph.begin("bind")
 	cfgPath, err := config.Path()
 	if err != nil {
 		return err
 	}
+	adminAddr := cfg.Admin.Addr
+	if adminAddr == "" {
+		adminAddr = admin.DefaultAddr
+	}
+	tokenPath := filepath.Join(filepath.Dir(cfgPath), "spillway-admin-token")
+	// Loopback needs no token: it would only stop processes running as
+	// another user, at the cost of a secret in the URL and a dead browser tab
+	// on every restart. Binding anywhere else makes one mandatory.
+	token := cfg.Admin.Token
+	// A unix socket is loopback by construction — it has no network presence
+	// at all, and its file mode is the access control.
+	loopback := admin.IsLoopback(adminAddr) || admin.IsUnix(adminAddr)
+
+	gate := proxy.NewGate(logger, cfg.PoolHoldMax())
+	defer gate.Close()
+	adminStarting := admin.NewStarting()
+	adminSrv := &http.Server{Handler: adminStarting}
+	// A unix socket is the tightest option (§5): file permissions replace
+	// the token entirely, and nothing on the network can reach it at all.
+	adminLn, adminDesc, err := admin.Listen(adminAddr)
+	if err != nil {
+		return fmt.Errorf("admin listener: %w", err)
+	}
+	bindWG.Done() // one of two listeners bound — see listenersBound above
+	go func() {
+		switch {
+		case admin.IsUnix(adminAddr):
+			logger.Info("admin listener", "socket", adminDesc, "auth", "unix file permissions")
+		case loopback:
+			logger.Info("admin listener", "addr", adminDesc, "auth", "none (loopback)")
+		default:
+			logger.Warn("admin listener is NOT loopback — token required",
+				"addr", adminDesc, "token_file", tokenPath)
+		}
+		if err := adminSrv.Serve(adminLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("admin listener died", "err", err)
+		}
+	}()
+
+	addr := net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))
+	srv := &http.Server{Addr: addr, Handler: gate}
+	// Split from ListenAndServe so the bind itself — the thing the startup
+	// watchdog and #104's bind-vs-seed ordering both care about — happens
+	// here, separately from Serve, which blocks for the life of the daemon.
+	proxyLn, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("proxy listener: %w", err)
+	}
+	bindWG.Done() // both listeners bound — see listenersBound above
+	proxyDone := make(chan error, 1)
+	go func() {
+		err := srv.Serve(proxyLn)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		proxyDone <- err
+	}()
+	// Validate has already refused a non-loopback bind without the opt-in, so
+	// reaching here off loopback means the operator asked for it. Say plainly
+	// what they have exposed: unlike the admin port there is no token to fall
+	// back on, and the credential goes out with every forwarded request.
+	if !netaddr.IsLoopback(cfg.Proxy.Host) {
+		logger.Warn("proxy listener is NOT loopback and has NO authentication — "+
+			"anyone who can reach it spends this pool's quota and sees every prompt "+
+			"(proxy.allowRemote is set)", "addr", addr)
+	}
+	ph.done("bind")
+	logger.Info("listeners bound — holding requests until initialisation completes", "addr", "http://"+addr)
+	initDone := make(chan struct{})
+	go initWatchdog(logger, initDone, ph, initWatchdogInterval)
+
+	ph.begin("secrets")
+	store := serverSecrets()
+	// Scrub any inline tokens from an older config into the keychain (§5).
 	if migrated, migratedChannels, err := config.MigrateInlineSecrets(cfgPath, store); err != nil {
 		logger.Warn("secret migration failed", "err", err)
 	} else {
@@ -255,11 +347,17 @@ func runServer(args []string) error {
 	for _, w := range notifyWarnings {
 		logger.Warn(w)
 	}
+	ph.done("secrets")
 
+	// buildPool is where the per-account keychain reads happen (0.4–6.5s
+	// each in the #259 timeline), so it is its own phase.
+	ph.begin("pool")
 	p, err := buildPool(cfg, store, logger, time.Now(), notifier)
 	if err != nil {
 		return err
 	}
+	ph.done("pool")
+	ph.begin("reqlog open")
 
 	// Request log + event broker + admin listener (§5: separate trust
 	// class from the proxy port).
@@ -268,6 +366,22 @@ func runServer(args []string) error {
 		return fmt.Errorf("open request log: %w", err)
 	}
 	defer rl.Close()
+	ph.done("reqlog open")
+	// Issue #259: the retention prunes Open used to run inline now run in the
+	// background, with the listeners already bound. See reqlog.Log.Maintain
+	// for why nothing that reads those tables is served wrong meanwhile.
+	go func() {
+		start := time.Now()
+		reqs, quota, err := rl.Maintain(time.Now())
+		if err != nil {
+			logger.Warn("request log maintenance failed", "err", err)
+			return
+		}
+		logger.Info("request log maintenance done",
+			"requestsPruned", reqs, "quotaSamplesPruned", quota,
+			"elapsed", time.Since(start).Round(time.Millisecond))
+	}()
+	ph.begin("quota seed")
 
 	// Quota windows live in memory only, so every restart clears them to
 	// nothing — which used to mean an account that is spent with overage
@@ -278,16 +392,21 @@ func runServer(args []string) error {
 	//
 	// Issue #104: this used to run an unindexed query that took 34s+ on a
 	// real database, entirely before either listener bound — the daemon
-	// looked hung because it was. seedQuotaTimeout bounds it: SeedQuota is
-	// an optimisation (#34), not a correctness requirement, so a slow or
-	// stuck read here must not delay binding. A request that lands in the
-	// gap this leaves (bind happens before/without seeding) sees an
-	// unseeded account exactly like a genuinely new one — needsProbe treats
-	// it as unknown and probes once, the same cost #34 already accepted for
-	// that case, not a new one.
+	// looked hung because it was. The invariant #104 protects is that
+	// seeding must never be what keeps the daemon from accepting
+	// connections, and that a slow or stuck read here cannot wedge it.
+	// Issue #259 makes the first half structural: both listeners are already
+	// bound by the time this runs, so nothing here can delay a bind.
+	// seedQuotaTimeout still bounds it (SeedQuota is an optimisation (#34),
+	// not a correctness requirement), and the pool is only RELEASED to
+	// requests after it — the proxy gate holds them until the end of init —
+	// so the #104 gap (a request landing on an unseeded account and
+	// triggering a billed probe) no longer exists either.
 	seedCtx, cancelSeed := context.WithTimeout(context.Background(), seedQuotaTimeout)
 	accounts.SeedQuota(seedCtx, p, rl, time.Now(), logger)
 	cancelSeed()
+	ph.done("quota seed")
+	ph.begin("handler and admin wiring")
 
 	broker := events.New()
 
@@ -415,26 +534,12 @@ func runServer(args []string) error {
 		}
 	}()
 
-	adminAddr := cfg.Admin.Addr
-	if adminAddr == "" {
-		adminAddr = admin.DefaultAddr
-	}
-	tokenPath := filepath.Join(filepath.Dir(cfgPath), "spillway-admin-token")
-
-	// Loopback needs no token: it would only stop processes running as
-	// another user, at the cost of a secret in the URL and a dead browser tab
-	// on every restart. Binding anywhere else makes one mandatory.
-	token := cfg.Admin.Token
-	// A unix socket is loopback by construction — it has no network presence
-	// at all, and its file mode is the access control.
-	loopback := admin.IsLoopback(adminAddr) || admin.IsUnix(adminAddr)
 	if !loopback && token == "" {
 		token, err = admin.GenerateToken()
 		if err != nil {
 			return err
 		}
 	}
-	adminSrv := &http.Server{Handler: nil}
 	adminHandler := admin.New(p, rl, broker, token)
 	// Issue #66: expose whether a MITM CA regeneration this run performed
 	// has left a client stranded on the old anchor. handler.StaleCAWarning
@@ -502,35 +607,14 @@ func runServer(args []string) error {
 	adminHandler.EnableSettings(cfgPath, func(nc *config.Config) {
 		applier.apply(nc, "dashboard")
 	})
-	adminSrv.Handler = adminHandler
-	// A unix socket is the tightest option (§5): file permissions replace
-	// the token entirely, and nothing on the network can reach it at all.
-	adminLn, adminDesc, err := admin.Listen(adminAddr)
-	if err != nil {
-		return fmt.Errorf("admin listener: %w", err)
-	}
-	bindWG.Done() // one of two listeners bound — see listenersBound above
-	go func() {
-		switch {
-		case admin.IsUnix(adminAddr):
-			logger.Info("admin listener", "socket", adminDesc, "auth", "unix file permissions")
-		case loopback:
-			logger.Info("admin listener", "addr", adminDesc, "auth", "none (loopback)")
-		default:
-			logger.Warn("admin listener is NOT loopback — token required",
-				"addr", adminDesc, "token_file", tokenPath)
-		}
-		if err := adminSrv.Serve(adminLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("admin listener died", "err", err)
-		}
-	}()
-
 	// MITM mode: the CA and a leaf for every configured upstream host are
 	// minted once, up front, and the CA private key is discarded — no key
 	// at rest anywhere, in the keychain or on disk (issue #69; see
 	// internal/mitm/ca.go's package doc for why). handler.AllowedHosts()
 	// is the full host set NewHandler already computed from cfg + the
 	// pool's accounts. Failure degrades to base-URL mode only — loudly.
+	ph.done("handler and admin wiring")
+	ph.begin("CA")
 	pemPath, err := caPEMPath()
 	if err != nil {
 		return err
@@ -550,26 +634,7 @@ func runServer(args []string) error {
 		}
 	}
 
-	addr := net.JoinHostPort(cfg.Proxy.Host, strconv.Itoa(cfg.Proxy.Port))
-	srv := &http.Server{Addr: addr, Handler: handler}
-	// Split from ListenAndServe so the bind itself — the thing the startup
-	// watchdog and #104's bind-vs-seed ordering both care about — happens
-	// here, separately from Serve, which blocks for the life of the daemon.
-	proxyLn, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("proxy listener: %w", err)
-	}
-	bindWG.Done() // both listeners bound — see listenersBound above
-
-	// Validate has already refused a non-loopback bind without the opt-in, so
-	// reaching here off loopback means the operator asked for it. Say plainly
-	// what they have exposed: unlike the admin port there is no token to fall
-	// back on, and the credential goes out with every forwarded request.
-	if !netaddr.IsLoopback(cfg.Proxy.Host) {
-		logger.Warn("proxy listener is NOT loopback and has NO authentication — "+
-			"anyone who can reach it spends this pool's quota and sees every prompt "+
-			"(proxy.allowRemote is set)", "addr", addr)
-	}
+	ph.done("CA")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -596,16 +661,22 @@ func runServer(args []string) error {
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		gate.Close() // a request still held for init must not stall Shutdown
 		_ = srv.Shutdown(shutdownCtx)
 		_ = adminSrv.Shutdown(shutdownCtx)
 	}()
 
+	// Initialisation is complete: install the real handlers. Everything the
+	// gate held is released here, and /api/state flips from "starting" to
+	// "ready".
+	adminStarting.Ready(adminHandler)
+	gate.Ready(handler)
+	close(initDone)
+	ph.done("ready")
 	logger.Info("spillway listening", "addr", "http://"+addr,
-		"upstream", cfg.Upstream, "build", buildInfo())
-	if err := srv.Serve(proxyLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
+		"upstream", cfg.Upstream, "build", buildInfo(),
+		"startupTotal", time.Since(processStart).Round(time.Millisecond))
+	return <-proxyDone
 }
 
 // sampleQuota writes one quota_samples row per account/window, using each
