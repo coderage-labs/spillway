@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.28.0](https://github.com/coderage-labs/spillway/compare/v0.27.0...v0.28.0) (2026-10-22)
+
+
+### Features
+
+* **dashboard:** filter tanks by Available / Spent / Attention ([#254](https://github.com/coderage-labs/spillway/issues/254)) ([#255](https://github.com/coderage-labs/spillway/issues/255)) ([9dfb58c](https://github.com/coderage-labs/spillway/commit/9dfb58ce12518b5d5d1af39f5a690188ada118d0))
+
+
+### Documentation
+
+* Claude Desktop setup matches the real UI, with screenshots ([#248](https://github.com/coderage-labs/spillway/issues/248)) ([#252](https://github.com/coderage-labs/spillway/issues/252)) ([719dce6](https://github.com/coderage-labs/spillway/commit/719dce648d315e4ef5a00b0ad9dad0292c07266e))
+
 ## [0.27.0](https://github.com/coderage-labs/spillway/compare/v0.26.3...v0.27.0) (2026-10-15)
 
 
