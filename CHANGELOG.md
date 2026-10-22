@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.1](https://github.com/coderage-labs/spillway/compare/v0.28.0...v0.28.1) (2026-10-22)
+
+
+### Fixes
+
+* **dashboard:** Spent filter matches the tank's spent label ([#254](https://github.com/coderage-labs/spillway/issues/254)) ([#257](https://github.com/coderage-labs/spillway/issues/257)) ([36357a2](https://github.com/coderage-labs/spillway/commit/36357a285b8a10ce305003fd86020f44a87a5bd2))
+
 ## [0.28.0](https://github.com/coderage-labs/spillway/compare/v0.27.0...v0.28.0) (2026-10-22)
 
 
