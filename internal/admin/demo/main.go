@@ -37,11 +37,17 @@ import (
 
 func main() {
 	hold := flag.Bool("hold", false, "serve the dry-pool / hold-banner state instead of the healthy one")
+	buckets := flag.Bool("buckets", false, "add a spent and an auth-failed account so every tank-filter bucket (#254) has a tank")
 	flag.Parse()
 
 	now := time.Now()
 	work, labs, side, kimi := buildAccounts(now, *hold)
 	accounts := []*pool.Account{work, labs, side, kimi}
+	var spent, dead *pool.Account
+	if *buckets {
+		spent, dead = buildBucketAccounts(now)
+		accounts = append(accounts, spent, dead)
+	}
 
 	p := pool.New(accounts, now)
 	p.Apply(pool.Settings{AllowOverage: true, CrossProvider: !*hold})
@@ -58,6 +64,13 @@ func main() {
 		release = p.BeginHold(now.Add(22 * time.Minute))
 	} else if err := p.Pin("you@acme.example", false); err != nil {
 		log.Printf("demo: pin: %v", err)
+	}
+	if *buckets {
+		// Spent: every family rejected until a refill. Attention: dead
+		// credential, which no amount of waiting fixes.
+		p.MarkWindowRejected(spent, "5h", now.Add(95*time.Minute))
+		p.MarkWindowRejected(spent, "7d-fable", now.Add(95*time.Minute))
+		dead.Disable()
 	}
 	defer release() // never reached past ListenAndServe, harmless if it were
 
@@ -90,6 +103,25 @@ func main() {
 
 	log.Printf("demo: serving %s pool on http://127.0.0.1:7699", map[bool]string{true: "hold", false: "healthy"}[*hold])
 	log.Fatal(http.ListenAndServe("127.0.0.1:7699", srv))
+}
+
+// buildBucketAccounts returns the two extra tanks -buckets adds: one fully
+// spent, one whose credential has died, so the Spent and Attention filter
+// chips (#254) have something to show.
+func buildBucketAccounts(now time.Time) (spent, dead *pool.Account) {
+	spent = pool.NewAccount("you@spent.example", pool.SourceYAML, "t", "", 0, "")
+	spent.Type = "claude-oauth"
+	spent.SetLabel("spent")
+	spent.SetPriority(6)
+	spent.SetQuotaWindows([]pool.QuotaWindow{
+		{Name: "5h", Limit: 1, Used: 1, Source: "headers", ResetAt: now.Add(95 * time.Minute), FetchedAt: now},
+		{Name: "7d", Limit: 1, Used: 0.7, Source: "headers", ResetAt: now.Add(2*24*time.Hour + 3*time.Hour), FetchedAt: now},
+	})
+	dead = pool.NewAccount("you@expired.example", pool.SourceYAML, "t", "", 0, "")
+	dead.Type = "claude-oauth"
+	dead.SetLabel("expired")
+	dead.SetPriority(7)
+	return spent, dead
 }
 
 func demoConfigYAML(hold bool) string {

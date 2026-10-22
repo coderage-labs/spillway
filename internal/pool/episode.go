@@ -128,22 +128,28 @@ func (p *Pool) FamilyHasCapacity(family string) bool {
 	defer p.mu.Unlock()
 	now := time.Now()
 	for _, a := range p.accounts {
-		if !a.eligible() {
-			continue
+		if p.accountHasFamilyCapacityLocked(a, family, now) {
+			return true
 		}
-		model, ok := familyRepresentativeModel(a, family)
-		if !ok {
-			continue // this account's provider has nothing to do with family
-		}
-		if p.windowRejectionExcludes(a, model, now) {
-			continue
-		}
-		if p.wouldBill(a) {
-			continue
-		}
-		return true
 	}
 	return false
+}
+
+// accountHasFamilyCapacityLocked is FamilyHasCapacity's per-account body
+// (issue #254 reuses it for the dashboard's buckets, so the two can never
+// disagree). Assumes p.mu is held.
+func (p *Pool) accountHasFamilyCapacityLocked(a *Account, family string, now time.Time) bool {
+	if !a.eligible() {
+		return false
+	}
+	model, ok := familyRepresentativeModel(a, family)
+	if !ok {
+		return false // this account's provider has nothing to do with family
+	}
+	if p.windowRejectionExcludes(a, model, now) {
+		return false
+	}
+	return !p.wouldBill(a)
 }
 
 // EarliestFamilyReset reports the soonest moment ANY account could regain

@@ -30,17 +30,21 @@ const ACCOUNTS = [{
   // is visible. It was never measured, so the provenance column must say so
   // rather than "measured".
   name: 'you@example-three.com', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 0,
+  // #254: fable-only rejected is still Available (the server decides, not the page).
+  bucket: 'available',
   quotaWindows: [
     { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now + 6 * 3600e3).toISOString(), source: 'rejected' },
   ],
 }, {
   name: 'you@example-one.com', label: 'work', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 1,
+  bucket: 'available',
   quotaWindows: [{ name: '5h', limit: 1, used: 0.42, resetAt: new Date(now + 3600e3).toISOString(), source: 'headers' }],
   // Issue #110: cache hit rate and create/read volume, beside burn/h and
   // dry-in in the same figures row.
   cacheHitRate: 0.304, cacheCreateTokens: 4165, cacheReadTokens: 1816,
 }, {
   name: 'you@example-two.com', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 0,
+  bucket: 'spent',
   quotaWindows: [
     { name: '5h', limit: 1, used: 0.20, resetAt: new Date(now + 7200e3).toISOString(), source: 'poll' },
     // Fully spent, refilling in two hours: the dry-tank countdown case.
@@ -434,6 +438,15 @@ global.document = {
 global.location = { search: '?token=T', href: '' };
 global.sessionStorage = { getItem: () => 'T', setItem() {}, removeItem() {} };
 global.window = global;
+// localStorage (#254): Map-backed, with a switch that makes every access
+// throw the way a blocked-storage browser does. Pre-seeded with a saved
+// choice so the FIRST render exercises the restore path, not just the default.
+const storeData = new Map([['spillway-tank-filter', 'spent']]);
+const store = { broken: false };
+global.localStorage = {
+  getItem: (k) => { if (store.broken) throw new Error('SecurityError'); return storeData.has(k) ? storeData.get(k) : null; },
+  setItem: (k, v) => { if (store.broken) throw new Error('SecurityError'); storeData.set(k, String(v)); },
+};
 
 // The page declares "use strict", so its declarations stay inside the eval's
 // own scope and nothing here can name them. Everything below reaches the
@@ -441,7 +454,7 @@ global.window = global;
 // setInterval) — except buildSettings, which a test re-runs with a payload
 // the fixture cannot express. Published explicitly rather than by relaxing
 // the page's own strictness.
-eval(js + '\n;global.__page = { buildSettings };');
+eval(js + '\n;global.__page = { buildSettings, loadTankFilter };');
 
 // Results live out here, and every exit path prints them. A throw used to
 // take the whole run with it, so a missing element crashed the harness
@@ -1293,6 +1306,74 @@ async function run() {
     ok['a config value beyond the ceiling widens the slider, not the other way round'] =
       !!low && parseFloat(low.getAttribute('min')) === 0 &&
       parseFloat(low.getAttribute('max')) === 0.7 && parseFloat(low.value) === 0.7;
+  }
+
+  // ── tank filter chips (#254) ──────────────────────────────────────────
+  {
+    const chipsOf = () => els['tank-filters'].children;
+    const chip = (label) => chipsOf().find(c => c.textContent.startsWith(label));
+    const visible = () => els.accounts.children.filter(c => !c.hidden).map(c => c.dataset.acct);
+    const repoll = async () => { if (pollFn) { await pollFn(); await new Promise(r => setTimeout(r, 150)); } };
+    const emptyEl = () => els['tanks-empty'];
+
+    // Counts come from the server's bucket, in All/Available/Spent/Attention order.
+    ok['#254 chips render in order with counts'] =
+      JSON.stringify(chipsOf().map(c => c.textContent)) ===
+      JSON.stringify(['All 3', 'Available 2', 'Spent 1', 'Attention 0']);
+
+    // The saved choice ('spent', pre-seeded) is restored on first render:
+    // that chip is pressed, only that bucket's tank shows, priority order kept.
+    ok['#254 a saved choice is restored on load'] =
+      chip('Spent').getAttribute('aria-pressed') === 'true' && chip('All').getAttribute('aria-pressed') === 'false' &&
+      JSON.stringify(visible()) === JSON.stringify(['you@example-two.com']);
+
+    // Available keeps the payload's CURRENT order (earlier tests reversed it),
+    // which differs from the fixture's declaration order.
+    chip('Available')._on.click();
+    const wantAvail = ACCOUNTS.filter(a => a.bucket === 'available').map(a => a.name);
+    ok['#254 Available shows only available tanks, in payload order'] =
+      wantAvail.length === 2 && JSON.stringify(visible()) === JSON.stringify(wantAvail);
+    ok['#254 the choice is persisted'] = storeData.get('spillway-tank-filter') === 'available';
+    ok['#254 a non-empty filter shows no empty-state'] = emptyEl().hidden === true;
+
+    // Nothing matches Attention yet: empty-state names it, no card shows.
+    chip('Attention')._on.click();
+    ok['#254 an empty filter shows the empty-state line'] =
+      visible().length === 0 && emptyEl().hidden === false &&
+      emptyEl().textContent === 'No tanks need attention.';
+
+    // A disabled account turns up; the same filter now lists it and the
+    // empty-state goes away -- driven by the poll, not by a click.
+    ACCOUNTS.push({ name: 'you@example-dead.com', type: 'claude-oauth', source: 'yaml', state: 'disabled',
+                    inFlight: 0, bucket: 'attention', quotaWindows: [] });
+    await repoll();
+    ok['#254 counts follow the poll'] =
+      JSON.stringify(chipsOf().map(c => c.textContent)) ===
+      JSON.stringify(['All 4', 'Available 2', 'Spent 1', 'Attention 1']);
+    ok['#254 Attention lists the account and hides the empty-state'] =
+      JSON.stringify(visible()) === JSON.stringify(['you@example-dead.com']) && emptyEl().hidden === true;
+
+    chip('All')._on.click();
+    ok['#254 All shows every tank'] = visible().length === 4 && storeData.get('spillway-tank-filter') === 'all';
+
+    // Storage that throws: default to All, and a click still filters.
+    store.broken = true;
+    ok['#254 blocked storage defaults to All'] = __page.loadTankFilter() === 'all';
+    chip('Spent')._on.click();
+    ok['#254 a click still filters when storage throws'] =
+      JSON.stringify(visible()) === JSON.stringify(['you@example-two.com']);
+    store.broken = false;
+    storeData.set('spillway-tank-filter', 'bogus');
+    ok['#254 an unknown stored value defaults to All'] = __page.loadTankFilter() === 'all';
+
+    // The fake models `hidden` as a bare property, but in a browser a CSS
+    // `display` on the same element beats the UA [hidden] rule -- the very
+    // trap .hold[hidden] exists for. Assert none of the hidden elements has one.
+    const displayRule = (sel) => new RegExp('(^|[\\s,}])' + sel + '\\s*\\{[^}]*\\bdisplay\\s*:', 'm').test(css);
+    ok['#254 no CSS display rule can override [hidden] on a tank or the empty-state'] =
+      !displayRule('\\.tank') && !displayRule('\\.panel') && !displayRule('\\.empty') && !displayRule('#tanks-empty');
+
+    ACCOUNTS.pop();
   }
 
   ok['the harness ran to completion'] = true;

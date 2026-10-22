@@ -398,11 +398,15 @@ func loopbackHost(hostport string) bool {
 
 // accountJSON is one account in the /api/accounts response.
 type accountJSON struct {
-	Name           string     `json:"name"`
-	Label          string     `json:"label,omitempty"`
-	Type           string     `json:"type"`
-	Source         string     `json:"source"`
-	State          string     `json:"state"`
+	Name   string `json:"name"`
+	Label  string `json:"label,omitempty"`
+	Type   string `json:"type"`
+	Source string `json:"source"`
+	State  string `json:"state"`
+	// Bucket (issue #254) is the dashboard filter class: "available",
+	// "spent" or "attention", computed by pool.BucketOf from the pool's own
+	// routing predicates -- never re-derived client-side from percentages.
+	Bucket         string     `json:"bucket"`
 	ExhaustedUntil *time.Time `json:"exhaustedUntil,omitempty"`
 	InFlight       int        `json:"inFlight"`
 	// OverThreshold marks an account the selector will rotate away from even
@@ -496,6 +500,7 @@ func (s *Server) accounts() []accountJSON {
 			LastModel:     a.LastModel(),
 			Upstream:      a.Upstream,
 			Windows:       a.QuotaWindows(),
+			Bucket:        string(s.pool.BucketOf(a)),
 		}
 		if c, ok := cacheByAcct[a.Name]; ok {
 			j.CacheHitRate = c.HitRate()

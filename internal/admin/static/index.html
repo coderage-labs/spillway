@@ -215,17 +215,25 @@
   /* "Check now" (#192) is the same class of control as pin -- an operator
      instruction to the running daemon, on the same card -- so it takes the
      same pill, not a second visual language beside it. */
-  .pin-btn, .probe-btn {
+  /* The tank filter chips (#254) are the same pill again: a chip is an
+     operator choice about the view, exactly like pin is about the pool, so
+     it shares the rule rather than adding a third look. */
+  .pin-btn, .probe-btn, .filter-chip {
              font: inherit; font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
              background: transparent; color: var(--ink-2); border: 1px solid var(--wall);
              border-radius: 999px; padding: .15rem .55rem; line-height: 1.4;
              cursor: pointer; white-space: nowrap; }
-  .pin-btn:hover, .probe-btn:hover { border-color: var(--water-a); color: var(--ink); }
-  .pin-btn.active { background: var(--water-b); color: #fff; border-color: var(--water-b); }
+  .pin-btn:hover, .probe-btn:hover, .filter-chip:hover { border-color: var(--water-a); color: var(--ink); }
+  .pin-btn.active, .filter-chip.active { background: var(--water-b); color: #fff; border-color: var(--water-b); }
   /* A probe is a real network request that can take seconds. Without a busy
      state the button looks inert and gets clicked again, which is a second
      request -- and on a forced probe, a second charge. */
   .probe-btn.busy { opacity: .55; cursor: progress; }
+  /* Wraps rather than scrolls, so four chips never push the page sideways at
+     phone width. Chips are a touch taller than the card pills (a primary
+     control, not a per-card extra) for a thumb-sized target. */
+  .tank-filters { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .8rem; }
+  .filter-chip { padding: .3rem .8rem; }
   .tank.pinned { box-shadow: var(--shadow), inset 0 0 0 1px var(--water-a); }
   /* Absent, not empty, the rest of the time -- same reasoning as .hold: a
      result/conflict box that is almost never shown must not render as a
@@ -561,7 +569,9 @@
     <div class="reduced-motion-note" style="display:none;font-size:11px;color:var(--ink-2);margin:-.35rem 0 .6rem">
       Animation is off because this system requests reduced motion.
     </div>
+    <div class="tank-filters" id="tank-filters" role="group" aria-label="Filter tanks"></div>
     <div class="tanks" id="accounts"></div>
+    <div class="panel empty" id="tanks-empty" hidden></div>
   </section>
 
   <section>
@@ -1451,6 +1461,77 @@ async function doProbe(entry, name, force) {
   showPinNote(entry, "bad", res.text || ("probe failed (" + res.status + ")"));
 }
 
+// Issue #254: filter chips above the tanks. Each tank is in exactly one
+// bucket, computed SERVER-side (a.bucket, from the pool's own routing
+// predicates) -- never derived here from percentages. Filtering hides cards
+// rather than rebuilding or reordering them, so the priority order (#209)
+// and every card's animation state are untouched.
+const TANK_FILTERS = [
+  { key: "all",       label: "All",       none: "No tanks." },
+  { key: "available", label: "Available", none: "No tanks available." },
+  { key: "spent",     label: "Spent",     none: "No tanks spent." },
+  { key: "attention", label: "Attention", none: "No tanks need attention." },
+];
+const FILTER_STORE = "spillway-tank-filter";
+let tankFilter = null;          // null until first read from storage
+let lastTankList = [];
+const filterChips = new Map();
+
+// Every localStorage touch is wrapped: it throws in some private windows and
+// with site data blocked, and the dashboard must work without it.
+function loadTankFilter() {
+  try {
+    const v = localStorage.getItem(FILTER_STORE);
+    if (TANK_FILTERS.some(f => f.key === v)) return v;
+  } catch (e) { /* fall through to the default */ }
+  return "all";
+}
+function saveTankFilter(key) {
+  try { localStorage.setItem(FILTER_STORE, key); } catch (e) { /* not persisted; still applied */ }
+}
+function buildTankFilters() {
+  if (filterChips.size) return;
+  tankFilter = loadTankFilter();
+  const bar = document.getElementById("tank-filters");
+  for (const f of TANK_FILTERS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "filter-chip";
+    b.addEventListener("click", () => {
+      tankFilter = f.key;
+      saveTankFilter(f.key);
+      applyTankFilter(lastTankList);
+    });
+    bar.appendChild(b);
+    filterChips.set(f.key, b);
+  }
+}
+function applyTankFilter(list) {
+  buildTankFilters();
+  lastTankList = list;
+  const counts = { all: list.length, available: 0, spent: 0, attention: 0 };
+  for (const a of list) if (a.bucket in counts) counts[a.bucket]++;
+  for (const f of TANK_FILTERS) {
+    const b = filterChips.get(f.key);
+    const on = tankFilter === f.key;
+    b.textContent = f.label + " " + counts[f.key];
+    b.className = "filter-chip" + (on ? " active" : "");
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  let shown = 0;
+  for (const a of list) {
+    const entry = tankCards.get(a.name);
+    if (!entry) continue;
+    const show = tankFilter === "all" || a.bucket === tankFilter;
+    entry.card.hidden = !show;
+    if (show) shown++;
+  }
+  const empty = document.getElementById("tanks-empty");
+  const f = TANK_FILTERS.find(x => x.key === tankFilter);
+  empty.hidden = shown > 0 || list.length === 0;
+  empty.textContent = f.none;
+}
+
 function renderTanks(list) {
   const figures = document.getElementById("figures");
   figures.innerHTML = "";
@@ -1602,6 +1683,7 @@ function renderTanks(list) {
   // the cards match it. Must run after the drop above, so a removed
   // account's stale position doesn't affect the comparison.
   reorderTanks(list.map(a => a.name));
+  applyTankFilter(list);
 
   if (!figures.children.length) {
     figures.innerHTML = '<tr><td colspan="10" class="empty">' +

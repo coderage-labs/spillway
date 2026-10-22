@@ -48,3 +48,38 @@ func TestAccountsOrdersByPriorityThenName(t *testing.T) {
 		}
 	}
 }
+
+// Issue #254: /api/accounts carries the server-computed bucket.
+func TestAccountsReportBucket(t *testing.T) {
+	ok := pool.NewAccount("ok", pool.SourceYAML, "tok", "", 0, "")
+	ok.Type = "claude-oauth"
+	spent := pool.NewAccount("spent", pool.SourceYAML, "tok", "", 0, "")
+	spent.Type = "claude-oauth"
+	dead := pool.NewAccount("dead", pool.SourceYAML, "tok", "", 0, "")
+	dead.Type = "claude-oauth"
+	dead.Disable()
+	parked := pool.NewAccount("parked", pool.SourceYAML, "tok", "", 0, "")
+	parked.Type = "claude-oauth"
+	parked.Park()
+	fableOnly := pool.NewAccount("fableonly", pool.SourceYAML, "tok", "", 0, "")
+	fableOnly.Type = "claude-oauth"
+
+	p := pool.New([]*pool.Account{ok, spent, dead, parked, fableOnly}, time.Now())
+	until := time.Now().Add(time.Hour)
+	p.MarkWindowRejected(spent, "5h", until)
+	p.MarkWindowRejected(spent, "7d-fable", until)
+	p.MarkWindowRejected(fableOnly, "7d-fable", until)
+	s := New(p, nil, events.New(), testToken)
+
+	want := map[string]string{"ok": "available", "spent": "spent", "dead": "attention",
+		"parked": "attention", "fableonly": "available"}
+	for _, a := range fetchAccountsJSON(t, s) {
+		if a.Bucket != want[a.Name] {
+			t.Errorf("%s bucket = %q, want %q", a.Name, a.Bucket, want[a.Name])
+		}
+		delete(want, a.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("accounts missing from response: %v", want)
+	}
+}

@@ -1754,9 +1754,22 @@ not supply one, and fails closed if it is required but missing.
   headroom-over-time chart with
   burn-rate projection, activity histogram, exact-figures table, spill events,
   request log
-- `GET /api/accounts` — state, quota windows (each flagged `expired: true`
-  once its reset has passed with no fresh reading since), in-flight, last
-  model served
+- **Tank filters** — chips above the tanks: **All · Available · Spent ·
+  Attention**, each with a count. Every tank is in exactly one bucket;
+  filtering keeps the priority order and the choice is remembered per browser
+  (default All).
+  - **Attention** — needs you, not time: parked (disabled), a rejected
+    refresh token, or an auth failure.
+  - **Available** — routing would pick it for at least one model family
+    right now. An account spent on fable but fine for Opus is Available (its
+    fable gauge already shows fable is out).
+  - **Spent** — neither: healthy, but it cannot serve any family until a
+    refill.
+- `GET /api/accounts` — state, `bucket` (`available` / `spent` /
+  `attention`, the filter classes above, computed from the pool's own routing
+  predicates, not from percentages), quota windows (each flagged
+  `expired: true` once its reset has passed with no fresh reading since),
+  in-flight, last model served
 - `GET /api/requests?limit=N` — recent requests
 - `GET /api/quota-history?hours=N` — headroom curves per account/window
 - `GET /api/activity?hours=N` — bucketed request counts
