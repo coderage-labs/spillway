@@ -322,6 +322,7 @@ func runServer(args []string) error {
 	logger.Info("listeners bound — holding requests until initialisation completes", "addr", "http://"+addr)
 	initDone := make(chan struct{})
 	go initWatchdog(logger, initDone, ph, initWatchdogInterval)
+	go initDeadline(logger, initDone, ph, initTimeout, func() { os.Exit(1) })
 
 	ph.begin("secrets")
 	store := serverSecrets()
@@ -367,20 +368,12 @@ func runServer(args []string) error {
 	}
 	defer rl.Close()
 	ph.done("reqlog open")
-	// Issue #259: the retention prunes Open used to run inline now run in the
-	// background, with the listeners already bound. See reqlog.Log.Maintain
-	// for why nothing that reads those tables is served wrong meanwhile.
-	go func() {
-		start := time.Now()
-		reqs, quota, err := rl.Maintain(time.Now())
-		if err != nil {
-			logger.Warn("request log maintenance failed", "err", err)
-			return
-		}
-		logger.Info("request log maintenance done",
-			"requestsPruned", reqs, "quotaSamplesPruned", quota,
-			"elapsed", time.Since(start).Round(time.Millisecond))
-	}()
+	// Issue #259: the retention prunes Open used to run inline; they now run
+	// in the background, but only once init is Ready (not here: the prune's
+	// write transaction could starve the quota seed below). See
+	// reqlog.Log.Maintain for why nothing reading those tables is served
+	// wrong meanwhile.
+	go startMaintenance(logger, initDone, rl.Maintain)
 	ph.begin("quota seed")
 
 	// Quota windows live in memory only, so every restart clears them to

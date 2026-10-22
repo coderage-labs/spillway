@@ -109,6 +109,56 @@ func initWatchdog(logger *slog.Logger, ready <-chan struct{}, ph *startupPhases,
 	}
 }
 
+// initTimeout is how long initialisation gets to reach Ready before the
+// daemon gives up, logs an ERROR and exits non-zero so launchd's KeepAlive
+// starts a fresh process. Without it a hung init (a keychain read that never
+// returns, a database stuck behind a lock) leaves a process that is bound and
+// "running" forever while every request waits holdMax and then gets a 503.
+//
+// Five minutes: the slowest init measured in #259 was ~2 minutes under
+// login-time I/O contention, so this is more than double the worst real case
+// and nowhere near a false positive on a healthy start. It is also the
+// trade-off for a PENDING KEYCHAIN PROMPT (macOS asking the user to allow
+// access): the prompt blocks a read for as long as nobody answers. Five
+// minutes is long enough for a person at the machine to answer it; if they
+// are not there, exiting and restarting re-raises the prompt rather than
+// leaving it stuck behind a dead-looking daemon. The cost is that a user who
+// ignores the prompt for >5 minutes sees it come back, which is acceptable.
+// Exiting does skip deferred cleanups; SQLite's WAL recovers on next open.
+const initTimeout = 5 * time.Minute
+
+// initDeadline waits for ready. If timeout passes first it logs an ERROR and
+// calls exit (os.Exit(1) in production; injected so a test can observe it).
+func initDeadline(logger *slog.Logger, ready <-chan struct{}, ph *startupPhases, timeout time.Duration, exit func()) {
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-ready:
+	case <-t.C:
+		logger.Error("initialisation did not finish in time — exiting so the service manager restarts spillway",
+			"timeout", timeout, "phase", ph.Current(),
+			"hint", "a stuck keychain prompt or a locked database are the usual causes")
+		exit()
+	}
+}
+
+// startMaintenance runs the request log's retention work once ready closes
+// (issue #259 review): started earlier, its prune write transaction could
+// starve the quota seed under login-time I/O load, leaving accounts unseeded
+// and the first check a billed probe (#34/#104). It blocks, so call it with go.
+func startMaintenance(logger *slog.Logger, ready <-chan struct{}, maintain func(time.Time) (int64, int64, error)) {
+	<-ready
+	start := time.Now()
+	reqs, quota, err := maintain(time.Now())
+	if err != nil {
+		logger.Warn("request log maintenance failed", "err", err)
+		return
+	}
+	logger.Info("request log maintenance done",
+		"requestsPruned", reqs, "quotaSamplesPruned", quota,
+		"elapsed", time.Since(start).Round(time.Millisecond))
+}
+
 // parsePsStart parses `ps -o lstart=` output ("Thu Oct 22 21:20:15 2026").
 func parsePsStart(s string, loc *time.Location) (time.Time, error) {
 	return time.ParseInLocation("Mon Jan _2 15:04:05 2006", strings.Join(strings.Fields(s), " "), loc)

@@ -12,6 +12,20 @@ import (
 
 func quietGateLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// waitHeld fails the test (rather than hanging it) if n requests are not
+// held within 2s — a neutered gate never holds, and an unbounded poll loop
+// here used to turn that failure into a hang.
+func waitHeld(t *testing.T, g *Gate, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for g.Held() != n {
+		if time.Now().After(deadline) {
+			t.Fatalf("held = %d, want %d: the request was never held by the gate", g.Held(), n)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 var okHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "served") })
 
 // Issue #259: a request that arrives before init is HELD, then served — over a
@@ -39,13 +53,7 @@ func TestGateHoldsThenServes(t *testing.T) {
 		out <- res{string(b), resp.StatusCode, nil}
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for g.Held() != 1 {
-		if time.Now().After(deadline) {
-			t.Fatalf("request never reached the gate (held=%d)", g.Held())
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitHeld(t, g, 1)
 	select {
 	case r := <-out:
 		t.Fatalf("request returned before Ready: %+v", r)
@@ -80,9 +88,7 @@ func TestGateHeldRequestHonoursClientCancel(t *testing.T) {
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() { g.ServeHTTP(rec, req); close(done) }()
-	for g.Held() != 1 {
-		time.Sleep(2 * time.Millisecond)
-	}
+	waitHeld(t, g, 1)
 	cancel()
 	select {
 	case <-done:
@@ -114,9 +120,7 @@ func TestGateCloseDropsHeldRequests(t *testing.T) {
 		g.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 		close(done)
 	}()
-	for g.Held() != 1 {
-		time.Sleep(2 * time.Millisecond)
-	}
+	waitHeld(t, g, 1)
 	g.Close()
 	select {
 	case <-done:

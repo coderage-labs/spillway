@@ -253,16 +253,30 @@ Until initialisation finishes:
   gets a `503` with `Retry-After`; if the client goes away first the hold is
   dropped. They are all held, rather than the non-pooled ones passing straight
   through, because whether a host is intercepted depends on the account set
-  and the CA, which do not exist yet.
+  and the CA, which do not exist yet. Note the consequence: a client with a
+  short proxy or connect timeout may fail after that delay rather than be
+  refused instantly, as it would have been before #259.
 - **Admin port:** `GET /api/state` answers `{"status":"starting", …}` (every
   other field is zero and means nothing). Every other endpoint, and the
   dashboard page, answers `503` with `Retry-After`. Once ready, `/api/state`
   reports `"status":"ready"`. Treat anything other than `ready` as "retry".
-  Clients that read `/api/state` — the status line, `spillway status` — show
-  their usual "no answer yet" until it flips.
+  The status line shows `⛁ starting` (rather than its "unreachable" marker)
+  until it flips; `spillway status` shows its usual "no answer yet".
+- **`spillway run`** waits for the port to bind *and* for `/api/state` to
+  report `ready` before it reads the MITM CA, printing one line to stderr
+  while it waits (up to 3 minutes, Ctrl-C to stop; then the usual "not
+  listening" error). The daemon mints the CA as its last init step, so a CA
+  read earlier could be one it then replaces, stranding the launched client on
+  a stale trust anchor.
+- **Init timeout:** if initialisation has not reached ready after 5 minutes
+  (a stuck keychain prompt or a locked database), the daemon logs an ERROR
+  naming the phase and exits non-zero so launchd restarts it, rather than
+  sitting bound but useless. A keychain prompt left unanswered for that long
+  comes back after the restart.
 
 The request log's retention work (the 14-day prune of `requests` and
-`quota_samples`) runs in a background goroutine after startup instead of
+`quota_samples`) runs in a background goroutine once the daemon is ready
+(after the quota seed, so its write transaction cannot starve it) instead of
 inside `Open`. Lifetime cache totals are unaffected: they are seeded in `Open`,
 before that goroutine starts, and a prune only moves counters from `requests`
 into `request_totals` without changing their sum. Row-level views (the
