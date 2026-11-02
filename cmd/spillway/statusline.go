@@ -64,6 +64,9 @@ type slAccount struct {
 	InFlight  int        `json:"inFlight"`
 	LastModel string     `json:"lastModel"`
 	Windows   []slWindow `json:"quotaWindows"`
+	// AbsentWindows (issue #262): windows the plan does not have (5h on Max
+	// 20x). Absent from an older daemon's JSON, so nothing renders there.
+	AbsentWindows []string `json:"absentWindows"`
 }
 
 func (a slAccount) display() string {
@@ -596,6 +599,15 @@ func renderPool(p palette, list []slAccount, st slState, sess *slSession, now ti
 		b.WriteString(p.dim(shortModel(a.LastModel)))
 	}
 
+	// A plan with no 5h limit says so in the 5h slot, ahead of the windows it
+	// does have (issue #262). Same glyph and name as the bar it replaces, so
+	// the row keeps its shape; dropped with the other account-wide detail
+	// would hide the very fact that this is not a missing reading.
+	for _, name := range a.AbsentWindows {
+		b.WriteString("  ")
+		b.WriteString(p.dim(windowGlyph(name)))
+		b.WriteString(p.dim("no limit " + name))
+	}
 	for _, w := range a.Windows {
 		h := w.headroom()
 		if h < 0 {
@@ -615,7 +627,7 @@ func renderPool(p palette, list []slAccount, st slState, sess *slSession, now ti
 			b.WriteString(p.dim(" ↻" + compactDur(w.ResetAt.Sub(now))))
 		}
 	}
-	if len(a.Windows) == 0 {
+	if len(a.Windows) == 0 && len(a.AbsentWindows) == 0 {
 		b.WriteString(p.dim("  no quota signal"))
 	}
 	if a.InFlight > 0 && lvl < poolNoInFlight {

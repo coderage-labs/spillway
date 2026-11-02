@@ -87,6 +87,7 @@ var claudeSpec = Spec{
 	},
 	RejectedWindows:      anthropicRejectedWindows,
 	WindowsFromHeaders:   anthropicWindows,
+	AbsentWindows:        anthropicAbsentWindows,
 	GoverningWindows:     claudeGoverningWindows,
 	OverageFromHeaders:   anthropicOverage,
 	RefreshFlavour:       AnthropicOAuth,
@@ -268,6 +269,44 @@ func anthropicWindows(h http.Header, now time.Time) []Window {
 			}
 		}
 		out = append(out, win)
+	}
+	return out
+}
+
+// anthropicOverallStatusHeader is the response-wide unified status: present
+// on every response that carries unified quota headers at all, whatever the
+// plan. It is the gate for absence (issue #262) -- an error body or a partial
+// response has none, and says nothing about which windows exist.
+const anthropicOverallStatusHeader = "anthropic-ratelimit-unified-status"
+
+// accountWideWindows are the windows every response on a plan that has them
+// reports, fable or not. The family window ("7d-fable") is deliberately not
+// here: it rides only on fable responses, so its absence means nothing.
+var accountWideWindows = []string{"5h", "7d"}
+
+// anthropicAbsentWindows reports which account-wide windows this response
+// proves the account lacks (issue #262): Anthropic's Max 20x ("Ultra") plan
+// dropped the 5h limit, and from then on every response carried 7d but no 5h.
+//
+// Gated on the overall status header, and on at least one account-wide
+// window being present: a response with the status but no windows at all is
+// malformed, not evidence that a plan has neither.
+func anthropicAbsentWindows(h http.Header, now time.Time) []string {
+	if h.Get(anthropicOverallStatusHeader) == "" {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, w := range anthropicWindows(h, now) {
+		have[w.Name] = true
+	}
+	var out []string
+	for _, n := range accountWideWindows {
+		if !have[n] {
+			out = append(out, n)
+		}
+	}
+	if len(out) == len(accountWideWindows) {
+		return nil
 	}
 	return out
 }

@@ -1018,6 +1018,27 @@ eligible account exists, used anyway when it is the last one). Claude quota
 comes from `anthropic-ratelimit-*` response headers; Kimi's from
 `/v1/usages` polling.
 
+### Plans with no 5h limit (Max 20x / "Ultra")
+
+Anthropic's Max 20x plan, now called Ultra, no longer has a 5h limit: its
+responses carry the `7d` headers and no `5h`. `5h` and `7d` are account-wide,
+so when a response carries the overall unified status header but lacks one of
+them, spillway drops that window from the account and records it as **absent**
+(in memory) instead of keeping the last reading and flagging it expired
+forever. If the header ever comes back, the window is restored and the mark
+cleared. Responses without the unified status header (errors, partial
+replies) change nothing, and `7d-fable` is never dropped this way: it only
+arrives on fable responses, so its absence says nothing.
+
+`/api/accounts` lists these as `absentWindows` (e.g. `["5h"]`). The dashboard
+hides that tank's 5h gauge and adds a small "no 5h limit" caption; `spillway
+status` shows `no limit` in the 5H column and the status line shows
+`no limit 5h`. That is deliberately different from a fresh account, which has
+simply not been measured yet and shows "no requests yet" / `—`. Routing is
+unchanged: an expired or missing window never counted against an account. A
+restart does not bring a stale 5h back, because seeding skips any sample past
+its own reset.
+
 ### Per-family quota (fable)
 
 Anthropic reports separate quota buckets per model family: `5h` and `7d` are

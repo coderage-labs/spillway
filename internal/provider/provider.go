@@ -117,6 +117,11 @@ type Spec struct {
 	// WindowsFromHeaders reads quota out of a response. Empty for providers
 	// that report usage out-of-band.
 	WindowsFromHeaders func(header http.Header, now time.Time) []Window
+	// AbsentWindows names the account-wide windows a response proves the
+	// account does not have (issue #262): the response carries the provider's
+	// overall quota headers yet omits a window every such response on a plan
+	// with that window includes. nil for providers with no such guarantee.
+	AbsentWindows func(header http.Header, now time.Time) []string
 	// PollsUsage: quota comes from an endpoint rather than response headers.
 	PollsUsage bool
 	// OwnsUpstream distinguishes a provider that must be reached at its own

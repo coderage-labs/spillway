@@ -458,6 +458,11 @@ type accountJSON struct {
 	LastModel      string             `json:"lastModel,omitempty"`
 	Upstream       string             `json:"upstream,omitempty"`
 	Windows        []pool.QuotaWindow `json:"quotaWindows,omitempty"`
+	// AbsentWindows (issue #262) names account-wide windows the provider has
+	// shown this account does not have, e.g. ["5h"] on Max 20x ("Ultra").
+	// Not the same as a window that is merely missing from quotaWindows:
+	// that one has never been measured.
+	AbsentWindows []string `json:"absentWindows,omitempty"`
 	// CacheHitRate, CacheCreateTokens and CacheReadTokens (issue #110) are
 	// lifetime totals from the request log — cache_read/(cache_read +
 	// cache_creation) and the two volumes themselves, so a burn spike is
@@ -500,6 +505,7 @@ func (s *Server) accounts() []accountJSON {
 			LastModel:     a.LastModel(),
 			Upstream:      a.Upstream,
 			Windows:       a.QuotaWindows(),
+			AbsentWindows: a.AbsentWindows(),
 			Bucket:        string(s.pool.BucketOf(a)),
 		}
 		if c, ok := cacheByAcct[a.Name]; ok {

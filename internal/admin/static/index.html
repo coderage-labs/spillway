@@ -1183,8 +1183,14 @@ function ensureCard(a) {
   const addr = div("tank-addr", card);
   const sub = div("tank-sub", card);
   const cylWrap = div("cyls", card);
+  // #262: windows the plan does not have ("no 5h limit"). The existing .hint
+  // caption style, under the gauges that do exist. A caption rather than a
+  // placeholder gauge: an absent window is a fact about the plan, and the
+  // "no requests yet" placeholder means the opposite (not measured yet).
+  const absent = div("hint", card);
+  absent.hidden = true;
 
-  entry = { card, swatch, name, flag, pinBtn, probeBtn, pinMsg, addr, sub, cylWrap,
+  entry = { card, swatch, name, flag, pinBtn, probeBtn, pinMsg, addr, sub, cylWrap, absent,
             cyls: new Map(), acctName: a.name };
   pinBtn.addEventListener("click", () => onPinClick(entry));
   probeBtn.addEventListener("click", () => doProbe(entry, entry.acctName, false));
@@ -1275,6 +1281,7 @@ function ensureCyl(entry, w) {
     parts: null,          // set by buildGlass on first fill
   };
   buildRing(cyl, glass);
+  cyl.el = c;
   entry.cyls.set(w.name, cyl);
   entry.cylWrap.appendChild(c);
   return cyl;
@@ -1587,6 +1594,21 @@ function renderTanks(list) {
       : (a.overageReason ? "no extra usage: " + a.overageReason : null);
     entry.sub.textContent = [a.type, a.lastModel, a.inFlight + " in flight", overageNote]
       .filter(Boolean).join(" \u00b7 ");
+
+    // #262: a window the provider has shown the plan does not have. Its gauge
+    // goes (the server has already dropped the reading); a caption says why
+    // the tank has one fewer, so it does not look broken beside tanks that
+    // have it. Never-measured is a different state and keeps its own
+    // "no requests yet" placeholder below.
+    const absentNames = a.absentWindows || [];
+    for (const [name, cyl] of entry.cyls) {
+      if (name === "__none" || wins.some(w => w.name === name)) continue;
+      if (cyl.el) cyl.el.remove();
+      rings.delete(cyl);
+      entry.cyls.delete(name);
+    }
+    entry.absent.hidden = !absentNames.length;
+    entry.absent.textContent = absentNames.map(n => "no " + n + " limit").join(" \u00b7 ");
 
     for (const w of wins) {
       const f = headroom(w);

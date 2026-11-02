@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/coderage-labs/spillway/internal/admin"
@@ -49,7 +50,16 @@ func main() {
 		accounts = append(accounts, spent, dead)
 	}
 
+	var ultra *pool.Account
+	if !*hold {
+		ultra = buildUltraAccount(now)
+		accounts = append(accounts, ultra)
+	}
+
 	p := pool.New(accounts, now)
+	if ultra != nil {
+		recordUltraResponse(p, ultra, now)
+	}
 	p.Apply(pool.Settings{AllowOverage: true, CrossProvider: !*hold})
 
 	release := func() {}
@@ -122,6 +132,32 @@ func buildBucketAccounts(now time.Time) (spent, dead *pool.Account) {
 	dead.SetLabel("expired")
 	dead.SetPriority(7)
 	return spent, dead
+}
+
+// buildUltraAccount is a Max 20x ("Ultra") account (#262): the plan has no 5h
+// limit. It starts with the stale 5h reading it carried before the plan
+// changed, so the demo exercises the real drop path rather than just omitting
+// the window.
+func buildUltraAccount(now time.Time) *pool.Account {
+	a := pool.NewAccount("you@ultra.example", pool.SourceYAML, "t", "", 0, "")
+	a.Type = "claude-oauth"
+	a.SetLabel("ultra")
+	a.SetPriority(8)
+	a.SetQuotaWindows([]pool.QuotaWindow{
+		{Name: "5h", Limit: 1, Used: 0.25, Source: "headers", ResetAt: now.Add(-40 * time.Hour), FetchedAt: now.Add(-41 * time.Hour)},
+	})
+	return a
+}
+
+// recordUltraResponse feeds the account one response of the shape an Ultra
+// plan returns: unified status and 7d, no 5h.
+func recordUltraResponse(p *pool.Pool, a *pool.Account, now time.Time) {
+	h := http.Header{}
+	h.Set("anthropic-ratelimit-unified-status", "allowed")
+	h.Set("anthropic-ratelimit-unified-7d-status", "allowed")
+	h.Set("anthropic-ratelimit-unified-7d-utilization", "0.27")
+	h.Set("anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(now.Add(4*24*time.Hour+6*time.Hour).Unix(), 10))
+	p.RecordQuota(a, h, now)
 }
 
 func demoConfigYAML(hold bool) string {

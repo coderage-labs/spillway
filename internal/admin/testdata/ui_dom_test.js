@@ -53,6 +53,17 @@ const ACCOUNTS = [{
     // (issue #135): must read as unknown, never as 0% with "refills 0s".
     { name: '7d-fable', limit: 1, used: 1, resetAt: new Date(now - 3600e3).toISOString(), source: 'headers', expired: true },
   ],
+}, {
+  // Issue #262: a plan with no 5h limit (Max 20x / Ultra). The server has
+  // dropped the stale 5h reading and says so in absentWindows.
+  name: 'you@ultra.example', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 0,
+  bucket: 'available', absentWindows: ['5h'],
+  quotaWindows: [{ name: '7d', limit: 1, used: 0.27, resetAt: new Date(now + 4 * 86400e3).toISOString(), source: 'headers' }],
+}, {
+  // Issue #262: a fresh account nothing has measured yet. Must NOT read as
+  // "no 5h limit" -- it has an unknown limit, not an absent one.
+  name: 'you@fresh.example', type: 'claude-oauth', source: 'yaml', state: 'ok', inFlight: 0,
+  bucket: 'available',
 }];
 // Issue #167's actual shape: /api/quota-history returns a series per account
 // PER WINDOW, so eight accounts is twenty-four series, not eight. The three
@@ -589,6 +600,27 @@ async function run() {
   // each, on every card the fixture renders -- not just the one this test
   // happens to look at, or a defect on a single card would pass unseen.
   const cardFor = (acct) => els.accounts.children.find(c => c.dataset.acct === acct);
+  // Issue #262: the caption is the plan's own fact, so it shows for an absent
+  // 5h and ONLY then; a never-measured tank keeps its "no requests yet"
+  // placeholder and must not claim to have no limit.
+  const absentCap = (acct) => findIn(cardFor(acct), '.hint');
+  ok['#262 absent 5h shows a "no 5h limit" caption'] =
+    !!absentCap('you@ultra.example') && !absentCap('you@ultra.example').hidden &&
+    absentCap('you@ultra.example').textContent === 'no 5h limit';
+  ok['#262 absent 5h has no 5h gauge, keeps its 7d one'] =
+    !findAllIn(cardFor('you@ultra.example'), '.win').some(w => w.textContent === '5h') &&
+    findAllIn(cardFor('you@ultra.example'), '.win').some(w => w.textContent === '7d');
+  ok['#262 never-measured tank shows no "no limit" caption'] =
+    !!absentCap('you@fresh.example') && absentCap('you@fresh.example').hidden === true &&
+    absentCap('you@fresh.example').textContent === '';
+  ok['#262 never-measured tank keeps its "no requests yet" placeholder'] =
+    findAllIn(cardFor('you@fresh.example'), '.win').some(w => w.textContent === 'no requests yet' ||
+      (w._html || '').includes('no requests yet')) ||
+    cardFor('you@fresh.example').children.some(function walk(c) {
+      return (c._html || '').includes('no requests yet') || c.children.some(walk);
+    });
+  ok['#262 an account with a 5h window shows no caption'] =
+    absentCap('you@example-one.com').hidden === true;
   ok['pin and probe buttons are not inside .tank-head, on every card'] =
     els.accounts.children.length === ACCOUNTS.length &&
     els.accounts.children.every(c => {
@@ -1319,7 +1351,7 @@ async function run() {
     // Counts come from the server's bucket, in All/Available/Spent/Attention order.
     ok['#254 chips render in order with counts'] =
       JSON.stringify(chipsOf().map(c => c.textContent)) ===
-      JSON.stringify(['All 3', 'Available 2', 'Spent 1', 'Attention 0']);
+      JSON.stringify(['All 5', 'Available 4', 'Spent 1', 'Attention 0']);
 
     // The saved choice ('spent', pre-seeded) is restored on first render:
     // that chip is pressed, only that bucket's tank shows, priority order kept.
@@ -1332,7 +1364,7 @@ async function run() {
     chip('Available')._on.click();
     const wantAvail = ACCOUNTS.filter(a => a.bucket === 'available').map(a => a.name);
     ok['#254 Available shows only available tanks, in payload order'] =
-      wantAvail.length === 2 && JSON.stringify(visible()) === JSON.stringify(wantAvail);
+      wantAvail.length === 4 && JSON.stringify(visible()) === JSON.stringify(wantAvail);
     ok['#254 the choice is persisted'] = storeData.get('spillway-tank-filter') === 'available';
     ok['#254 a non-empty filter shows no empty-state'] = emptyEl().hidden === true;
 
@@ -1349,12 +1381,12 @@ async function run() {
     await repoll();
     ok['#254 counts follow the poll'] =
       JSON.stringify(chipsOf().map(c => c.textContent)) ===
-      JSON.stringify(['All 4', 'Available 2', 'Spent 1', 'Attention 1']);
+      JSON.stringify(['All 6', 'Available 4', 'Spent 1', 'Attention 1']);
     ok['#254 Attention lists the account and hides the empty-state'] =
       JSON.stringify(visible()) === JSON.stringify(['you@example-dead.com']) && emptyEl().hidden === true;
 
     chip('All')._on.click();
-    ok['#254 All shows every tank'] = visible().length === 4 && storeData.get('spillway-tank-filter') === 'all';
+    ok['#254 All shows every tank'] = visible().length === 6 && storeData.get('spillway-tank-filter') === 'all';
 
     // Storage that throws: default to All, and a click still filters.
     store.broken = true;
