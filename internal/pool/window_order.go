@@ -39,6 +39,11 @@ func windowRank(name string) (minutes int, variant string, known bool) {
 	return 0, variant, false
 }
 
+// LessWindow is lessWindow for callers outside the package that lay windows
+// out for display (the `spillway status` columns), so every surface orders
+// them the same way.
+func LessWindow(a, b string) bool { return lessWindow(a, b) }
+
 // lessWindow reports whether window a sorts before window b.
 func lessWindow(a, b string) bool {
 	am, av, aok := windowRank(a)
