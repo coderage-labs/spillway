@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/coderage-labs/spillway/internal/pool"
 )
 
 // tokenPathFor locates the admin token beside the config. Absent on a
@@ -83,9 +85,11 @@ func statusTable(api *adminAPI, out io.Writer) error {
 	_ = api.get("/api/state", &st)
 
 	printPin(st.Pinned, out)
-	// One column per quota window, in the order they are first seen. Accounts
-	// can report different windows (5h/7d on Claude, one on Kimi), so the
-	// columns are the union rather than the first account's set.
+	// One column per quota window. Accounts can report different windows
+	// (5h/7d on Claude, one on Kimi, no 5h on Ultra -- #262), so the columns
+	// are the union rather than the first account's set, in the canonical
+	// window order. First-seen order put 5H last whenever the top account
+	// was an Ultra one with no 5h window.
 	var wins []string
 	seen := map[string]bool{}
 	for _, a := range accounts {
@@ -96,6 +100,15 @@ func statusTable(api *adminAPI, out io.Writer) error {
 			}
 		}
 	}
+	slices.SortStableFunc(wins, func(a, b string) int {
+		switch {
+		case pool.LessWindow(a, b):
+			return -1
+		case pool.LessWindow(b, a):
+			return 1
+		}
+		return 0
+	})
 
 	head := []string{"account", "type", "state", "in flight"}
 	for _, w := range wins {
