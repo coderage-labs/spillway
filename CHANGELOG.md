@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/coderage-labs/spillway/compare/v0.29.0...v0.30.0) (2026-11-02)
+
+
+### Features
+
+* **pool:** drop and mark absent account-wide windows a plan lacks ([#262](https://github.com/coderage-labs/spillway/issues/262)) ([#263](https://github.com/coderage-labs/spillway/issues/263)) ([fb7884c](https://github.com/coderage-labs/spillway/commit/fb7884c04a326535a710f6f9cd21aec8ad4a1c23))
+
 ## [0.29.0](https://github.com/coderage-labs/spillway/compare/v0.28.1...v0.29.0) (2026-10-22)
 
 
