@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,7 +53,10 @@ func statusTable(api *adminAPI, out io.Writer) error {
 		OverageRefused   bool      `json:"overageRefused"`
 		OverageReason    string    `json:"overageReason"`
 		OverageCheckedAt time.Time `json:"overageCheckedAt"`
-		Windows          []struct {
+		// AbsentWindows (issue #262): windows the plan does not have, e.g.
+		// 5h on Max 20x. Shown as "no limit", not as an unmeasured "—".
+		AbsentWindows []string `json:"absentWindows"`
+		Windows       []struct {
 			Name    string    `json:"name"`
 			Limit   float64   `json:"limit"`
 			Used    float64   `json:"used"`
@@ -124,6 +128,9 @@ func statusTable(api *adminAPI, out io.Writer) error {
 		}
 		for _, w := range wins {
 			c := by[w]
+			if c == "" && slices.Contains(a.AbsentWindows, w) {
+				c = "no limit"
+			}
 			if c == "" {
 				c = "—"
 			}

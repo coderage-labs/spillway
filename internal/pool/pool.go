@@ -73,6 +73,9 @@ type Account struct {
 	// overage is the provider's last word on serving past quota at cost.
 	// Guarded by mu.
 	overage provider.Overage
+	// absent names the account-wide windows the provider has shown this
+	// account does not have (issue #262). Guarded by mu; memory only.
+	absent map[string]bool
 	// allowOverage permits spending on this account, overriding the pool
 	// default. nil means "follow the pool" — the tri-state is deliberate, so
 	// that an account can opt out of a pool-wide yes. Guarded by mu for the
@@ -1085,6 +1088,13 @@ func (p *Pool) RecordQuota(a *Account, h http.Header, now time.Time) {
 		return
 	}
 	pw := spec.WindowsFromHeaders(h, now)
+	if spec.AbsentWindows != nil {
+		// Before the empty-windows return: a response that omits a window is
+		// exactly the case this handles (issue #262).
+		if gone := spec.AbsentWindows(h, now); len(gone) > 0 {
+			a.markAbsent(gone)
+		}
+	}
 	if len(pw) == 0 {
 		return
 	}
@@ -1432,6 +1442,8 @@ func (a *Account) setWindowsSourced(source string, w []QuotaWindow) {
 	incoming := make(map[string]bool, len(w))
 	for _, nw := range w {
 		incoming[nw.Name] = true
+		// A window reappearing clears its absent mark (issue #262).
+		delete(a.absent, nw.Name)
 	}
 	for _, nw := range w {
 		replaced := false
@@ -1499,6 +1511,49 @@ func (a *Account) retireCycleSiblingsLocked(old, nw QuotaWindow, incoming map[st
 		}
 		x.ResetAt = nw.FetchedAt
 	}
+}
+
+// markAbsent drops the named windows from the account and records them as
+// absent (issue #262): the provider's own response proved the plan has no such
+// window, so a stored reading is stale for good, not merely expired. Memory
+// only -- SeedQuota never restores a sample past its reset, and the first
+// response re-establishes the mark.
+func (a *Account) markAbsent(names []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.absent == nil {
+		a.absent = map[string]bool{}
+	}
+	kept := a.windows[:0]
+	for _, w := range a.windows {
+		drop := false
+		for _, n := range names {
+			if w.Name == n {
+				drop = true
+			}
+		}
+		if !drop {
+			kept = append(kept, w)
+		}
+	}
+	a.windows = kept
+	for _, n := range names {
+		a.absent[n] = true
+	}
+}
+
+// AbsentWindows lists the windows this account is known not to have (issue
+// #262), in window order. Distinct from a window never measured yet: that one
+// is simply not in QuotaWindows, and not in here either.
+func (a *Account) AbsentWindows() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []string
+	for n := range a.absent {
+		out = append(out, n)
+	}
+	sort.Slice(out, func(i, j int) bool { return lessWindow(out[i], out[j]) })
+	return out
 }
 
 // QuotaWindows returns the latest provider quota state.
