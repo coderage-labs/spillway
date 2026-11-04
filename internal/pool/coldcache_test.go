@@ -241,3 +241,23 @@ func TestColdMalformedBodyFailsSafe(t *testing.T) {
 		}
 	}
 }
+
+// A short-TTL request on a key that has asked for 1h (Claude Code's background
+// Haiku calls cache for the default 5m) must not unpin a main thread whose 1h
+// cache is still warm.
+func TestColdShortTTLRequestDoesNotUnpinLongTTLKey(t *testing.T) {
+	long := coldBody(t, "hello", "1h")
+	short := coldBody(t, "title this", "")
+	now := time.Now()
+
+	p, _, _ := coldPool(t)
+	step(t, p, long, now)
+	name, _, moved := step(t, p, short, now.Add(10*time.Minute))
+	if name != "low" || moved {
+		t.Fatalf("5m-TTL request after 10m unpinned a 1h-TTL key: %s moved=%v", name, moved)
+	}
+	name, u, moved := step(t, p, long, now.Add(10*time.Minute+61*time.Minute))
+	if name != "top" || !moved || u.Trigger != "idle" {
+		t.Fatalf("past the key's 1h TTL: %s %+v moved=%v", name, u, moved)
+	}
+}

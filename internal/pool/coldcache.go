@@ -129,6 +129,12 @@ func ParseCacheSignals(body []byte) CacheSignals {
 type coldState struct {
 	summary [32]byte // last compaction summary seen (zero = none)
 	lastUse time.Time
+	// ttl is the longest prompt-cache TTL any request on this key has asked
+	// for. Judged per key, not per request: Claude Code's background Haiku
+	// calls share the routing key but cache for the default 5m, and one of
+	// those arriving after a 10-minute pause must not unpin a main thread
+	// whose 1h cache is still warm.
+	ttl time.Duration
 }
 
 // ColdUnpin describes a sticky entry ReconsiderSticky deleted.
@@ -162,12 +168,15 @@ func (p *Pool) ReconsiderSticky(session string, sig CacheSignals, now time.Time)
 	}
 	prevUse := st.lastUse
 	st.lastUse = now
+	if sig.TTL > st.ttl {
+		st.ttl = sig.TTL
+	}
 
 	trigger := ""
 	if sig.Compaction && sig.SummaryHash != st.summary {
 		st.summary = sig.SummaryHash
 		trigger = "compaction"
-	} else if seen && !prevUse.IsZero() && sig.TTL > 0 && now.Sub(prevUse) > sig.TTL {
+	} else if seen && !prevUse.IsZero() && st.ttl > 0 && now.Sub(prevUse) > st.ttl {
 		trigger = "idle"
 	}
 	if trigger == "" {
