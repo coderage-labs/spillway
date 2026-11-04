@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.1](https://github.com/coderage-labs/spillway/compare/v0.30.0...v0.30.1) (2026-11-02)
+
+
+### Fixes
+
+* **status:** order window columns canonically, not first-seen ([#262](https://github.com/coderage-labs/spillway/issues/262)) ([#265](https://github.com/coderage-labs/spillway/issues/265)) ([0b0fad4](https://github.com/coderage-labs/spillway/commit/0b0fad49b5178ffd1cad523392c3f5c19e9b47cd))
+
 ## [0.30.0](https://github.com/coderage-labs/spillway/compare/v0.29.0...v0.30.0) (2026-11-02)
 
 
