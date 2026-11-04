@@ -312,6 +312,9 @@ type Pool struct {
 	// families mid-session can change the context ceiling underneath it
 	// (§6.18).
 	sessionProvider map[string]string
+	// cold is the bounded per-key state behind cold-cache re-routing
+	// (issue #267); see coldcache.go. Guarded by mu.
+	cold map[string]*coldState
 	// crossProvider allows rotation between providers mid-session. Off by
 	// default: same-provider rotation is transparent, cross-provider is not.
 	// Guarded by mu — see allowOverage below for why (issue #13).

@@ -1346,6 +1346,38 @@ accounts.
 (An earlier version of this paragraph said every session on the machine shared
 one key. Measured on 2026-08-23: they do not.)
 
+### Cold-cache re-routing
+
+Stickiness exists to keep a prompt cache warm, but it also leaves a
+conversation on a low-priority account long after a better one has headroom.
+Two moments make the cache cold anyway, so spillway drops the sticky entry
+there and lets normal selection (priority, then load) run. If the current
+account is still the best it stays; nothing moves for its own sake.
+
+- **After a compaction.** Claude Code starts a compacted conversation with a
+  first user message beginning "This session is being continued from a previous
+  conversation that ran out of context." The first request carrying a summary
+  spillway has not seen for that routing key fires; the same summary again does
+  not, and a later compaction (new summary) fires again. The summarisation
+  request itself does not move: its first message is still the original one (or
+  an earlier, already-seen summary), and it reads the whole conversation from
+  cache. If Anthropic rewords the marker, nothing fires and behaviour is as
+  before.
+- **Idle past the cache TTL.** If the routing key's last request is older than
+  the prompt-cache TTL, the next one is re-selected. The TTL comes from the
+  body's `cache_control` markers (system, tools, messages): `ttl: "1h"` is one
+  hour, anything else five minutes, and the longest in the body wins. Subagents
+  sharing a routing key keep it warm between them, the conservative outcome.
+
+The cost trade-off: a move pays to re-cache system and tools (roughly 20-40k
+tokens) on the new account, in exchange for not parking long-lived
+conversations on a low-priority account. Pins (`spillway switch`) are
+unaffected, since they win before the sticky map. Each move is logged at INFO
+("cache cold, sticky entry dropped") with the hashed routing key, trigger
+(`compaction` or `idle`) and from/to accounts. The per-key state behind this
+is capped at 4096 keys; idle entries are dropped first, then the least
+recently used.
+
 The request log's `session_hash` is a **different, finer** key (issue #141):
 it is the `session_id` on its own, hashed, so it does not move when anything
 else in the blob does. Routing deliberately keeps the coarser key — a
