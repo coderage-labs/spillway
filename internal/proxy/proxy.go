@@ -579,6 +579,17 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 	// across this request's retry loop.
 	sessionHash := hashSession(conversation)
 
+	// Cold-cache re-route (issue #267): before the first selection, and once
+	// per request (not per retry), drop a sticky entry whose prompt cache is
+	// already cold. The log line waits for the selection so it can name the
+	// destination.
+	var coldMove *pool.ColdUnpin
+	if buffered {
+		if u, ok := h.pool.ReconsiderSticky(session, pool.ParseCacheSignals(body), time.Now()); ok {
+			coldMove = &u
+		}
+	}
+
 	tried := map[string]bool{}
 	recovered := map[string]bool{}
 	var acct *pool.Account
@@ -664,6 +675,12 @@ func (h *Handler) route(w http.ResponseWriter, r *http.Request) outcome {
 			// request already subscribed.
 			wake := h.pool.CapacitySignal()
 			acct = h.pool.SelectExcept(session, body, tried)
+			if coldMove != nil && acct != nil {
+				h.logger.Info("cache cold, sticky entry dropped",
+					"routing_key", hashSession(session), "trigger", coldMove.Trigger,
+					"from", coldMove.From, "to", acct.Name)
+				coldMove = nil
+			}
 			if acct == nil {
 				// §6.11: park until the soonest reset rather than failing,
 				// bounded by holdMax per request. Unconditional since issue
