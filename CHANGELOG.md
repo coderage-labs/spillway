@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/coderage-labs/spillway/compare/v0.30.1...v0.31.0) (2026-11-04)
+
+
+### Features
+
+* **pool:** re-route sticky conversation when cache is cold ([#267](https://github.com/coderage-labs/spillway/issues/267)) ([#268](https://github.com/coderage-labs/spillway/issues/268)) ([0fb9331](https://github.com/coderage-labs/spillway/commit/0fb9331a34b761c33dc0adef39e05eef12dc6b77))
+
 ## [0.30.1](https://github.com/coderage-labs/spillway/compare/v0.30.0...v0.30.1) (2026-11-02)
 
 
