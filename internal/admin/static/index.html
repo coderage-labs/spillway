@@ -447,10 +447,15 @@
             vector-effect: non-scaling-stroke; }
   /* Surface ring rather than a border: end dots overlap where series converge. */
   .enddot { stroke: var(--surface); stroke-width: 2; vector-effect: non-scaling-stroke; }
-  /* Leader line from the label to the series end. Eight end labels nudged
-     apart detach from their lines and read as noise; the connector is what
-     re-attaches them. */
-  .lead { fill: none; stroke-width: 1; opacity: .55; vector-effect: non-scaling-stroke; }
+  /* Leader line from a nudged label back to where its series ends. It is
+     annotation, not data: muted ink, dashed, faint. In the series hue (#270) a
+     stack of them at "now" read as every series jumping at once. The series
+     is identified by its end dot and the legend. */
+  .lead { fill: none; stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 2 3;
+          opacity: .35; vector-effect: non-scaling-stroke; }
+  /* A grouped label is the one focusable thing in the plot: its names are in
+     the native <title> tooltip, and keyboard focus gets the global ring. */
+  .lblgrp { cursor: default; }
   /* Ink, never the series hue. Three of the eight light-mode slots sit under
      3:1 on white and are illegible as text; identity comes from the dot and
      the leader line beside the label. */
@@ -1032,15 +1037,43 @@ function plotWindow(svg, win, list) {
       "data-account": s.account, "data-window": s.window }));
     const lx = x(s.ts[s.ts.length - 1]), ly = y(s.headroom[s.headroom.length - 1]);
     svg.appendChild(el("circle", { cx: lx, cy: ly, r: 4, fill: colour, class: "enddot" }));
-    if (!spent) labels.push({ x: FW - FR + 8, y: ly, anchor: { x: lx, y: ly }, colour,
-                              text: clip(short(s.account), 9) });
+    if (!spent) labels.push({ x: FW - FR + 8, y: ly, anchor: { x: lx, y: ly },
+                              name: s.account, pct: Math.round(s.headroom[s.headroom.length - 1] * 100) });
+  }
+
+  // Series that end together get ONE label (#270). Ten accounts spent to 0%
+  // used to stack ten labels up the right edge, each with a leader back to the
+  // floor. Consecutive ends (sorted by height) join a group when they display
+  // the same percentage or sit within a few px of the previous one.
+  labels.sort((a, b) => a.y - b.y);
+  const GROUP_PX = 4;
+  const groups = [];
+  for (const l of labels) {
+    const g = groups[groups.length - 1];
+    if (g && (g.items[g.items.length - 1].pct === l.pct ||
+              l.anchor.y - g.items[g.items.length - 1].anchor.y < GROUP_PX)) g.items.push(l);
+    else groups.push({ items: [l] });
+  }
+  labels.length = 0;
+  for (const g of groups) {
+    const n = g.items.length;
+    const ay = g.items.reduce((a, l) => a + l.anchor.y, 0) / n;
+    const lo = Math.min(...g.items.map(l => l.pct)), hi = Math.max(...g.items.map(l => l.pct));
+    labels.push({ x: g.items[0].x, y: ay, anchor: { x: g.items[0].anchor.x, y: ay },
+      // "N at P%" and not "names +N" or "N accounts": the gutter fits about
+      // eleven characters, and the names are one hover or focus away. Ends
+      // within a few px chain into one group, so a crowd can span several
+      // points: say the range ("9 · 29–39%") rather than a mean that no
+      // member actually shows.
+      text: n === 1 ? clip(short(g.items[0].name), 9)
+        : lo === hi ? n + " at " + lo + "%" : n + " \u00b7 " + lo + "\u2013" + hi + "%",
+      names: n === 1 ? null : g.items.map(l => short(l.name) + " " + l.pct + "%") });
   }
 
   if (labels.length) {
     // Series ends cluster; nudge the labels apart so none is unreadable, and
     // never at the cost of one rendering outside the plot (spillway#75).
-    labels.sort((a, b) => a.y - b.y);
-    const GAP = 13, MIN_GAP = 9, top = FT, bottom = FH - FB;
+    const GAP = 13, MIN_GAP = 9, LEAD_MIN = 4, top = FT, bottom = FH - FB;
     let shown = labels;
     if (!packLabels(shown, GAP, top, bottom)) {
       // Doesn't fit even ideally spaced at the normal gap: tighten first...
@@ -1067,13 +1100,22 @@ function plotWindow(svg, win, list) {
     // renders outside the plot.
     for (const l of shown) l.y = Math.min(bottom, Math.max(top, l.y));
     for (const l of shown) {
-      // Leader line first, so the label sits over it. A nudged label has left
-      // its series; this is what says which one it belongs to, and it carries
-      // the colour so the text does not have to.
-      svg.appendChild(el("path", { class: "lead", stroke: l.colour,
-        d: "M " + l.anchor.x.toFixed(1) + " " + l.anchor.y.toFixed(1) +
-           " L " + (l.x - 3).toFixed(1) + " " + l.y.toFixed(1) }));
-      svg.appendChild(el("text", { x: l.x, y: l.y + 3, class: "lbl" }, l.text));
+      // Leader line first, so the label sits over it, and only for a label
+      // that was actually moved: an unmoved one is already beside its line.
+      if (Math.abs(l.y - l.anchor.y) > LEAD_MIN) {
+        svg.appendChild(el("path", { class: "lead",
+          d: "M " + l.anchor.x.toFixed(1) + " " + l.anchor.y.toFixed(1) +
+             " L " + (l.x - 3).toFixed(1) + " " + l.y.toFixed(1) }));
+      }
+      const txt = el("text", { x: l.x, y: l.y + 3, class: "lbl" }, l.text);
+      if (!l.names) { svg.appendChild(txt); continue; }
+      // Grouped: every name in a native <title> tooltip (the same mechanism
+      // the tank names and refill rings use), focusable for keyboard users.
+      const grp = el("g", { class: "lblgrp", tabindex: "0", role: "img",
+        "aria-label": l.names.join(", ") });
+      grp.appendChild(el("title", {}, l.names.join("\n")));
+      grp.appendChild(txt);
+      svg.appendChild(grp);
     }
   }
 

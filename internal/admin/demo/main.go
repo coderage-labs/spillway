@@ -39,6 +39,7 @@ import (
 func main() {
 	hold := flag.Bool("hold", false, "serve the dry-pool / hold-banner state instead of the healthy one")
 	buckets := flag.Bool("buckets", false, "add a spent and an auth-failed account so every tank-filter bucket (#254) has a tank")
+	crowd := flag.Bool("crowd", false, "add nine accounts spent to 0% on 7d with clustered 7d-fable and 5h readings (#270 end-label grouping)")
 	flag.Parse()
 
 	now := time.Now()
@@ -48,6 +49,10 @@ func main() {
 	if *buckets {
 		spent, dead = buildBucketAccounts(now)
 		accounts = append(accounts, spent, dead)
+	}
+
+	if *crowd {
+		accounts = append(accounts, buildCrowdAccounts(now)...)
 	}
 
 	var ultra *pool.Account
@@ -113,6 +118,29 @@ func main() {
 
 	log.Printf("demo: serving %s pool on http://127.0.0.1:7699", map[bool]string{true: "hold", false: "healthy"}[*hold])
 	log.Fatal(http.ListenAndServe("127.0.0.1:7699", srv))
+}
+
+// buildCrowdAccounts returns nine extra accounts shaped like the live pool of
+// 2026-11-09 (#270): 7d spent to 0% headroom, 7d-fable readings clustered
+// within a couple of points of each other, 5h spread out. Before end labels
+// were grouped, this stacked a dozen labels up the right edge with a leader
+// each, which read as every series jumping at "now".
+func buildCrowdAccounts(now time.Time) []*pool.Account {
+	names := []string{"hit", "csno", "mwin", "arena", "kite", "orca", "pike", "reef", "tern"}
+	out := make([]*pool.Account, 0, len(names))
+	for i, n := range names {
+		a := pool.NewAccount("you@"+n+".example", pool.SourceYAML, "t", "", 0, "")
+		a.Type = "claude-oauth"
+		a.SetLabel(n)
+		a.SetPriority(10 + i)
+		a.SetQuotaWindows([]pool.QuotaWindow{
+			{Name: "5h", Limit: 1, Used: 0.1 + 0.09*float64(i), Source: "headers", ResetAt: now.Add(time.Duration(40+i*20) * time.Minute), FetchedAt: now},
+			{Name: "7d", Limit: 1, Used: 1, Source: "headers", ResetAt: now.Add(2*24*time.Hour + time.Duration(i)*time.Hour), FetchedAt: now},
+			{Name: "7d-fable", Limit: 1, Used: 0.62 + 0.012*float64(i), Source: "headers", ResetAt: now.Add(3*24*time.Hour + time.Duration(i)*time.Hour), FetchedAt: now},
+		})
+		out = append(out, a)
+	}
+	return out
 }
 
 // buildBucketAccounts returns the two extra tanks -buckets adds: one fully
