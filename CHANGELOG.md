@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.31.1](https://github.com/coderage-labs/spillway/compare/v0.31.0...v0.31.1) (2026-11-09)
+
+
+### Fixes
+
+* **admin:** group coinciding headroom end labels, mute leaders ([#270](https://github.com/coderage-labs/spillway/issues/270)) ([#271](https://github.com/coderage-labs/spillway/issues/271)) ([2f286ac](https://github.com/coderage-labs/spillway/commit/2f286acc6d1d103866b97e391fb3bfe0de388b41))
+* **deps:** bump andybalholm/brotli to v1.2.7 (GO-2026-6888) ([#272](https://github.com/coderage-labs/spillway/issues/272)) ([441f5a1](https://github.com/coderage-labs/spillway/commit/441f5a1161c48ac372e7cc0b95ea48bc4b2ce22f))
+
 ## [0.31.0](https://github.com/coderage-labs/spillway/compare/v0.30.1...v0.31.0) (2026-11-04)
 
 
