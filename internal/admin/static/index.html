@@ -1058,11 +1058,15 @@ function plotWindow(svg, win, list) {
   for (const g of groups) {
     const n = g.items.length;
     const ay = g.items.reduce((a, l) => a + l.anchor.y, 0) / n;
-    const pct = Math.round(g.items.reduce((a, l) => a + l.pct, 0) / n);
+    const lo = Math.min(...g.items.map(l => l.pct)), hi = Math.max(...g.items.map(l => l.pct));
     labels.push({ x: g.items[0].x, y: ay, anchor: { x: g.items[0].anchor.x, y: ay },
       // "N at P%" and not "names +N" or "N accounts": the gutter fits about
-      // eleven characters, and the names are one hover or focus away.
-      text: n === 1 ? clip(short(g.items[0].name), 9) : n + " at " + pct + "%",
+      // eleven characters, and the names are one hover or focus away. Ends
+      // within a few px chain into one group, so a crowd can span several
+      // points: say the range ("9 · 29–39%") rather than a mean that no
+      // member actually shows.
+      text: n === 1 ? clip(short(g.items[0].name), 9)
+        : lo === hi ? n + " at " + lo + "%" : n + " \u00b7 " + lo + "\u2013" + hi + "%",
       names: n === 1 ? null : g.items.map(l => short(l.name) + " " + l.pct + "%") });
   }
 

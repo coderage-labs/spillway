@@ -1466,6 +1466,15 @@ async function run() {
     ok['#270 a label that had to move still gets a leader'] =
       findAllIn(svg2, '.lbl').length === 2 && leads2.length >= 1 &&
       leads2.every(p => p.getAttribute('stroke') === undefined);
+
+    // Ends a pixel or two apart chain into one group across several points;
+    // the label says the range, not a mean no member shows.
+    const chain = [0.29, 0.30, 0.31, 0.32, 0.33].map((v, i) => mk('you@c' + i + '.example', v, v));
+    const svg3 = document.createElementNS('', 'svg');
+    __page.plotWindow(svg3, '7d', chain);
+    const lbls3 = findAllIn(svg3, '.lbl').map(t => t.textContent);
+    ok['#270 a chained group spanning several points shows its range'] =
+      lbls3.length === 1 && lbls3[0] === '5 \u00b7 29\u201333%';
   }
 
   ok['the harness ran to completion'] = true;
