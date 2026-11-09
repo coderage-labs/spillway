@@ -465,7 +465,7 @@ global.localStorage = {
 // setInterval) — except buildSettings, which a test re-runs with a payload
 // the fixture cannot express. Published explicitly rather than by relaxing
 // the page's own strictness.
-eval(js + '\n;global.__page = { buildSettings, loadTankFilter, renderHold };');
+eval(js + '\n;global.__page = { buildSettings, loadTankFilter, renderHold, plotWindow };');
 
 // Results live out here, and every exit path prints them. A throw used to
 // take the whole run with it, so a missing element crashed the harness
@@ -818,9 +818,16 @@ async function run() {
   const fiveLeads = fiveFacet ? findAllIn(fiveFacet, '.lead') : [];
   ok['direct labels are ink, never the series hue'] =
     fiveLbls.length > 0 && fiveLbls.every(t => !t.getAttribute('fill'));
-  ok['every direct label has a coloured leader back to its line'] =
-    fiveLbls.length > 0 && fiveLeads.length === fiveLbls.length &&
-    fiveLeads.every(p => isSlot(p.getAttribute('stroke')));
+  // Leaders are annotation, not data (#270): no series hue on any of them (the
+  // colour comes from the stylesheet, in muted ink), and one only where a
+  // label was actually moved off its anchor.
+  ok['leaders carry no series colour of their own'] =
+    fiveLeads.every(p => p.getAttribute('stroke') === undefined);
+  ok['the leader style is muted ink, dashed and faint -- not a series slot'] = (() => {
+    const m = /\.lead\s*\{([^}]*)\}/.exec(css);
+    return !!m && /stroke:\s*var\(--ink-2\)/.test(m[1]) && /stroke-dasharray/.test(m[1]) &&
+      /opacity:\s*\.[0-4]\d*\b/.test(m[1]) && !/series/.test(m[1]);
+  })();
 
   // A legend is mandatory past a few series, and it is the dependable channel
   // here: the direct labels are clipped to nine characters, the legend is not.
@@ -1419,6 +1426,46 @@ async function run() {
     ok['#259 a ready daemon clears the banner'] = hold.hidden === true;
     __page.renderHold(null);
     ok['#259 a failed state fetch leaves the banner hidden'] = hold.hidden === true;
+  }
+
+  // Issue #270: thirteen accounts, ten spent to 0% on one window. One grouped
+  // label, not ten stacked up the right edge with ten leaders back to the floor.
+  {
+    const SPAN = [now - 3600e3, now - 60e3];
+    const mk = (account, a, b) => ({ account, window: '7d', ts: SPAN, headroom: [a, b] });
+    const spentNames = Array.from({ length: 10 }, (_, i) => 'you@spent' + i + '.example');
+    const crowd = [
+      ...spentNames.map(n => mk(n, 0, 0)),
+      mk('you@high.example', 0.95, 0.9), mk('you@mid.example', 0.6, 0.55), mk('you@low.example', 0.3, 0.3),
+    ];
+    const svg = document.createElementNS('', 'svg');
+    __page.plotWindow(svg, '7d', crowd);
+    const lbls = findAllIn(svg, '.lbl');
+    const grp = findAllIn(svg, '.lblgrp');
+    const leads = findAllIn(svg, '.lead');
+    ok['#270 ten series ending at 0 produce one grouped label, not ten'] =
+      lbls.length === 4 && lbls.filter(t => /^10 at 0%$/.test(t.textContent)).length === 1;
+    ok['#270 the grouped label lists every name on hover and focus'] = (() => {
+      if (grp.length !== 1) return false;
+      const g = grp[0], title = findIn(g, 'title');
+      const tip = title ? title.textContent : '';
+      return g.getAttribute('tabindex') === '0' && !!findIn(g, '.lbl') &&
+        spentNames.every((_, i) => tip.includes('spent' + i + ' 0%'));
+    })();
+    ok['#270 an unmoved label draws no leader'] = leads.length === 0;
+    ok['#270 labels stay inside the plot (#75)'] = lbls.every(t => {
+      const y = parseFloat(t.getAttribute('y')); return y >= 12 && y <= 300 - 20 + 3;
+    });
+
+    // A moved label still gets one, in no series colour: two ends 8px apart,
+    // different percentages, so they are not grouped but must be pushed apart.
+    const close = [mk('you@aa.example', 0.5, 0.5), mk('you@bb.example', 0.53, 0.53)];
+    const svg2 = document.createElementNS('', 'svg');
+    __page.plotWindow(svg2, '7d', close);
+    const leads2 = findAllIn(svg2, '.lead');
+    ok['#270 a label that had to move still gets a leader'] =
+      findAllIn(svg2, '.lbl').length === 2 && leads2.length >= 1 &&
+      leads2.every(p => p.getAttribute('stroke') === undefined);
   }
 
   ok['the harness ran to completion'] = true;
